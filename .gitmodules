@@ -1,0 +1,19 @@
+[submodule "3rdparty/flashinfer"]
+	path = 3rdparty/flashinfer
+	url = https://github.com/happierpig/flashinfer-ai.git
+
+[submodule "3rdparty/nvbench"]
+	path = 3rdparty/nvbench
+	url = https://github.com/NVIDIA/nvbench.git
+[submodule "3rdparty/gtest"]
+	path = 3rdparty/gtest
+	url = https://github.com/google/googletest.git
+[submodule "3rdparty/mscclpp"]
+	path = 3rdparty/mscclpp
+	url = https://github.com/microsoft/mscclpp.git
+[submodule "3rdparty/spdlog"]
+	path = 3rdparty/spdlog
+	url = https://github.com/gabime/spdlog.git
+[submodule "3rdparty/cutlass"]
+	path = 3rdparty/cutlass
+	url = https://github.com/NVIDIA/cutlass.git

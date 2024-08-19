@@ -1,0 +1,13 @@
+For Runpod (i.e., docker), it does not allow rlimit.
+diff --git a/src/bootstrap/bootstrap.cc b/src/bootstrap/bootstrap.cc
+index c9cea10..ed3e956 100644
+--- a/src/bootstrap/bootstrap.cc
++++ b/src/bootstrap/bootstrap.cc
+@@ -278,7 +278,6 @@ void TcpBootstrap::Impl::bootstrapRoot() {
+ 
+   std::memset(rankAddresses.data(), 0, sizeof(SocketAddress) * nRanks_);
+   std::memset(rankAddressesRoot.data(), 0, sizeof(SocketAddress) * nRanks_);
+-  setFilesLimit();
+ 
+   TRACE(MSCCLPP_INIT, "BEGIN");
+   /* Receive addresses from all ranks */

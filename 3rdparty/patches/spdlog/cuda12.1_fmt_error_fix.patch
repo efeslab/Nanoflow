@@ -1,0 +1,17 @@
+fmt upstream repo fixed this issue (https://github.com/fmtlib/fmt/pull/1818).
+But spdlog hasn't updated fmt for years (https://github.com/gabime/spdlog/issues/1662)
+Observed to impact cuda 12.1 but not 12.4
+diff --git a/include/spdlog/fmt/bundled/core.h b/include/spdlog/fmt/bundled/core.h
+index b51c1406..27b8c3f6 100644
+--- a/include/spdlog/fmt/bundled/core.h
++++ b/include/spdlog/fmt/bundled/core.h
+@@ -241,7 +241,7 @@
+ #  if defined(__cpp_nontype_template_args) &&                  \
+       ((FMT_GCC_VERSION >= 903 && FMT_CPLUSPLUS >= 201709L) || \
+        __cpp_nontype_template_args >= 201911L) &&              \
+-      !defined(__NVCOMPILER) && !defined(__LCC__)
++      !defined(__NVCOMPILER) && !defined(__LCC__) && !defined(__NVCC__)
+ #    define FMT_USE_NONTYPE_TEMPLATE_ARGS 1
+ #  else
+ #    define FMT_USE_NONTYPE_TEMPLATE_ARGS 0
+

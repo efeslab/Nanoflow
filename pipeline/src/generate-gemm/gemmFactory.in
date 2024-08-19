@@ -1,0 +1,16 @@
+#include "gemmFactory.cuh"
+
+#include <unordered_map>
+
+#include "cutlassGemmExternDeclearation.cuh"
+
+std::unordered_map<std::string, BaseGEMMWrapper*(*)()> GEMMGenMap = {
+@map_entries@
+};
+BaseGEMMWrapper* generateGEMM(std::string tag) {
+  auto it = GEMMGenMap.find(tag);
+  if (it == GEMMGenMap.end())
+    return nullptr;
+  else
+    return it->second();
+}
