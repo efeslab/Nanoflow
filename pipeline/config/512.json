@@ -1,0 +1,20 @@
+{
+  "gemm_op_tag": [
+      "128_128_32_64_64_32_2_4_ColumnMajor_RowMajor_ColumnMajor",
+      "128_128_32_64_64_32_3_4_ColumnMajor_RowMajor_ColumnMajor",
+      "128_128_32_64_64_32_5_4_ColumnMajor_RowMajor_RowMajor",
+      "128_128_32_64_64_32_3_4_ColumnMajor_RowMajor_RowMajor",
+      "128_128_32_64_64_32_5_4_ColumnMajor_RowMajor_RowMajor",
+      "128_128_32_64_64_32_3_4_ColumnMajor_RowMajor_RowMajor",
+      "64_64_64_32_32_64_2_5_RowMajor_RowMajor_RowMajor",
+      "64_128_64_32_64_64_3_3_ColumnMajor_ColumnMajor_RowMajor",
+      "64_128_64_32_64_64_3_3_ColumnMajor_ColumnMajor_RowMajor",
+      "64_128_64_32_64_64_3_3_ColumnMajor_ColumnMajor_RowMajor",
+      "128_128_32_64_64_32_5_4_ColumnMajor_RowMajor_RowMajor",
+      "128_128_32_64_64_32_5_4_ColumnMajor_RowMajor_RowMajor"
+  ],
+  "global_batch_size": 512,
+  "nanobatch_1_size": 256,
+  "kqv1_size": 128,
+  "kqv3_size": 128
+}

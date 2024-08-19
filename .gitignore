@@ -31,4 +31,4 @@ compute-bound/src/generated/
 *.stat
 trace_processor
 *.tar.gz
-!compute-bound/config/*
+!pipeline/config/*
