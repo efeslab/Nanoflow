@@ -1,8 +1,9 @@
 import sys
 
-prompt = input("Enter the prompt: ")
-decode_len = int(input("Enter the decode length: "))
-request_rate = int(input("Enter the request rate: "))
+prompt = sys.argv[1]
+decode_len = int(sys.argv[2])
+request_rate = int(sys.argv[3])
+output_name = sys.argv[4]
 prefill_len = -1
 
 # get first word of prompt
@@ -13,6 +14,6 @@ if request_rate == 0:
 else:
     request_interval = 1 / request_rate
 
-with open(f"{first_word}-{decode_len}-{request_rate}.csv", 'w') as f:
+with open(f"{output_name}", "w") as f:
     for i in range(10000):
         f.write(f"{i},{prefill_len},{decode_len},{request_interval*i}, {prompt}\n")

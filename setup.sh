@@ -39,7 +39,7 @@ if [[ ! -f "$NSIGHT" ]]; then
   dpkg -i ./$NSIGHT
 fi
 
-cd pllm
+cd Nanoflow
 
 # build mscclpp
 cd 3rdparty/mscclpp
@@ -58,7 +58,7 @@ for repo in spdlog; do
 done
 
 
-cd compute-bound
+cd pipeline
 
 # download and trace visualizer
 cd utils

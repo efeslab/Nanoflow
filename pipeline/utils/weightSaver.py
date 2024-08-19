@@ -1,7 +1,5 @@
 import safetensors
 import sys
-sys.path.append('../build')
-import pllm_python
 import torch
 import os
 import tqdm
@@ -64,9 +62,10 @@ tensor_save_list = []
 
 num_layers = 80
         
-def save_weights( nranks, vnranks, model_path = '/code/hf/hub/models--meta-llama--Llama-2-70b-chat-hf/snapshots/e9149a12809580e8602995856f8098ce973d1080/'):
+def save_weights( nranks, vnranks, hf_home = '/code/hf'):
     tensor_saved = []
     model_weights = []
+    model_path = hf_home + '/hub/models--meta-llama--Llama-2-70b-chat-hf/snapshots/e9149a12809580e8602995856f8098ce973d1080/'
 
     original_tensors = load_tensors(model_path)
     
@@ -118,5 +117,5 @@ def save_weights( nranks, vnranks, model_path = '/code/hf/hub/models--meta-llama
 
  
 if __name__ == "__main__":
-    
-   save_weights(8,8)
+    hf_home = sys.argv[1]
+    save_weights(8,8, hf_home)
