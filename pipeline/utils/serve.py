@@ -22,7 +22,7 @@ pipetype = pllm_python.PipelineType.PLLM
 torch.set_printoptions(threshold=4000)
 from weightLoader import load_weights
 import logging
-os.environ['HF_HOME'] = '/code/hf'
+
 from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaModel, LlamaForCausalLM
 
 logging.basicConfig(level=logging.INFO, filename='serve.log', filemode='w')
@@ -521,7 +521,7 @@ if __name__ == "__main__":
     with open(out_name, 'w') as f:
 
         for req in all_processed_request_list:
-            f.write(f"{req.prompt.tolist()+req.output}\n")
+            # f.write(f"{req.prompt.tolist()+req.output}\n")
             f.write(f"{tokenizer.decode(req.prompt.tolist()+req.output, skip_special_tokens=True)}\n")
 
     

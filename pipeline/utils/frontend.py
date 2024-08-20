@@ -1,6 +1,5 @@
 import sys
 import os
-os.environ['HF_HOME'] = '/code/hf'
 from request_info import NewRequestInfo, NewRequestQueue, FlyRequestInfo
 from transformers import AutoTokenizer
 

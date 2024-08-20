@@ -9,8 +9,8 @@ docker run --gpus all --net=host --privileged -v /dev/shm:/dev/shm --name nanofl
 
 ### Install dependencies
 ```bash
-git clone https://github.com/serendipity-zk/pllm.git
-cd pllm
+git clone https://github.com/serendipity-zk/Nanoflow.git
+cd Nanoflow
 chmod +x ./installAnaconda.sh
 ./installAnaconda.sh
 # restart the terminal

@@ -1,3 +1,11 @@
+current_dir=$(pwd)
+parentdir="$(dirname "$current_dir")"
+mkdir -p $parentdir/hf
+
+export HF_HOME=$parentdir/hf
+
+huggingface-cli login
+
 cd pipeline/utils
 read -e -p "Prompt [default: The University of Washington is]: " -i "The University of Washington is located" prompt
 read -e -p "Decode length [default: 100]: " -i "100" decode_length

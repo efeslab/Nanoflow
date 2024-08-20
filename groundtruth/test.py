@@ -1,8 +1,8 @@
 
 import os
+import sys
 
 # Set the HF_HOME environment variable
-os.environ['HF_HOME'] = '/code/hf'
 from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaModel, LlamaForCausalLM
 import torch
 # import torch
