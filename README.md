@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./figures/NanoflowLogo.png" alt="Image description" width="300">
+  <img src="./figures/NanoflowLogo.png" alt="Image description" width="500">
 </p>
 
 Nanoflow is a throughput oriented large language model serving framework that overlaps the compute-, memory-, network-bound operations in LLM serving to achieve high GPU utilization. This codebase contains the core pipeline construction and an example serving frontend.  
