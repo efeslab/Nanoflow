@@ -48,4 +48,7 @@ yes | ./setup.sh
 ![Nanoflow](./figures/OfflineThroughput.png)
 
 
+## Acknowledgement
+NanoFlow is inspired and reused code from the following projects: [Cutlass](https://github.com/NVIDIA/cutlass), [FlashInfer](https://github.com/flashinfer-ai/flashinfer), and [MSCCL++](https://github.com/microsoft/mscclpp). Development of NanoFlow is made easy thanks to these tools: [GoogleTest](https://github.com/google/googletest), [NVBench](https://github.com/NVIDIA/nvbench), and [spdlog](https://github.com/gabime/spdlog).
+
 ## Reference
