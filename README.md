@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./figures/NanoflowLogo.png" alt="Image description" width="300">
+  <img src="./figures/NanoflowLogo.png" alt="Image description" width="500">
 </p>
 
 Nanoflow is a throughput oriented large language model serving framework that overlaps the compute-, memory-, network-bound operations in LLM serving to achieve high GPU utilization. This codebase contains the core pipeline construction and an example serving frontend.  
@@ -50,5 +50,8 @@ yes | ./setup.sh
 ## Evaluation Results
 ![Nanoflow](./figures/OfflineThroughput.png)
 
+
+## Acknowledgement
+NanoFlow is inspired and reused code from the following projects: [Cutlass](https://github.com/NVIDIA/cutlass), [FlashInfer](https://github.com/flashinfer-ai/flashinfer), and [MSCCL++](https://github.com/microsoft/mscclpp). Development of NanoFlow is made easy thanks to these tools: [GoogleTest](https://github.com/google/googletest), [NVBench](https://github.com/NVIDIA/nvbench), and [spdlog](https://github.com/gabime/spdlog).
 
 ## Reference
