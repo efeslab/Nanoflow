@@ -29,7 +29,7 @@ NanoFlow is a LLM serving framework designed for high throughput.
 NanoFlow exploits **intra-device parallelism**: 
 - Overlapping the usage of compute, memory, and network within a single device through operation co-scheduling. 
 
-### Key System Design Inniovations
+### Key System Design Innovations
 
 To exploit intra-device parallelism, NanoFlow introduces two key innovations: 
 1. **Nano-batching**: NanoFlow splits requests at the granularity of operations to break the dependency of sequential operations in LLM inference and to enable operation overlapping.
