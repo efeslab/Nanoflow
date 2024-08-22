@@ -45,7 +45,7 @@ We implement NanoFlow on NVIDIA GPUs and evaluate end-to-end serving throughput 
  - LLaMA-2-70B
  - Mixtral 8×7B (MoE)
  - LLaMA-3-8B
- - and [more](TODO).
+ - and [more](#supported-models).
 
 NanoFlow achieves **68.5%** of [optimal throughput](TODO). With practical workloads including offline and online benchmarks, NanoFlow provides **1.91×** throughput boost compared to state-of-the-art serving systems and achieve **59%** to **72%** of optimal throughput across ported models.
 
@@ -81,11 +81,21 @@ yes | ./setup.sh
 ```bash
 ./serve.sh
 ```
+
+Sample output (each line corresponds to a user request):
 ![Nanoflow](./figures/SampleOutput.png)
 
+## Supported Models
+
+ - LLaMA-2-70B / LLaMA-3-70B
+ - LLaMA-3-8B
+ - Mixtral 8×7B
 
 ## Evaluation Results
 ![Nanoflow](./figures/OfflineThroughput.png)
+
+
+## Citation
 
 
 ## Acknowledgement
