@@ -2,11 +2,7 @@
   <img src="./figures/NanoflowLogo.png" alt="Image description" width="500">
 </p>
 
-<center>
-
 [[Paper](https://github.com/efeslab/Nanoflow)] [[Slides](https://github.com/efeslab/Nanoflow)]
-
-</center>
 
 # Introduction
 
