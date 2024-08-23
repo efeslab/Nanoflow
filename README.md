@@ -2,31 +2,35 @@
   <img src="./figures/NanoflowLogo.png" alt="Image description" width="500">
 </p>
 
-[[Paper](https://github.com/efeslab/Nanoflow)] [[Slides](https://github.com/efeslab/Nanoflow)]
+<p align="center">
+  <a href="https://github.com/efeslab/Nanoflow">Paper</a> | <a href="https://github.com/efeslab/Nanoflow">Slides</a>
+</p>
+
 
 # Introduction
 
 NanoFlow is a throughput-oriented high-performance serving framework for LLMs. With key techniques including *intra-device parallelism, asynchronous CPU scheduling, and SSD offloading*, NanoFlow consistently delivers superior throughput compared to vLLM, Deepspeed-FastGen, and TensorRT-LLM. Comprehensive evaluations, ranging from Llama2-70B, Qwen2-72B, DeepSeek-67B, Mixtral-8x7B, and LLaMA3-8B on a 8xA100 80GB DGX node, show that **NanoFlow achieves up to 1.91x throughput boost compared to TensorRT-LLM.**
 
-<figure style="text-align: center;">
-  <img src="./figures/SystemDesign.png" alt="system design" style="width: 90%;">
-  <figcaption>Overview of NanoFlow's key components</figcaption>
-</figure>
+
+<p align="center">
+  <img src="./figures/SystemDesign.png" alt="system design" width="90%">
+</p>
+<p align="center"><em>Overview of NanoFlow's key components</em></p>
 
 The key insight behinds NanoFlow is that traditional pipeline design of exisiting frameworks under-utilizes hardware resources due to the sequential execution of operations. Therefore, NanoFlow proposes intra-device parallelism (as shown in the following gif), which use nano-batches to schedule the compute-, memory-, network-bound operations for simultaneous execution. Such overlapping leaves compute-bound operations on the critical path and boost the resource utilization.
 
-
-<figure style="text-align: center;">
-  <img src="./figures/pipeline.gif" alt="intra-device parallelism" style="width: 90%;">
-  <figcaption>Illustration of intra-device parallelism</figcaption>
-</figure>
+<p align="center">
+  <img src="./figures/pipeline.gif" alt="system design" width="90%">
+</p>
+<p align="center"><em>Illustration of intra-device parallelism</em></p>
 
 With highly utilized GPU, the overhead of CPU, which consists of KV-Cache management, batch formation, and retired requests selection, takes significant part ($>10$%) of inference time. Therefore, NanoFlow adopts an asyncronous control flow as shown in the following figure. At any iteration $i$, NanoFlow makes batching decisions and allocates the KV-cache entries for the next iteration before the end of the current iteration. NanoFlow directly launches iteration $i + 1$ without detecting the end-of-sequence (EOS) tokens generated in iteration $i$ and retires completed requests at iteration $i+2$.
 
-<figure style="text-align: center;">
-  <img src="./figures/async-schedule.png" alt="intra-device parallelism" style="width: 90%;">
-  <figcaption>Explanation of asyncronous control flow scheduling</figcaption>
-</figure>
+
+<p align="center">
+  <img src="./figures/async-schedule.png" alt="system design" width="90%">
+</p>
+<p align="center"><em>Explanation of asyncronous control flow scheduling</em></p>
 
 To avoid recomputation and reuse the KV-Cache from multi-round conversations, NanoFlow eagerly offloads the KV-Cache of finished requests to SSDs. In one iteration, NanoFlow selects the KV-Cache of the retired requests and copies them to the host in parallel to the on-the-fly inference operations, via a layer-by-layer manner. Our calculation shows that only 5GB/s are needed for the offloading bandwidth of serving LLaMA2-70B, while a single SSD can reach 3GB/s. 
 
@@ -37,26 +41,26 @@ We list some of the primary benchmarks. Please check our paper for more details.
 ### Offline throughput: Llama2-70B on 8xA100 (80GB)
 We conduct offline througput in two settings: practical workloads from collected traces ([Splitwise](https://arxiv.org/abs/2311.18677), [LMSYS-Chat-1M](https://arxiv.org/abs/2309.11998), [ShareGPT](https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered)), and constant input/output length. NanoFlow consistently surpasses all the baselines.
 
-<figure style="text-align: center;">
-  <img src="./figures/OfflineThroughput.png" alt="Offline throughput benchmarks" style="width: 90%;">
-  <figcaption>Offline throughput benchmarks</figcaption>
-</figure>
+<p align="center">
+  <img src="./figures/OfflineThroughput.png" alt="system design" width="90%">
+</p>
+<p align="center"><em>Offline throughput benchmarks</em></p>
 
 ### Online latency: Llama2-70B on 8xA100 (80GB)
 We test the normalized latency (which is the end-to-end request latency divided by number of output tokens) with the three real-world traces and set different request rate (incoming requests per second). NanoFlow is able to sustain a higher request rate with low latency compared to baselines among all the datasets.
 
-<figure style="text-align: center;">
-  <img src="./figures/online-latency.png" alt="online latency benchmarks" style="width: 95%;">
-  <figcaption>Online latency benchmarks</figcaption>
-</figure>
+<p align="center">
+  <img src="./figures/online-latency.png" alt="system design" width="90%">
+</p>
+<p align="center"><em>Online latency benchmarks</em></p>
 
 ### Feasibility: offline throughput on different models
 We ported NanoFlow to 5 representative models to showcase its flexibility. We evaluate the offline throughput of NanoFlow (tokens per second per GPU) on these LLMs with constant length of input 1024 and output 512.
 
-<figure style="text-align: center;">
-  <img src="./figures/feasibility.png" alt="s" style="width: 90%;">
-  <figcaption>Offline throughput of NanoFlow on different models</figcaption>
-</figure>
+<p align="center">
+  <img src="./figures/feasibility.png" alt="system design" width="90%">
+</p>
+<p align="center"><em>Offline throughput of NanoFlow on different models</em></p>
 
 # Codebase
 ## Abstract
