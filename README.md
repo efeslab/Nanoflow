@@ -104,6 +104,20 @@ yes | ./setup.sh
 ## Evaluation Results
 ![Nanoflow](./figures/OfflineThroughput.png)
 
+## Citation
+
+If you use NanoFlow for your research, please cite our [paper](https://arxiv.org/abs/2408.12757):
+```bibtex
+@misc{zhu2024nanoflowoptimallargelanguage,
+      title={NanoFlow: Towards Optimal Large Language Model Serving Throughput}, 
+      author={Kan Zhu and Yilong Zhao and Liangyu Zhao and Gefei Zuo and Yile Gu and Dedong Xie and Yufei Gao and Qinyu Xu and Tian Tang and Zihao Ye and Keisuke Kamahori and Chien-Yu Lin and Stephanie Wang and Arvind Krishnamurthy and Baris Kasikci},
+      year={2024},
+      eprint={2408.12757},
+      archivePrefix={arXiv},
+      primaryClass={cs.DC},
+      url={https://arxiv.org/abs/2408.12757}, 
+}
+```
 
 ## Acknowledgement
 NanoFlow is inspired by and reuses code from the following projects: [CUTLASS](https://github.com/NVIDIA/cutlass), [FlashInfer](https://github.com/flashinfer-ai/flashinfer), [MSCCL++](https://github.com/microsoft/mscclpp), and [Punica](https://github.com/punica-ai/punica). Development of NanoFlow is made easier thanks to these tools: [GoogleTest](https://github.com/google/googletest), [NVBench](https://github.com/NVIDIA/nvbench), and [spdlog](https://github.com/gabime/spdlog). We thank Siqin Chen for her help in the design of NanoFlow logo.
