@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/efeslab/Nanoflow">Paper</a> | <a href="https://github.com/efeslab/Nanoflow">Slides</a>
+  <a href="https://arxiv.org/abs/2408.12757">Paper</a> | <a href="https://github.com/efeslab/Nanoflow">Slides</a>
 </p>
 
 
