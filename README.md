@@ -121,5 +121,3 @@ If you use NanoFlow for your research, please cite our [paper](https://arxiv.org
 
 ## Acknowledgement
 NanoFlow is inspired by and reuses code from the following projects: [CUTLASS](https://github.com/NVIDIA/cutlass), [FlashInfer](https://github.com/flashinfer-ai/flashinfer), [MSCCL++](https://github.com/microsoft/mscclpp), and [Punica](https://github.com/punica-ai/punica). Development of NanoFlow is made easier thanks to these tools: [GoogleTest](https://github.com/google/googletest), [NVBench](https://github.com/NVIDIA/nvbench), and [spdlog](https://github.com/gabime/spdlog). We thank Siqin Chen for her help in the design of NanoFlow logo.
-
-## Reference
