@@ -41,16 +41,11 @@ fi
 
 cd Nanoflow
 
-# build mscclpp
+# checkout mscclpp
 cd 3rdparty/mscclpp
 git reset --hard cdaf3aea3d767ba65dd3b08984d76bd50615f92e
 sed -i '256d' ./src/bootstrap/bootstrap.cc
-mkdir -p build
-cd build
-cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local/mscclpp -DBUILD_PYTHON_BINDINGS=OFF ..
-make -j mscclpp mscclpp_static
-make install/fast
-cd ../../../
+cd ../../
 
 # fix spdlog v1.14.0 + cuda 12.1 compatibility bug
 for repo in spdlog; do
