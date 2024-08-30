@@ -1,11 +1,13 @@
 from collections import deque
+from typing import List
+
 class NewRequestInfo:
     """
     Request info for incoming request
     NOTE (Yilong): add support for offloading / onloading KV-Cache
     """
     req_idx: int
-    prompt: list[int]
+    prompt: List[int]
     output_len : int
     start_time: float
 
@@ -36,7 +38,7 @@ class FlyRequestInfo:
     NOTE (Yilong): add support for offloading / onloading KV-Cache
     """
     
-    def __init__(self, req_idx: int, input: list[int], output: list[int], prompt: list[int], request_comein_time: float, 
+    def __init__(self, req_idx: int, input: List[int], output: List[int], prompt: List[int], request_comein_time: float, 
                  chunked_prefill: bool, kv_cache, encode_latency: float, 
                  decode_start_at: float, decode_latency: float, output_len: int, input_len: int):
         self.req_idx = req_idx

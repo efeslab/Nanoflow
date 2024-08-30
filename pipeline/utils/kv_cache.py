@@ -14,7 +14,7 @@ import torch
 from pybindUtil import toGPU, toGPUTensor
 from torch.profiler import profile, record_function, ProfilerActivity
 import time
-
+from typing import List
 
 
 class DistKVPool:
@@ -73,7 +73,7 @@ class DistKVCache:
     
     def __init__(self, pool: DistKVPool):
         self._pool = pool
-        self._indices : list[int] = []
+        self._indices : List[int] = []
         self._seqlen : int = 0
     
     @property
@@ -81,7 +81,7 @@ class DistKVCache:
         return self._seqlen
     
     @property
-    def indicies(self) -> list[int]:
+    def indicies(self) -> List[int]:
         return self._indices
     
     @property
@@ -116,11 +116,11 @@ class BatchedDistKVCache():
         """
         # batch_size = len(decode_kvs) + len(prefill_kvs)
         # [batch_size + 1,]
-        self._kv_indptr : list[int] = [0]
+        self._kv_indptr : List[int] = [0]
         # [num_pages_in_total, ]
-        self._kv_indices : list[int] = []
+        self._kv_indices : List[int] = []
         # [batch_size, ]
-        self._kv_last_page_len : list[int] = []
+        self._kv_last_page_len : List[int] = []
         
         # Here we do not materialize data into specific devices,
         # for distributed assignment.

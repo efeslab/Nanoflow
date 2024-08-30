@@ -3,6 +3,7 @@ import time
 import numpy as np
 import pllm_python
 from torch.profiler import profile, record_function, ProfilerActivity
+from typing import List
 
 def toGPU(data, nranks, dtype, non_blocking=True):
     
@@ -88,8 +89,8 @@ def initUpdateData(
         kv_last_page_len: int,
         rev_input_indptr: int,
         per_token_offset: int,
-        gemv_batch_size: list[int],
-        gemv_block_num: list[int] ) -> list[pllm_python.VortexUpdateData]:
+        gemv_batch_size: List[int],
+        gemv_block_num: List[int] ) -> List[pllm_python.VortexUpdateData]:
     updateDataList = []
     gemv_batch_size = np.array(gemv_batch_size, dtype=np.int32)
     gemv_block_num = np.array(gemv_block_num, dtype=np.int32)

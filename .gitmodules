@@ -1,7 +1,6 @@
 [submodule "3rdparty/flashinfer"]
 	path = 3rdparty/flashinfer
 	url = https://github.com/happierpig/flashinfer-ai.git
-
 [submodule "3rdparty/nvbench"]
 	path = 3rdparty/nvbench
 	url = https://github.com/NVIDIA/nvbench.git

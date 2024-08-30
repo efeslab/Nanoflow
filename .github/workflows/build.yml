@@ -1,0 +1,150 @@
+name: Build
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - v*
+  workflow_dispatch:
+
+jobs:
+  build_cu121:
+    name: Build Shared Library (CUDA 12.1)
+    runs-on: ubuntu-latest
+    container:
+      image: pytorch/manylinux2_28-builder:cuda12.1
+
+    # see https://github.com/pytorch/pytorch/blob/main/RELEASE.md#release-compatibility-matrix
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.7", "3.8", "3.9", "3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Environments
+        run: |
+          echo "PYTHON_VERSION=$(python3 -c "from os import environ as env; print({'3.7': 'cp37-cp37m', '3.8': 'cp38-cp38', '3.9': 'cp39-cp39', '3.10': 'cp310-cp310', '3.11': 'cp311-cp311', '3.12': 'cp312-cp312' }['${{ matrix.python-version }}'])")" >> $GITHUB_ENV
+          echo "PATH=$PATH" >> $GITHUB_ENV
+
+      - name: Set up Packages
+        env:
+          PYBIN: /opt/python/${{ env.PYTHON_VERSION }}/bin
+        run: |
+          dnf -y install epel-release && dnf upgrade
+          dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo && dnf makecache
+          dnf module install -y nvidia-driver:latest && dnf clean all
+          yum install -y pigz clang-tools-extra openmpi openmpi-devel spdlog spdlog-devel libibverbs rdma-core-devel numactl numactl-devel numactl-libs
+          pwd && ls -la
+          sed -i '256d' 3rdparty/mscclpp/src/bootstrap/bootstrap.cc
+          cat 3rdparty/patches/spdlog/*.patch | patch -p1 -d 3rdparty/spdlog
+          $PYBIN/pip install cmake mypy pybind11 black
+          cd pipeline/src/generate-gemm && $PYBIN/python genGEMM.py && cd ../../
+      
+      - name: Build Library
+        env:
+          PATH: ${{ env.PATH }}:/usr/lib64/openmpi/bin
+          PYBIN: /opt/python/${{ env.PYTHON_VERSION }}/bin
+          PREFIX: /opt/python/${{ env.PYTHON_VERSION }};/usr/lib64/openmpi
+          pybind11_DIR: /opt/python/${{ env.PYTHON_VERSION }}/lib/python${{ matrix.python-version }}/site-packages/pybind11
+          CUDACXX: "/usr/local/cuda-12.1/bin/nvcc"
+          CUDA_HOME: "/usr/local/cuda-12.1"
+          CFLAGS: "-I/usr/include" 
+          LDFLAGS: "-L/usr/lib"
+        run: |
+          cd pipeline && mkdir -p build && cd build
+          which cmake && cmake --version
+          which mpicxx && mpicxx --version
+          ${PYBIN}/cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=${PREFIX} -DBUILD_PYTHON_BINDINGS=OFF -DBYPASS_GPU_CHECK=ON -DUSE_CUDA=ON ..
+          make -j$(nproc)
+          tar -zcvf pllm_cu121_py${{ matrix.python-version }}.tgz pllm_python.* test_*
+          ls -la
+      
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pllm_cu121_py${{ matrix.python-version }}.tgz
+          path: |
+            pipeline/build/pllm_cu121_py${{ matrix.python-version }}.tgz
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            pipeline/build/pllm_cu121_py${{ matrix.python-version }}.tgz
+
+  build_cu124:
+    name: Build Shared Library (CUDA 12.4)
+    runs-on: ubuntu-latest
+    container:
+      image: pytorch/manylinux2_28-builder:cuda12.4
+
+    # see https://github.com/pytorch/pytorch/blob/main/RELEASE.md#release-compatibility-matrix
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.7", "3.8", "3.9", "3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Environments
+        run: |
+          echo "PYTHON_VERSION=$(python3 -c "from os import environ as env; print({'3.7': 'cp37-cp37m', '3.8': 'cp38-cp38', '3.9': 'cp39-cp39', '3.10': 'cp310-cp310', '3.11': 'cp311-cp311', '3.12': 'cp312-cp312' }['${{ matrix.python-version }}'])")" >> $GITHUB_ENV
+          echo "PATH=$PATH" >> $GITHUB_ENV
+
+      - name: Set up Packages
+        env:
+          PYBIN: /opt/python/${{ env.PYTHON_VERSION }}/bin
+        run: |
+          dnf -y install epel-release && dnf upgrade
+          dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo && dnf makecache
+          dnf module install -y nvidia-driver:latest && dnf clean all
+          yum install -y pigz clang-tools-extra openmpi openmpi-devel spdlog spdlog-devel libibverbs rdma-core-devel numactl numactl-devel numactl-libs
+          pwd && ls -la
+          sed -i '256d' 3rdparty/mscclpp/src/bootstrap/bootstrap.cc
+          cat 3rdparty/patches/spdlog/*.patch | patch -p1 -d 3rdparty/spdlog
+          $PYBIN/pip install cmake mypy pybind11 black
+          cd pipeline/src/generate-gemm && $PYBIN/python genGEMM.py && cd ../../
+      
+      - name: Build Library
+        env:
+          PATH: ${{ env.PATH }}:/usr/lib64/openmpi/bin
+          PYBIN: /opt/python/${{ env.PYTHON_VERSION }}/bin
+          PREFIX: /opt/python/${{ env.PYTHON_VERSION }};/usr/lib64/openmpi
+          pybind11_DIR: /opt/python/${{ env.PYTHON_VERSION }}/lib/python${{ matrix.python-version }}/site-packages/pybind11
+          CUDACXX: "/usr/local/cuda-12.4/bin/nvcc"
+          CUDA_HOME: "/usr/local/cuda-12.4"
+          CFLAGS: "-I/usr/include" 
+          LDFLAGS: "-L/usr/lib"
+        run: |
+          cd pipeline && mkdir -p build && cd build
+          which cmake && cmake --version
+          which mpicxx && mpicxx --version
+          ${PYBIN}/cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=${PREFIX} -DBUILD_PYTHON_BINDINGS=OFF -DBYPASS_GPU_CHECK=ON -DUSE_CUDA=ON ..
+          make -j$(nproc)
+          tar -zcvf pllm_cu124_py${{ matrix.python-version }}.tgz pllm_python.* test_*
+          ls -la
+      
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pllm_cu124_py${{ matrix.python-version }}.tgz
+          path: |
+            pipeline/build/pllm_cu124_py${{ matrix.python-version }}.tgz
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            pipeline/build/pllm_cu124_py${{ matrix.python-version }}.tgz
+

@@ -7,6 +7,7 @@ import os
 import tqdm
 from transformers import LlamaTokenizer
 import concurrent.futures
+from typing import List
 
 def to_vortex_weight(tensor):
     w = pllm_python.VortexWeight()
