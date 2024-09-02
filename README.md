@@ -17,7 +17,7 @@ NanoFlow is a throughput-oriented high-performance serving framework for LLMs. W
 </p>
 <p align="center"><em>Overview of NanoFlow's key components</em></p>
 
-The key insight behinds NanoFlow is that traditional pipeline design of exisiting frameworks under-utilizes hardware resources due to the sequential execution of operations. Therefore, NanoFlow proposes intra-device parallelism (as shown in the following gif), which use nano-batches to schedule the compute-, memory-, network-bound operations for simultaneous execution. Such overlapping leaves compute-bound operations on the critical path and boost the resource utilization.
+The key insight behinds NanoFlow is that traditional pipeline design of existing frameworks under-utilizes hardware resources due to the sequential execution of operations. Therefore, NanoFlow proposes intra-device parallelism (as shown in the following gif), which use nano-batches to schedule the compute-, memory-, network-bound operations for simultaneous execution. Such overlapping leaves compute-bound operations on the critical path and boost the resource utilization.
 
 <p align="center">
   <img src="./figures/pipeline.gif" alt="system design" width="90%">
