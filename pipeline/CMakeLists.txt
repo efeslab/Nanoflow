@@ -15,7 +15,7 @@ set(NVBENCH_DIR ${PARENT_DIR}/3rdparty/nvbench CACHE PATH "Path to nvbench src")
 set(GTEST_DIR ${PARENT_DIR}/3rdparty/googletest CACHE PATH "Path to googletest src")
 set(CUTLASS_DIR ${PARENT_DIR}/3rdparty/cutlass CACHE PATH "Path to modified cutlass src")
 set(SPDLOG_DIR  ${PARENT_DIR}/3rdparty/spdlog CACHE PATH "Path to spdlog src")
-set(MSCCLPP_DIR /usr/local/mscclpp CACHE PATH "Path to mscclpp install")
+set(MSCCLPP_DIR ${PARENT_DIR}/3rdparty/mscclpp CACHE PATH "Path to mscclpp install")
 set(FLASHINFER_DIR ${PARENT_DIR}/3rdparty/flashinfer CACHE PATH "Path to flashinfer src")
 # override by SMALL_FLASHINFER
 #set(FLASHINFER_DIR ${PARENT_DIR}/3rdparty/flashinfer CACHE PATH "Path to flashinfer src")
@@ -36,6 +36,7 @@ if (NOT MPI_FOUND)
 endif()
 
 add_subdirectory(${SPDLOG_DIR} spdlog)
+add_subdirectory(${MSCCLPP_DIR} mscclpp)
 
 find_package(pybind11 REQUIRED)
 if (NOT pybind11_FOUND)
@@ -45,7 +46,6 @@ endif()
 find_program(STUBGEN_EXECUTABLE NAMES stubgen)
 
 add_compile_options(-w)
-include_directories(${MSCCLPP_DIR}/include)
 
 include_directories(${CUTLASS_DIR}/include)
 include_directories(${CUTLASS_DIR}/tools/util/include)
@@ -53,13 +53,11 @@ include_directories(${CUTLASS_DIR}/tools/util/include)
 #include_directories(${FLASHINFER_DIR}/include)
 # ------------- Build Network Test -----------------#
 
-find_library(MSCCLPP_LIBRARY NAMES mscclpp PATHS ${MSCCLPP_DIR}/lib NO_DEFAULT_PATH)
-
 add_executable(test_comm "${CMAKE_SOURCE_DIR}/src/comm_test.cu" "${CMAKE_SOURCE_DIR}/src/comm.cu")
 target_include_directories(test_comm PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_include_directories(test_comm PRIVATE ${PARENT_DIR}/3rdparty/cutlass/include)
 target_link_libraries(test_comm PRIVATE MPI::MPI_CXX)
-target_link_libraries(test_comm PRIVATE ${MSCCLPP_LIBRARY})
+target_link_libraries(test_comm PRIVATE mscclpp_static)
 target_link_libraries(test_comm PRIVATE spdlog::spdlog)
 target_compile_definitions(test_comm PRIVATE -DENABLE_MPI)
 
@@ -193,7 +191,7 @@ target_include_directories(shared_lib PRIVATE ${PARENT_DIR}/3rdparty/cutlass/inc
 target_include_directories(shared_lib PRIVATE ${PARENT_DIR}/3rdparty/cutlass/tools/util/include)
 target_include_directories(shared_lib PRIVATE ${SMALL_FLASHINFER_DIR}/include ${FLASHINFER_DIR}/include)
 target_link_libraries(shared_lib PRIVATE decode_kernels prefill_kernels)
-target_link_libraries(shared_lib PRIVATE ${MSCCLPP_LIBRARY})
+target_link_libraries(shared_lib PRIVATE mscclpp_static)
 target_link_libraries(shared_lib PRIVATE MPI::MPI_CXX)
 target_link_libraries(shared_lib PRIVATE spdlog::spdlog)
 target_link_libraries(shared_lib PRIVATE gemm_lib)
@@ -210,7 +208,7 @@ target_include_directories(test_compute PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_include_directories(test_compute PRIVATE ${SMALL_FLASHINFER_DIR}/include ${FLASHINFER_DIR}/include)
 target_link_libraries(test_compute PRIVATE decode_kernels prefill_kernels)
 # Include Network Libraries
-target_link_libraries(test_compute PRIVATE ${MSCCLPP_LIBRARY})
+target_link_libraries(test_compute PRIVATE mscclpp_static)
 target_link_libraries(test_compute PRIVATE MPI::MPI_CXX)
 # Include Log Libraries
 target_link_libraries(test_compute PRIVATE spdlog::spdlog)
@@ -229,7 +227,7 @@ target_include_directories(pllm_python PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_include_directories(pllm_python PRIVATE ${SMALL_FLASHINFER_DIR}/include ${FLASHINFER_DIR}/include)
 target_link_libraries(pllm_python PRIVATE decode_kernels prefill_kernels)
 # Include Network Libraries
-target_link_libraries(pllm_python PRIVATE ${MSCCLPP_LIBRARY})
+target_link_libraries(pllm_python PRIVATE mscclpp_static)
 target_link_libraries(pllm_python PRIVATE MPI::MPI_CXX)
 # Include Log Libraries
 target_link_libraries(pllm_python PRIVATE spdlog::spdlog)

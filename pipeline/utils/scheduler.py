@@ -13,6 +13,7 @@ from frontend import requestManager
 
 import pickle
 from collections import deque
+from typing import List
 
 from kv_cache import DistKVPool, DistKVCache, BatchedDistKVCache
 from request_info import NewRequestInfo, NewRequestQueue, FlyRequestInfo
@@ -38,7 +39,7 @@ class WorkingSet:
     """
     
     def __init__(self) -> None:
-        self._set : list[FlyRequestInfo] = []
+        self._set : List[FlyRequestInfo] = []
         
     def put(self, req: FlyRequestInfo):
         self._set.append(req)
@@ -209,12 +210,12 @@ class Scheduler:
             self._prefill_workset.adjust_kv_cache()
             self._decode_workset.adjust_kv_cache()
             
-            input_ids : list[int] = []
-            input_indptr : list[int] = [0]
-            prev_len : list[int] = []
+            input_ids : List[int] = []
+            input_indptr : List[int] = [0]
+            prev_len : List[int] = []
             decodePrefillBorder = self._decode_workset.effective_bsz
-            decode_kvs : list[DistKVCache] = []
-            prefill_kvs : list[DistKVCache] = []
+            decode_kvs : List[DistKVCache] = []
+            prefill_kvs : List[DistKVCache] = []
             
         with record_function("calc batch size"):
             t3 = time.perf_counter()
@@ -409,7 +410,7 @@ if __name__ == "__main__":
     scheduler = Scheduler(pool, request_manager.avaliable_request_queue)
     scheduler.init_pipe(args.config_path)
 
-    retired_rq : list[FlyRequestInfo] = []
+    retired_rq : List[FlyRequestInfo] = []
     totalCycle = 0
     
     skip_cycle = args.skip_cycles
