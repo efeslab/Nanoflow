@@ -59,6 +59,10 @@ void setPerTokenOffsetUpdate(vortexUpdateData &updateData, size_t per_token_offs
     updateData.per_token_offset = reinterpret_cast<int*>(per_token_offset);
 }
 
+void setKeepTokenListUpdate(vortexUpdateData &updateData, size_t keep_token_list){
+    updateData.keep_token_list = reinterpret_cast<int*>(keep_token_list);
+}
+
 void setTmpBuffer(vortexInitData &inputData, size_t tmp_buffer, size_t tmp_buffer_size){
     inputData.tmp_buffer = reinterpret_cast<half*>(tmp_buffer);
     inputData.tmp_buffer_size = tmp_buffer_size;
@@ -91,8 +95,9 @@ void pllm_init(std::vector<vortexInitData>& input, Worker::PipelineType pipeTy){
 }
 
 void pllm_update(std::vector<vortexUpdateData>& updateData){
-    std::vector<vortexUpdateData> gpu_update_datas = TensorManager::getInstance().update_data_to_gpu(updateData);
-    update(python_nranks, gpu_update_datas);
+    // std::vector<vortexUpdateData> gpu_update_datas = TensorManager::getInstance().update_data_to_gpu(updateData);
+
+    update(python_nranks, updateData);
 }
 
 void pllm_config(std::vector<vortexConfigData>& configData){
@@ -132,7 +137,6 @@ void setGemvNumBlocksUpdate(vortexUpdateData &updateData, pybind11::array_t<int>
 
 void setGemmOpTag(vortexConfigData &configData, pybind11::list gemm_op_tag){
     std::vector<std::string> new_data;
-    assert(gemm_op_tag.size()  == gemmNum);
     for (size_t i = 0; i < gemm_op_tag.size(); i++){
         new_data.push_back(gemm_op_tag[i].cast<std::string>());
     }
@@ -145,6 +149,10 @@ void setPtr(vortexWeight &weight, size_t ptr){
     //     weight.ptr[i] = reinterpret_cast<half*>(ptr)[i];
     // }
     weight.ptr = reinterpret_cast<half*>(ptr);
+}
+
+void setModelConfig(const std::string& filename) {
+    updateVortexModelConfig(filename);
 }
 
 pybind11::array getPipelineOutput(){
@@ -196,6 +204,8 @@ PYBIND11_MODULE(pllm_python, m) {
         .def(pybind11::init<>())
         .def_readwrite("decodePrefillBorder", &vortexUpdateData::decodePrefillBorder)
         .def_readwrite("prefillNum", &vortexUpdateData::prefillNum)
+        .def_readwrite("prefillTokensNum", &vortexUpdateData::prefillTokensNum)
+        .def_readwrite("keepTokenListLength", &vortexUpdateData::keepTokenListLength)
         .def("setKVIndices", &setKVIndicesUpdate)
         .def("setKVIndptr", &setKVIndptrUpdate)
         .def("setKVLastPageLen", &setKVLastPageLenUpdate)
@@ -205,6 +215,7 @@ PYBIND11_MODULE(pllm_python, m) {
         .def("setGemvBatchSize", &setGemvBatchSizeUpdate)
         .def("setGemvNumBlocks", &setGemvNumBlocksUpdate)
         .def("setPerTokenOffset", &setPerTokenOffsetUpdate)
+        .def("setKeepTokenList", &setKeepTokenListUpdate)
         ;
     pybind11::class_<vortexConfigData>(m, "VortexConfigData")
         .def(pybind11::init<>())
@@ -221,6 +232,10 @@ PYBIND11_MODULE(pllm_python, m) {
         .value("NONOVERLAP", Worker::PipelineType::NONOVERLAP)
         .value("NANOBATCH", Worker::PipelineType::NANOBATCH)
         .value("PLLMOFFLOAD", Worker::PipelineType::PLLMOFFLOAD)
+        .value("KQVBIAS", Worker::PipelineType::KQVBIAS)
+        .value("LOCAL", Worker::PipelineType::LOCAL)
+        .value("NON_OVERLAP_LOCAL", Worker::PipelineType::NON_OVERLAP_LOCAL)
+        .value("NANOBATCH_LOCAL", Worker::PipelineType::NANOBATCH_LOCAL)
         ;
 
     pybind11::class_<vortexWeight>(m, "VortexWeight")
@@ -234,9 +249,11 @@ PYBIND11_MODULE(pllm_python, m) {
         .def(pybind11::init<>())
         .def_readwrite("W_O1", &vortexLayerWeight::W_O1)
         .def_readwrite("W_O2", &vortexLayerWeight::W_O2)
-        .def_readwrite("W_UG", &vortexLayerWeight::W_UG)
+        .def_readwrite("W_U", &vortexLayerWeight::W_U)
+        .def_readwrite("W_G", &vortexLayerWeight::W_G)
         .def_readwrite("W_D", &vortexLayerWeight::W_D)
         .def_readwrite("W_KQV", &vortexLayerWeight::W_KQV)
+        .def_readwrite("B_KQV", &vortexLayerWeight::B_KQV)
         .def_readwrite("W_LN_Attention", &vortexLayerWeight::W_LN_Attention)
         .def_readwrite("W_LN_FFN", &vortexLayerWeight::W_LN_FFN)
         .def_readwrite("W_ROT", &vortexLayerWeight::W_ROT)
@@ -259,5 +276,7 @@ PYBIND11_MODULE(pllm_python, m) {
     m.def("run_async_wait", &run_async_wait, "Waits for the Pipeline to finish.");
     m.def("getPipelineOutput", &getPipelineOutput, "Returns the output of the Pipeline.");
     m.def("setRank", &setRank, "Sets the rank of the Pipeline.");
-    m.def("createModelWeight", &createModelWeight, "Creates a weight.");
+    m.def("createModelWeight", &createModelWeightCPU, "Creates a weight.");
+    m.def("setModelConfig", &setModelConfig, "Sets the model configuration.");
+    m.def("createInitData", &createInitData, "Creates an initialization data.");
 }

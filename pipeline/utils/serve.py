@@ -17,17 +17,23 @@ from collections import deque
 from kv_cache import DistKVPool, DistKVCache, BatchedDistKVCache
 from request_info import NewRequestInfo, NewRequestQueue, FlyRequestInfo
 import numpy as np
+from enum import Enum
 
 pipetype = pllm_python.PipelineType.PLLM
 torch.set_printoptions(threshold=4000)
 from weightLoader import load_weights
 import logging
-
+os.environ['HF_HOME'] = '../../../hf'
 from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaModel, LlamaForCausalLM
 
 logging.basicConfig(level=logging.INFO, filename='serve.log', filemode='w')
 # make logging only output the message without any prefix
 logging.basicConfig(format='%(message)s')
+
+class isRunning(Enum):
+    STATE_SKIP_CYCLE = 0
+    STATE_FIRST_CYCLE = 2
+    STATE_RUNNING = 3
 
 def log_tensor(tensor, name):
     logging.info(f"{name}: {tensor.size()}")
@@ -86,17 +92,20 @@ class Scheduler:
         self._gemv_batch_size = [0, 0, 0, 0]
         self._gemv_num_blocks = [108, 108, 108, 108]
         
-        self._hidden_dim = 8192
         self._nranks = memory_pool.num_devices
-        # self._embedding_table = torch.randn([26000, self._hidden_dim], dtype=torch.float16, device='cpu').pin_memory()
         self._gpu_tensors = []
         self._new_gpu_tensors = []
-        self._is_running = False
+        self._is_running = isRunning.STATE_SKIP_CYCLE
         self._record_schedule_stat = []
         self._weight = weight
+        self.pinned_keep_token_list = torch.zeros([1], dtype=torch.int32, device='cpu')
+        self._old_token_length = 0
+        self._old_prefill = WorkingSet()
+        self._old_decode = WorkingSet()
         
     
     def init_pipe(self, filename: str):
+        pllm_python.setModelConfig("/code/pllm/compute-bound/modelConfig/llama2-70B.json")
         pllm_python.setRank(self._nranks,8)
         data_array = []
         config_array = []
@@ -110,10 +119,12 @@ class Scheduler:
         self.config_data = config_array[0]
 
         self._global_bsz = config_array[0].globalBatchSize
+        self.pinned_input_embedding = torch.zeros([2048], dtype=torch.int32, device='cpu')
+
     def check_future_min_free_pages(self):
         total_pages = self._memory_pool.capacity
         max_seq_len = (self.average_decode_length + self.average_prefill_length + 2)
-        print("max_seq_len", max_seq_len)
+        # print("max_seq_len", max_seq_len)
         future_page_usage = np.zeros(max_seq_len, dtype=int)
         
         # Create an index array that represents the addition pattern
@@ -121,20 +132,57 @@ class Scheduler:
         
         # Accumulate the values using vectorized operations
         for req in self._decode_workset._set:
-            current_seq_len = req.kv_cache.seqlen
+            current_seq_len = req.kv_cache.seqlen + 1
             future_page_usage[0:max_seq_len-current_seq_len] += \
                 (index_range[:max_seq_len-current_seq_len] + current_seq_len + self._memory_pool.page_size - 1) \
                 // self._memory_pool.page_size
         for req in self._prefill_workset._set:
-            current_seq_len = self.average_prefill_length
+            # logging.info(f"prefill req in future estimation")
+            current_seq_len = self.average_prefill_length + 1
             future_page_usage[0:max_seq_len-current_seq_len] += \
                 (index_range[:max_seq_len-current_seq_len] + current_seq_len + self._memory_pool.page_size - 1) \
                 // self._memory_pool.page_size
         # find the maximum page usage
+        # logging.info(f"future_page_usage: {future_page_usage}")
         max_page_usage = np.max(future_page_usage)
         # find available pages
-        available_pages = total_pages*0.9 - max_page_usage
+        available_pages = total_pages - max_page_usage
         return available_pages
+    
+    def check_future_page_usage(self):
+        total_pages = self._memory_pool.capacity
+        max_seq_len = (self.average_decode_length + self.average_prefill_length + 2)
+        # print("max_seq_len", max_seq_len)
+        future_page_usage = np.zeros(max_seq_len, dtype=int)
+        
+        # Create an index array that represents the addition pattern
+        index_range = np.arange(max_seq_len, dtype=int)
+        
+        # Accumulate the values using vectorized operations
+        for req in self._decode_workset._set:
+            current_seq_len = req.kv_cache.seqlen + 1
+            future_page_usage[0:max_seq_len-current_seq_len] += \
+                (index_range[:max_seq_len-current_seq_len] + current_seq_len + self._memory_pool.page_size - 1) \
+                // self._memory_pool.page_size
+        for req in self._prefill_workset._set:
+            # logging.info(f"prefill req in future estimation")
+            current_seq_len = self.average_prefill_length + 1
+            future_page_usage[0:max_seq_len-current_seq_len] += \
+                (index_range[:max_seq_len-current_seq_len] + current_seq_len + self._memory_pool.page_size - 1) \
+                // self._memory_pool.page_size
+        # find the maximum page usage
+        # logging.info(f"future_page_usage: {future_page_usage}")
+        max_page_usage = np.max(future_page_usage)
+        # find available pages
+        available_pages = total_pages - max_page_usage
+        return future_page_usage
+
+    # def update_future_page_usage(self, req: FlyRequestInfo):
+    #     total_pages = self._memory_pool.capacity
+    #     max_seq_len = (self.average_decode_length + self.average_prefill_length + 2)
+
+
+    
         
     def schedule_req(self):
         with record_function("check_new_request"):
@@ -147,12 +195,20 @@ class Scheduler:
             # prefill_idle_tokens = self._prefill_bsz - self._prefill_workset.effective_bsz
             prefill_idle_tokens = self._global_bsz - self._prefill_workset.effective_bsz - self._decode_workset.effective_bsz
             # print(prefill_idle_tokens, self._prefill_bsz, self._prefill_workset.effective_bsz)
-            min_avail_pages = self.check_future_min_free_pages()
-            logging.info(f"Min available pages: {min_avail_pages}")
+            # min_avail_pages = self.check_future_min_free_pages()
+            future_page_usage = self.check_future_page_usage()
+            new_min_avail_pages = self._memory_pool.capacity - np.max(future_page_usage)
+
+            # current_page_usage = 0
+            # for req in self._decode_workset._set + self._prefill_workset._set:
+            #     current_page_usage += (req.kv_cache.seqlen + self._memory_pool.page_size - 1) // self._memory_pool.page_size
+            # logging.info(f"current_page_usage before adjust: {current_page_usage}")
+            # logging.info(f"Min available pages before adjust: {min_avail_pages}")
             while prefill_idle_tokens > 0 and decode_idle_tokens > 0 and self._request_queue.size > 0 \
-                and min_avail_pages > (self.average_prefill_length+ self.average_decode_length) // self._memory_pool.page_size:
+                and new_min_avail_pages > (self.average_prefill_length + self.average_decode_length + self._memory_pool.page_size) // self._memory_pool.page_size:
                 # Check whether there is new request
                 if self._request_queue.size > 0:
+                    # logging.info("add new request")
                     new_req = self._request_queue.get()
                     new_kv_cache = DistKVCache(self._memory_pool)
                     new_request_prompt_len = len(new_req.prompt)
@@ -211,6 +267,19 @@ class Scheduler:
                         # print("newreq", new_req.start_time)
                         prefill_idle_tokens -= new_request_prompt_len
                         decode_idle_tokens -= 1
+                # min_avail_pages = self.check_future_min_free_pages()
+                # print("min avail pages", min_avail_pages)
+                # update future page usage for the new request
+                current_seq_len = self.average_prefill_length + 1
+                max_seq_len = (self.average_decode_length + self.average_prefill_length + 2)
+                index_range = np.arange(max_seq_len, dtype=int)
+                future_page_usage[0:max_seq_len-current_seq_len] += \
+                    (index_range[:max_seq_len-current_seq_len] + current_seq_len + self._memory_pool.page_size - 1) \
+                    // self._memory_pool.page_size
+                new_min_avail_pages = self._memory_pool.capacity - np.max(future_page_usage)
+                # print("new min avail pages", new_min_avail_pages)
+                # assert new_min_avail_pages == min_avail_pages, "Future page usage not updated correctly."
+
             if prefill_idle_tokens < 0 :
                 assert self._prefill_workset.size == 1, "At most add one large prefill each iteration."
                 prefill_idle_tokens = - prefill_idle_tokens
@@ -243,6 +312,24 @@ class Scheduler:
         # Check whether it is possible to start a new request
         
         self.schedule_req()
+        with record_function("input_embedding"):
+            input_ids = []
+            if actualRun:
+                # with record_function("input_ids_decode"):
+                #     for req in self._decode_workset._set:
+                #         input_ids.extend(req.input)
+                #     assert len(input_ids) == self._decode_workset.effective_bsz, "Decode Input length should be correct."
+                # t_embedding_decode = time.perf_counter()
+                # logging.info(f"embedding decode:  {t_embedding_decode - t_wait_async_end}")
+
+                with record_function("input_ids_prefill"):
+                    for req in self._prefill_workset._set:
+                        input_ids.extend(req.input)
+                assert len(input_ids) == self._prefill_workset.effective_bsz 
+
+                with record_function("input_ids_tensor"):
+                    self.pinned_input_embedding = torch.tensor(input_ids, dtype=torch.int32, device='cpu')
+                
         with record_function("prepare data"):
             # prefill/decode workset should be ready to run at this time
             self._prefill_workset.adjust_kv_cache()
@@ -257,26 +344,10 @@ class Scheduler:
             
         with record_function("calc batch size"):
             t3 = time.perf_counter()
-            # get batch_size schedule
-            # history_lengths = [req.kv_cache.seqlen for req in self._decode_workset._set]
-            # # print("length history: ", history_lengths)
-            # target_length_split = [50*1024*1e6, 1e8, 0, 0]
-            # # find x so that sum(history_lengths[:x]) <= target_length_split[0] and sum(history_lengths[:x+1]) > target_length_split[0]
-            # accumulate_length = 0
-            # decisionID = 0
-            # for i in range(len(history_lengths)):
-            #     accumulate_length += history_lengths[i]
-            #     if accumulate_length > target_length_split[decisionID] or i == len(history_lengths) - 1:
-            #         self._gemv_batch_size[decisionID] = i
-            #         decisionID += 1
-            #         accumulate_length = 0
-            #         break
-            # self._gemv_batch_size[1] = max(len(history_lengths) - self._gemv_batch_size[0] - 1, 0)
             self._gemv_batch_size[0] = min(decodePrefillBorder, self.config_data.kqv1Size)
             self._gemv_batch_size[1] = min(decodePrefillBorder - self._gemv_batch_size[0], self.config_data.nanobatch1Size - self.config_data.kqv1Size)
             self._gemv_batch_size[2] = min(decodePrefillBorder - self._gemv_batch_size[0] - self._gemv_batch_size[1], self.config_data.kqv3Size)
             self._gemv_batch_size[3] = decodePrefillBorder - self._gemv_batch_size[0] - self._gemv_batch_size[1] - self._gemv_batch_size[2]
-            # print("schedule time: ", time.perf_counter() - t3)
         with record_function("prepare KV"):
             for req in self._decode_workset._set:
                 input_indptr.append(input_indptr[-1] + len(req.input))
@@ -306,7 +377,6 @@ class Scheduler:
                     for j in range(input_indptr[i], input_indptr[i+1]):
                         rev_input_indptr_cpu.append(i)                
                 self.pinned_rev_input_indptr_cpu = torch.tensor(rev_input_indptr_cpu, dtype=torch.int32, device='cpu').pin_memory()
-                # print ("rev_input_indptr", rev_input_indptr_cpu)
 
         with record_function("per_token_offset"):
             if actualRun:
@@ -316,43 +386,6 @@ class Scheduler:
                         per_token_offset_cpu.append(j-input_indptr[i]+prev_len[i])              
                 self.pinned_per_token_offset_cpu = torch.tensor(per_token_offset_cpu, dtype=torch.int32, device='cpu').pin_memory()
 
-        with record_function("wait"):
-            if self._is_running:
-                pllm_python.run_async_wait()
-
-        with record_function("get output"):
-            if self._is_running:
-                output_ids = pllm_python.getPipelineOutput()
-                # logging.info(f"Outputs from pipeline: {torch.tensor(output_ids)}")
-                
-                for i in range(self._old_prefill.size):
-                    req = self._old_prefill[i]
-                    if req.chunked_prefill == False:
-                        # Not chunked, therefore valid output and append to decode_workset
-                        token_idx = self._old_input_indptr[self._old_decode.size + i + 1] - 1
-                        # logging.info(f"tokenidx {token_idx}")
-                        req.output[-1] = output_ids[token_idx]
-                        req.input = [req.output[-1]]
-                for i in range(self._old_decode.size):
-                    req = self._old_decode[i]
-                    req.output[-1] = output_ids[self._old_input_indptr[i]]
-                    # logging.info(f"tokenidx {self._old_input_indptr[i]}")
-                    req.input = [req.output[-1]]
-
-        with record_function("input_embedding"):
-            input_ids = []
-            if actualRun:
-                with record_function("input_ids_decode"):
-                    for req in self._decode_workset._set:
-                        input_ids.extend(req.input)
-                    assert len(input_ids) == self._decode_workset.effective_bsz, "Decode Input length should be correct."
-                with record_function("input_ids_prefill"):
-                    for req in self._prefill_workset._set:
-                        input_ids.extend(req.input)
-                assert len(input_ids) == self._prefill_workset.effective_bsz + self._decode_workset.effective_bsz, "Decode & Prefill Input length should be correct."
-                with record_function("input_ids_tensor"):
-                    self.pinned_input_embedding = torch.tensor(input_ids, dtype=torch.int32, device='cpu')
-                        
         with record_function("update_data"):
             if actualRun:
                 updateDatas = initUpdateData(
@@ -367,7 +400,10 @@ class Scheduler:
                     rev_input_indptr= self.pinned_rev_input_indptr_cpu.data_ptr(),
                     per_token_offset= self.pinned_per_token_offset_cpu.data_ptr(),
                     gemv_batch_size=self._gemv_batch_size,
-                    gemv_block_num=self._gemv_num_blocks
+                    gemv_block_num=self._gemv_num_blocks,
+                    keep_token_list=self.pinned_keep_token_list.data_ptr(),
+                    keep_token_list_length=self._old_token_length,
+                    prefill_tokens_num= self._prefill_workset.effective_bsz,
                 )
                 # logging.info(f"decodePrefillBorder: {decodePrefillBorder}")
                 # logging.info(f"prefillNum: {len(prefill_kvs)}")
@@ -388,12 +424,17 @@ class Scheduler:
                 # logging.info(f"decode_req_idx: {decode_req_idx}")
                 # logging.info(f"prefill_req_idx: {prefill_req_idx}")
 
-
+        with record_function("wait"):
+            if self._is_running == isRunning.STATE_FIRST_CYCLE or self._is_running == isRunning.STATE_RUNNING:
+                pllm_python.run_async_wait()
+            t_wait_async_end = time.perf_counter()
                 
         with record_function("update"):
             # print("Start updating...")
             if actualRun:
                 pllm_python.update(updateDatas)
+            t_update_finish = time.perf_counter()
+            logging.info(f"update time: {t_update_finish - t_wait_async_end}")
             # print("Updating FINISHED!")
         with record_function("run"):
             t_run_1 = time.perf_counter()
@@ -401,39 +442,70 @@ class Scheduler:
                 pllm_python.run_async()
                 # toGPUShard(self._embedding_table, self._nranks, torch.half)
                 t_run_2 = time.perf_counter()
-                self._is_running = True
+                if self._is_running == isRunning.STATE_SKIP_CYCLE:
+                    self._is_running = isRunning.STATE_FIRST_CYCLE
+                elif self._is_running == isRunning.STATE_FIRST_CYCLE:
+                    self._is_running = isRunning.STATE_RUNNING
+
             else:
                 t_run_2 = time.perf_counter()
-                self._is_running = False
+                self._is_running = isRunning.STATE_SKIP_CYCLE
             
             # print("Run FINISHED!")
+        self._old_token_length = self._decode_workset.effective_bsz + self._prefill_workset.effective_bsz
+        with record_function("get output"):
+            if self._is_running == isRunning.STATE_RUNNING:
+                output_ids = pllm_python.getPipelineOutput()
+                
+                for i in range(self._old_prefill.size):
+                    req = self._old_prefill[i]
+                    if req.chunked_prefill == False:
+                        # Not chunked, therefore valid output and append to decode_workset
+                        token_idx = self._old_input_indptr[self._old_decode.size + i + 1] - 1
+                        # logging.info(f"tokenidx {token_idx}")
+                        req.output[-1] = output_ids[token_idx]
+                        req.input = [req.output[-1]]
+                t_output_for_old_prefill = time.perf_counter()
+                logging.info(f"time output prefill: {t_output_for_old_prefill - t_wait_async_end}")
+                for i in range(self._old_decode.size):
+                    req = self._old_decode[i]
+                    req.output[-1] = output_ids[self._old_input_indptr[i]]
+                    # logging.info(f"tokenidx {self._old_input_indptr[i]}")
+                    req.input = [req.output[-1]]
+                t_output_for_old_decode = time.perf_counter()
+                logging.info(f"time output decode: {t_output_for_old_decode - t_wait_async_end}")
+
         
         with record_function("predict_output"):
-
             t2 = time.perf_counter()
             print (f"Time taken: {t2 - t1}")
-
-                        
-            
+            keep_token_count = 0
             with record_function("get_output for decode"):
+                self.pinned_keep_token_list = torch.zeros([self._global_bsz], dtype=torch.int32, device='cpu').pin_memory()         
                 for i in range(self._decode_workset.size):
                     req = self._decode_workset[i]
                     
-                    if len(req.output) == req.output_len + 1: # note that prefill also produce one token
+                    if len(req.output) == req.output_len - 1 : # or req.output[-1] == EOS_ID:
                         req.decode_latency = t2 - req.decode_start_at
                         req.finish()
                         retired_rq.append(req)
                         # print(req.output)
                     else:
+                        self.pinned_keep_token_list[input_indptr[i]] = 1
+                        keep_token_count += 1
                         req.output.append(0)
                         # Still decoding
                         req.input = [0]
                         self._new_decode_workset.put(req)
+                
+
             with record_function("get_output for prefill"):
                 for i in range(self._prefill_workset.size):
                     req = self._prefill_workset[i]
                     if req.chunked_prefill == False:
                         # Not chunked, therefore valid output and append to decode_workset
+                        self.pinned_keep_token_list[input_indptr[self._decode_workset.size + i + 1] - 1] = 1
+                        keep_token_count += 1
                         req.chunked_prefill = False
                         req.decode_start_at = t2
                         req.encode_latency = t2 - req.request_comein_time
@@ -441,6 +513,7 @@ class Scheduler:
                         req.output.append(0)
                         self._new_decode_workset.put(req)
             # Update workset
+            print("keep_token_count: ", keep_token_count)
             
         self._old_decode = self._decode_workset
         self._old_prefill = self._prefill_workset
@@ -463,11 +536,13 @@ if __name__ == "__main__":
     arg_parser.add_argument("--trace_path", type=str, required=True, help="Request trace to read from")
     arg_parser.add_argument("--run_cycles", type=int, default=2000, help="Run cycle")
     arg_parser.add_argument("--config_path", type=str, default="../config/2048.json", help="Config path")
+    arg_parser.add_argument("--skip_cycles", type=int, default=0, help="Skip cycle")
+    arg_parser.add_argument("--est_cycle_time", type=float, default=0.175, help="Estimated cycle time")
 
     args = arg_parser.parse_args()
     
     nranks = torch.cuda.device_count()
-    pool = DistKVPool(1,8,128,1024*1500//16,16,nranks)
+    pool = DistKVPool(1,8,128,1024*400//16,16,nranks)
     
     request_manager = requestManager(args.trace_path)
     request_manager.read_request()
@@ -477,9 +552,16 @@ if __name__ == "__main__":
 
     retired_rq : list[FlyRequestInfo] = []
     totalCycle = 0
+
+    skip_cycle = args.skip_cycles
+    while request_manager.full_request_queue.size + request_manager.avaliable_request_queue.size > 0 and skip_cycle > 0:
+        skip_cycle -= 1
+        print("skip cycle: ", skip_cycle)
+        request_manager.simulate_issue(args.est_cycle_time)
+        scheduler.bench_text_gen(retired_rq, False)
     
     t1 = time.perf_counter()
-    run_cycle = 100
+    run_cycle = 250
     
     if request_manager.full_request_queue.size >0:
         request_manager.avaliable_request_queue.clear()
@@ -499,6 +581,7 @@ if __name__ == "__main__":
     # t_str = time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime())
     # prof.export_chrome_trace(f"{t_str}.json")
     
+
     while request_manager.full_request_queue.size + request_manager.avaliable_request_queue.size > 0 and run_cycle > 0:
         logging.info(f"------------------ Cycle {totalCycle} ------------------")
         t0 = time.perf_counter()

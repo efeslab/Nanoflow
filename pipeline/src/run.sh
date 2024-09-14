@@ -1,0 +1,1 @@
+mpirun -np 4 --allow-run-as-root sh -c "nsys profile --force-overwrite true  --stat=true -o output_\$OMPI_COMM_WORLD_RANK.prof ../build/test_compute > output_\$OMPI_COMM_WORLD_RANK.txt 2>error_\$OMPI_COMM_WORLD_RANK.txt"

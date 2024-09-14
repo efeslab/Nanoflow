@@ -98,7 +98,7 @@ struct OperatorWrapper {
     virtual OperatorWrapper& run() {
 
         if (!streamInited) {
-            spdlog::error("Stream not inited");
+            spdlog::error("{} Stream not inited", name);
             return *this;
         }
         recordStartEvent();

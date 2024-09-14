@@ -7,6 +7,7 @@
 #include "gemmShape.cuh"
 #include "pipeline.h"
 #include "networkManager.cuh"
+#include "tensorManager.cuh"
 
 
 #include "config.h"
@@ -23,7 +24,11 @@ public:
 		PLLM,
 		NONOVERLAP,
 		NANOBATCH,
-		PLLMOFFLOAD
+		PLLMOFFLOAD,
+		KQVBIAS,
+		LOCAL,
+		NON_OVERLAP_LOCAL,
+		NANOBATCH_LOCAL,
 	};
 	static PipelineType PipeTy;
 
@@ -38,7 +43,7 @@ private:
 	void thread_entry();
 
 public:
-	Worker::Worker(int rank,
+	Worker(int rank,
 				   int nranks,
 				   int vnranks,
 				   vortexInitData* input,
@@ -53,7 +58,8 @@ public:
 	void join() { if (thread) thread->join(); }
 	void run_pipeline();
 	void run_update(vortexUpdateData* update_data) {
-		pipeline->update(update_data);
+		vortexUpdateData& gpu_update_data = TensorManager::getInstance().update_data_to_gpu(*update_data, rank);
+		pipeline->update(&gpu_update_data);
 	}
 	void run_config(vortexConfigData* config_data) {
 		pipeline->config(config_data);

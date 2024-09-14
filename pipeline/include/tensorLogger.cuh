@@ -43,6 +43,7 @@ inline void log_tensor(std::shared_ptr<spdlog::logger> private_logger, std::stri
 		private_logger->error("Tensor {} (row {}->{}, col {}->{}) not logged", name, start_row, start_row + rows, start_col, start_col + cols);
 		private_logger->error("ptr = {}, dimN = {}, rows = {}, cols = {}, start_row = {}, start_col = {}", (size_t)device_ptr, dimN, rows, cols, start_row, start_col);
 	}
+	private_logger->error("ptr = {}, dimN = {}, rows = {}, cols = {}, start_row = {}, start_col = {}", (size_t)device_ptr, dimN, rows, cols, start_row, start_col);
 
 
 	private_logger->info("--------Tensor {} (row {}->{}, col {}->{}) ------------", name, start_row, start_row + rows, start_col, start_col + cols);

@@ -11,8 +11,6 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 get_filename_component(PARENT_DIR ${CMAKE_SOURCE_DIR} DIRECTORY)
 
-set(NVBENCH_DIR ${PARENT_DIR}/3rdparty/nvbench CACHE PATH "Path to nvbench src")
-set(GTEST_DIR ${PARENT_DIR}/3rdparty/googletest CACHE PATH "Path to googletest src")
 set(CUTLASS_DIR ${PARENT_DIR}/3rdparty/cutlass CACHE PATH "Path to modified cutlass src")
 set(SPDLOG_DIR  ${PARENT_DIR}/3rdparty/spdlog CACHE PATH "Path to spdlog src")
 set(MSCCLPP_DIR /usr/local/mscclpp CACHE PATH "Path to mscclpp install")
@@ -21,13 +19,18 @@ set(FLASHINFER_DIR ${PARENT_DIR}/3rdparty/flashinfer CACHE PATH "Path to flashin
 #set(FLASHINFER_DIR ${PARENT_DIR}/3rdparty/flashinfer CACHE PATH "Path to flashinfer src")
 
 project(small_gemv LANGUAGES CUDA CXX)
+find_package(nlohmann_json REQUIRED)
+if (NOT nlohmann_json_FOUND)
+    message(FATAL_ERROR "nlohmann_json not found, try apt install nlohmann-json3-dev")
+endif()
 
 # ------------- Add FP8 Macro for compilation -----------------#
 if(CMAKE_CUDA_ARCHITECTURES GREATER_EQUAL 89)
   add_compile_definitions(FLASHINFER_ENABLE_FP8)
 endif()
 
-
+add_compile_options(-Wall)
+add_compile_options(-Wunused-variable)
 # ------------- Configure libraries -----------------#
 
 find_package(MPI QUIET)
@@ -44,7 +47,8 @@ endif()
 
 find_program(STUBGEN_EXECUTABLE NAMES stubgen)
 
-add_compile_options(-w)
+
+
 include_directories(${MSCCLPP_DIR}/include)
 
 include_directories(${CUTLASS_DIR}/include)
@@ -62,6 +66,7 @@ target_link_libraries(test_comm PRIVATE MPI::MPI_CXX)
 target_link_libraries(test_comm PRIVATE ${MSCCLPP_LIBRARY})
 target_link_libraries(test_comm PRIVATE spdlog::spdlog)
 target_compile_definitions(test_comm PRIVATE -DENABLE_MPI)
+
 
 # ------------- Configure FlashInfer Library -----------------#
 # Note that codes are stored at $PARENT_DIR/new-small-gemv
@@ -155,6 +160,7 @@ set(KEY_SRC "${CMAKE_SOURCE_DIR}/src/comm.cu"
             "${CMAKE_SOURCE_DIR}/src/networkManager.cu" 
             "${CMAKE_SOURCE_DIR}/src/pipeline.cu" 
             "${CMAKE_SOURCE_DIR}/src/pipeline_nonoverlap.cu"
+            "${CMAKE_SOURCE_DIR}/src/pipeline_nonoverlap_local.cu"
             "${CMAKE_SOURCE_DIR}/src/pipeline_nonoverlap_nanobatch.cu"
             "${CMAKE_SOURCE_DIR}/src/sleep.cu" 
             "${CMAKE_SOURCE_DIR}/src/vortexData.cu"
@@ -162,6 +168,8 @@ set(KEY_SRC "${CMAKE_SOURCE_DIR}/src/comm.cu"
             "${CMAKE_SOURCE_DIR}/src/gemvDependency.cu"
             "${CMAKE_SOURCE_DIR}/src/small_cuda_operator.cu"
             "${CMAKE_SOURCE_DIR}/src/tensorLogger.cu"
+            "${CMAKE_SOURCE_DIR}/src/load_config.cu"
+            "${CMAKE_SOURCE_DIR}/src/pipeline_local.cu"
             )
 
 set(C_SRC "${CMAKE_SOURCE_DIR}/src/computeMain.cu")
@@ -197,6 +205,7 @@ target_link_libraries(shared_lib PRIVATE ${MSCCLPP_LIBRARY})
 target_link_libraries(shared_lib PRIVATE MPI::MPI_CXX)
 target_link_libraries(shared_lib PRIVATE spdlog::spdlog)
 target_link_libraries(shared_lib PRIVATE gemm_lib)
+target_include_directories(shared_lib PRIVATE ${PARENT_DIR}/3rdparty/cutlass/examples/45_dual_gemm)
 
 
 # ------------- Build CUDA side -----------------#
@@ -217,6 +226,8 @@ target_link_libraries(test_compute PRIVATE spdlog::spdlog)
 # # include shared library
 # target_link_libraries(test_compute PRIVATE shared_lib)
 target_link_libraries(test_compute PRIVATE gemm_lib)
+target_link_libraries(test_compute PRIVATE nlohmann_json::nlohmann_json)
+target_include_directories(test_compute PRIVATE ${PARENT_DIR}/3rdparty/cutlass/examples/45_dual_gemm)
 
 # ------------- Build Pybind side -----------------#
 
@@ -236,8 +247,8 @@ target_link_libraries(pllm_python PRIVATE spdlog::spdlog)
 # # include shared library
 # target_link_libraries(pllm_python PRIVATE shared_lib)
 target_link_libraries(pllm_python PRIVATE gemm_lib)
-
-
+target_link_libraries(pllm_python PRIVATE nlohmann_json::nlohmann_json)
+target_include_directories(pllm_python PRIVATE ${PARENT_DIR}/3rdparty/cutlass/examples/45_dual_gemm)
 # ------------- Generate Stub -----------------#
 if(NOT STUBGEN_EXECUTABLE)
     message(WARNING "stubgen not found. Please ensure MyPy is installed to generate stub files.")

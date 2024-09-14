@@ -10,6 +10,7 @@
 #include <span>
 #include "tensor.cuh"
 #include "vortexData.cuh"
+#include <assert.h>
 
 #ifdef ENABLE_MPI
 // use mpi to bcast the handles
@@ -45,7 +46,6 @@ class NetWrapper : public OperatorWrapper
 
     NetWrapper(){}
     void checkassert(){
-        assert(input_size == output_size);
         assert(input_size % nranks == 0);
         assert(reinterpret_cast<uintptr_t>(input) % sizeof(int4) == 0);
         assert(reinterpret_cast<uintptr_t>(output) % sizeof(int4) == 0);
@@ -105,7 +105,7 @@ protected:
         std::vector<mscclpp::NonblockingFuture<mscclpp::RegisteredMemory>> remoteRegMemories;
         mscclpp::RegisteredMemory& localRegMemory = (input != output) ? outputBuffRegMem : inputBuffRegMem;
 
-        for (int r = 0; r < nranks; ++r) {
+        for (size_t r = 0; r < nranks; ++r) {
             if (r == rank) continue;
             comm->sendMemoryOnSetup(localRegMemory, r, 0);
             auto remoteMemory = comm->recvMemoryOnSetup(r, 0);
@@ -114,11 +114,11 @@ protected:
         comm->setup();
 
         std::vector<std::shared_ptr<mscclpp::SmDevice2DeviceSemaphore>> smSemaphores;
-        for (int i = 0; i < connections.size(); ++i) {
+        for (size_t i = 0; i < connections.size(); ++i) {
             smSemaphores.emplace_back(std::make_shared<mscclpp::SmDevice2DeviceSemaphore>(*comm, connections[i]));
         }
         comm->setup();
-        for (int i = 0; i < connections.size(); ++i) {
+        for (size_t i = 0; i < connections.size(); ++i) {
             smChannels.emplace_back(smSemaphores[i], remoteRegMemories[i].get(), inputBuffRegMem.data());
             smChannelHandles.emplace_back(mscclpp::deviceHandle(smChannels.back()));
         }
@@ -417,7 +417,7 @@ class NetAsyncWrapper: public NetWrapper
         assert(remoteInputBuffs.size() == nranks - 1);
     }
     ~NetAsyncWrapper(){
-        for (int i = 0; i < remoteInputBuffs.size(); ++i) {
+        for (size_t i = 0; i < remoteInputBuffs.size(); ++i) {
 #ifdef ENABLE_MPI
             CUDA_CHECK(cudaIpcCloseMemHandle(remoteInputBuffs[i]));
 #endif
@@ -429,7 +429,7 @@ class NetAsyncWrapper: public NetWrapper
     protected:
     std::vector<Element*> getRemoteBuff(Element* localBuff) {
         std::vector<Element*> remoteBuffs;
-        for (int r = 0; r < nranks; ++r) {
+        for (size_t r = 0; r < nranks; ++r) {
 #ifdef ENABLE_MPI
             cudaIpcMemHandle_t handle;
 #else
@@ -475,14 +475,14 @@ class NetAsyncWrapper: public NetWrapper
         std::vector<mscclpp::NonblockingFuture<mscclpp::RegisteredMemory>> remoteRegMemories;
         mscclpp::RegisteredMemory& localRegMemory = (input != output) ? outputBuffRegMem : inputBuffRegMem;
 
-        for (int r = 0; r < nranks; ++r) {
+        for (size_t r = 0; r < nranks; ++r) {
             if (r == rank) continue;
             comm->sendMemoryOnSetup(localRegMemory, r, 0);
             auto remoteMemory = comm->recvMemoryOnSetup(r, 0);
             remoteRegMemories.push_back(remoteMemory);
         }
         comm->setup();
-        for (int i = 0; i < connections.size(); ++i) {
+        for (size_t i = 0; i < connections.size(); ++i) {
             proxyChannelHandles.push_back(mscclpp::deviceHandle(mscclpp::SimpleProxyChannel(
                 service->proxyChannel(service->buildAndAddSemaphore(*comm, connections[i])),
                 service->addMemory(remoteRegMemories[i].get()), service->addMemory(inputBuffRegMem)
@@ -524,7 +524,7 @@ class NetAllGatherAsync: public NetAsyncWrapper{
     ~NetAllGatherAsync(){
         CUDA_CHECK(cudaFree(smSyncChannelHandlesCuda));
         CUDA_CHECK(cudaEventDestroy(mainEvent));
-        for (int i = 0; i < nranks; ++i) {
+        for (size_t i = 0; i < nranks; ++i) {
             CUDA_CHECK(cudaEventDestroy(memcpyEvents[i]));
             CUDA_CHECK(cudaStreamDestroy(memcpyStreams[i]));
         }
@@ -536,7 +536,7 @@ class NetAllGatherAsync: public NetAsyncWrapper{
         const uint64_t local_offset = rank * nelem_per_shard;
         syncDevices<<<1, nchannels, 0, stream>>>(smSyncChannelHandlesCuda, nchannels);
         cudaEventRecord(mainEvent, stream);
-        for (int r = 0; r < nranks; ++r) {
+        for (size_t r = 0; r < nranks; ++r) {
             CUDA_CHECK(cudaStreamWaitEvent(memcpyStreams[r], mainEvent, 0));
             if (r != rank) {
                 CUDA_CHECK(cudaMemcpyAsync(output + r * nelem_per_shard, remoteInputBuffs[r > rank ? r - 1 : r] + r * nelem_per_shard,
@@ -551,7 +551,7 @@ class NetAllGatherAsync: public NetAsyncWrapper{
     void finish(cudaStream_t stream, int nblocks = 1, int nthreads = 8) override {
         const int nchannels = nranks - 1;
         assert(nchannels <= nblocks * nthreads);
-        for (int i = 0; i < nranks; ++i) {
+        for (size_t i = 0; i < nranks; ++i) {
             CUDA_CHECK(cudaStreamWaitEvent(stream, memcpyEvents[i], 0));
         }
         syncDevices<<<1, nchannels, 0, stream>>>(smSyncChannelHandlesCuda, nchannels);
@@ -596,11 +596,11 @@ class NetReduceScatterAsync: public NetAsyncWrapper
         }
     }
     ~NetReduceScatterAsync(){
-        for (int i = 0; i < nranks - 1; ++i) CUDA_CHECK(cudaFree(scratches[i]));
+        for (size_t i = 0; i < nranks - 1; ++i) CUDA_CHECK(cudaFree(scratches[i]));
         CUDA_CHECK(cudaFree(scratchesCuda));
         CUDA_CHECK(cudaFree(smSyncChannelHandlesCuda));
         CUDA_CHECK(cudaEventDestroy(mainEvent));
-        for (int i = 0; i < nranks - 1; ++i) {
+        for (size_t i = 0; i < nranks - 1; ++i) {
             CUDA_CHECK(cudaEventDestroy(memcpyEvents[i]));
             CUDA_CHECK(cudaStreamDestroy(memcpyStreams[i]));
         }
@@ -614,7 +614,7 @@ class NetReduceScatterAsync: public NetAsyncWrapper
         const uint64_t scratch_start = n_half_per_int4 - nFirstElem;
         syncDevices<<<1, nranks - 1, 0, stream>>>(smSyncChannelHandlesCuda, nranks - 1);
         cudaEventRecord(mainEvent, stream);
-        for (int i = 0; i < nranks - 1; ++i) {
+        for (size_t i = 0; i < nranks - 1; ++i) {
             CUDA_CHECK(cudaStreamWaitEvent(memcpyStreams[i], mainEvent, 0));
             CUDA_CHECK(cudaMemcpyAsync(scratches[i] + scratch_start, remoteInputBuffs[i] + nelem_per_shard * rank,
                                        nelem_per_shard * sizeof(Element), cudaMemcpyDeviceToDevice, memcpyStreams[i]));
@@ -624,7 +624,7 @@ class NetReduceScatterAsync: public NetAsyncWrapper
     void finish(cudaStream_t stream, int nblocks = 8, int nthreads = 1024) override {
         assert(nranks - 1 <= nblocks * nthreads);
         const uint64_t nelem_per_shard = input_size / nranks;
-        for (int i = 0; i < nranks - 1; ++i) {
+        for (size_t i = 0; i < nranks - 1; ++i) {
             CUDA_CHECK(cudaStreamWaitEvent(stream, memcpyEvents[i], 0));
         }
         asyncReduceKernel<<<nblocks, nthreads, 0, stream>>>(

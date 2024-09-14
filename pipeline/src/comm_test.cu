@@ -55,8 +55,8 @@ void test_NetAllGather(std::shared_ptr<mscclpp::Communicator> comm,
     CUDA_CHECK(cudaMemcpy(host_buff.data(), output_buff, buff_size, cudaMemcpyDeviceToHost));
     if (columnwise) {
         bool correct = true;
-        for (size_t i = 0; i < dim1; ++i) {
-            for (size_t j = 0; j < output_dim2; ++j) {
+        for (int i = 0; i < dim1; ++i) {
+            for (int j = 0; j < output_dim2; ++j) {
                 const int remoteRank = (int) (j / input_dim2);
                 cutlass::half_t expected = cutlass::half_t(int(((i * input_dim2 + j % input_dim2) * remoteRank) % 101));
                 if (host_buff[i * output_dim2 + j] != expected) {
@@ -158,9 +158,9 @@ void test_NetAllReduce(std::shared_ptr<mscclpp::Communicator> comm,
 				 rank,
 				 nranks,
 				 pllmTensor<cutlass::half_t>((cutlass::half_t*)input_buff,
-											buff_size / sizeof(cutlass::half_t), 1, PllmLayout::ROW_MAJOR),
+											buff_size / sizeof(cutlass::half_t), size_t(1), PllmLayout::ROW_MAJOR),
 				 pllmTensor<cutlass::half_t>((cutlass::half_t*)output_buff,
-											buff_size / sizeof(cutlass::half_t), 1, PllmLayout::ROW_MAJOR));
+											buff_size / sizeof(cutlass::half_t), size_t(1), PllmLayout::ROW_MAJOR));
 
 	MPI_Barrier(MPI_COMM_WORLD);
 
@@ -288,7 +288,6 @@ void test_NetReduceScatterAsync(std::shared_ptr<mscclpp::Communicator> comm,
 int main(int argc, char* argv[]) {
     // Initialize the MPI environment
     MPI_Init(&argc, &argv);
-
     // Get the number of processes
     int nranks;
     MPI_Comm_size(MPI_COMM_WORLD, &nranks);

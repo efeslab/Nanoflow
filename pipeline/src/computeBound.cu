@@ -47,13 +47,8 @@ void run_async_wait() {
 	}
 	aggregated_output.clear();
 	for (auto& output : outputs) {
-		for (int i = 0; i < output.partial_num_1; ++i) {
-			aggregated_output.push_back(output.sampled_token_array1[i]);
-		}
-	}
-	for (auto& output : outputs) {
-		for (int i = 0; i < output.partial_num_2; ++i) {
-			aggregated_output.push_back(output.sampled_token_array2[i]);
+		for (int i = 0; i < output.sampled_tokens; ++i) {
+			aggregated_output.push_back(output.sampled_token_array[i]);
 		}
 	}
 
@@ -85,10 +80,10 @@ void init(int nranks,
 	assert(output.size() == nranks);
 
 	Worker::PipeTy = pipeTy;
-	for (size_t i = 0; i < nranks; i++)
-	{
-		allocateKVData(input[i], i);
-	}
+	// for (size_t i = 0; i < nranks; i++)
+	// {
+	// 	allocateKVData(input[i], i);
+	// }
 	spdlog::info("Init data created");
 
 	worker_sync = std::make_unique<SimpleThreadSync>(nranks);
@@ -123,6 +118,37 @@ void update(int nranks, std::vector<vortexUpdateData>& updateData) {
 	assert(updateData.size() == 1);
 	worker->run_update(&updateData.front());
 #else
+	auto &update_d = updateData[0];
+	int* complete_input_tokens = new int[update_d.decodePrefillBorder + update_d.prefillTokensNum];
+	int input_tokens_count = 0;
+	spdlog::info("update_d.keepTokenListLength: {}", update_d.keepTokenListLength);
+	spdlog::info("aggregated_output size: {}", aggregated_output.size());
+	if (aggregated_output.size() == 0) {
+		for (int i = 0; i < update_d.keepTokenListLength; ++i) {
+			if (update_d.keep_token_list[i] == 1) {
+				complete_input_tokens[input_tokens_count++] = 1;
+			}
+		}
+	}
+	else {
+		for (int i = 0; i < update_d.keepTokenListLength; ++i) {
+			if (update_d.keep_token_list[i] == 1) {
+				complete_input_tokens[input_tokens_count++] = aggregated_output[i];
+			}
+		}
+	}
+	spdlog::info("input_tokens_count: {}, decodePrefillBorder: {}", input_tokens_count, update_d.decodePrefillBorder);
+	spdlog::info("prefillTokensNum: {}", update_d.prefillTokensNum);
+	
+	for (int i = 0; i < update_d.prefillTokensNum; ++i) {
+		complete_input_tokens[input_tokens_count++] = update_d.input_tokens[i];
+	}
+	spdlog::info("input_tokens_count: {}, total: {}", input_tokens_count, update_d.decodePrefillBorder + update_d.prefillTokensNum);
+
+	for (int i = 0; i < nranks; ++i) {
+		updateData[i].input_tokens = complete_input_tokens;
+	}
+
 	assert(updateData.size() == nranks);
 	shared_state.op = WorkerOp::UPDATE;
 	shared_state.updates_ptr = &updateData;
@@ -205,14 +231,16 @@ void Worker::init() {
 	}
 
 	spdlog::info("Creating pipeline, rank {}, core {}", rank, sched_getcpu());
-	if (PipeTy == PipelineType::PLLM || PipeTy == PipelineType::PLLMOFFLOAD)
+	if (PipeTy == PipelineType::PLLM || PipeTy == PipelineType::PLLMOFFLOAD || PipeTy == PipelineType::NANOBATCH || PipeTy == PipelineType::KQVBIAS)
 	{
-		pipeline = std::make_unique<Pipeline>(input, rank, nranks, vnranks, PipeTy == PipelineType::PLLMOFFLOAD);
+		pipeline = std::make_unique<Pipeline>(input, rank, nranks, vnranks, PipeTy == PipelineType::PLLMOFFLOAD, PipeTy == PipelineType::NANOBATCH, PipeTy == PipelineType::KQVBIAS);
 	}
 	else if (PipeTy == PipelineType::NONOVERLAP)
 		pipeline = std::make_unique<NonOverlapPipeline>(input, rank, nranks, vnranks);
-	else if (PipeTy == PipelineType::NANOBATCH)
-		pipeline = std::make_unique<NonOverlapNanoBatchPipeline>(input, rank, nranks, vnranks);
+	else if (PipeTy == PipelineType::LOCAL || PipeTy == PipelineType::NANOBATCH_LOCAL)
+		pipeline = std::make_unique<LocalPipeline>(input, rank, nranks, vnranks, PipeTy == PipelineType::NANOBATCH_LOCAL);
+	else if (PipeTy == PipelineType::NON_OVERLAP_LOCAL)
+		pipeline = std::make_unique<NonOverlapLocalPipeline>(input, rank, nranks, vnranks);
 	else
 		spdlog::error("Unknown pipeline type {}", static_cast<int>(PipeTy));
 }

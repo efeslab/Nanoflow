@@ -1,9 +1,11 @@
 import sys
 import os
+os.environ['HF_HOME'] = '../../../hf'
 from request_info import NewRequestInfo, NewRequestQueue, FlyRequestInfo
 from transformers import AutoTokenizer
 
 import time
+import torch
 
 class requestManager:
     def __init__(self, filename: str):
@@ -18,12 +20,12 @@ class requestManager:
         self.start_idx = 0
         
 
-    def read_request(self):
-        model_name_or_path = "meta-llama/Llama-2-70b-chat-hf"
+    def read_request(self, model_name_or_path = "meta-llama/Llama-2-70b-chat-hf"):
         tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
         req_index = 0
         sum_prefill_length = 0
         sum_decode_length = 0
+        print(self.filename)
         with open(self.filename, 'r') as f:
             first = True
             for line in f:
@@ -46,6 +48,8 @@ class requestManager:
                     req.prompt = input_tokens
                 else:
                     req.prompt = [i for i in range(int(split_result[1]))]
+                    # convert to tensor
+                    req.prompt = torch.tensor(req.prompt, dtype=torch.int32)
                 self.full_request_queue.put(req)
                 sum_prefill_length += len(req.prompt)
                 sum_decode_length += req.output_len

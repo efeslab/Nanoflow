@@ -40,11 +40,7 @@ def toGPUShard(data: torch.tensor, nranks, dtype, non_blocking=True):
 
 def genInitData(rank, weight):
     data = pllm_python.VortexInitData()
-    hiddenDim = 8192
-    temp = torch.randn([hiddenDim, hiddenDim * 4], dtype=torch.half, device=f'cuda:{rank}')
-    data.setTmpBuffer(temp.data_ptr(), temp.numel() * temp.element_size())
-    data.tmp_buffer_size = 5*1024*1024*1024
-    data.setWeight(weight, 0)
+    pllm_python.createInitData(data, weight, rank)
 
     return data
 
@@ -64,17 +60,17 @@ def save_config(config, filename):
     with open(filename, 'w') as json_file:
         json.dump(config_dict, json_file, indent=4)
 
-def load_config(filename):
+def load_pipeline_config(filename):
     # Read the JSON file into a dictionary
     with open(filename, 'r') as json_file:
         config_dict = json.load(json_file)
     # Create a VortexConfigData object and set its attributes
     config = pllm_python.VortexConfigData()
-    config.setGemmOpTag(config_dict["gemm_op_tag"])
-    config.globalBatchSize = config_dict["global_batch_size"]
-    config.nanobatch1Size = config_dict["nanobatch_1_size"]
-    config.kqv1Size = config_dict["kqv1_size"]
-    config.kqv3Size = config_dict["kqv3_size"]
+    config.setGemmOpTag(config_dict["pipeline_configs"]["gemm_op_tag"])
+    config.globalBatchSize = config_dict["pipeline_configs"]["global_batch_size"]
+    config.nanobatch1Size = config_dict["pipeline_configs"]["nanobatch_1_size"]
+    config.kqv1Size = config_dict["pipeline_configs"]["kqv1_size"]
+    config.kqv3Size = config_dict["pipeline_configs"]["kqv3_size"]
     return config
 
 def initUpdateData(
@@ -89,7 +85,10 @@ def initUpdateData(
         rev_input_indptr: int,
         per_token_offset: int,
         gemv_batch_size: list[int],
-        gemv_block_num: list[int] ) -> list[pllm_python.VortexUpdateData]:
+        gemv_block_num: list[int],
+        keep_token_list: int,
+        keep_token_list_length: int,
+        prefill_tokens_num: int) -> list[pllm_python.VortexUpdateData]:
     updateDataList = []
     gemv_batch_size = np.array(gemv_batch_size, dtype=np.int32)
     gemv_block_num = np.array(gemv_block_num, dtype=np.int32)
@@ -106,6 +105,9 @@ def initUpdateData(
         updateData.prefillNum = prefillNum
         updateData.setRevInputIndptr(rev_input_indptr)
         updateData.setPerTokenOffset(per_token_offset)
+        updateData.setKeepTokenList(keep_token_list)
+        updateData.keepTokenListLength = keep_token_list_length
+        updateData.prefillTokensNum = prefill_tokens_num
         updateDataList.append(updateData) # TODO: change rev_input and offset
     return updateDataList
 

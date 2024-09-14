@@ -15,5 +15,5 @@ else:
     request_interval = 1 / request_rate
 
 with open(f"{output_name}", "w") as f:
-    for i in range(10000):
+    for i in range(100000):
         f.write(f"{i},{prefill_len},{decode_len},{request_interval*i}, {prompt}\n")

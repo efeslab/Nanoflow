@@ -43,12 +43,12 @@ public:
 		this->kv_data = kv_data;
 	}
 
-	static constexpr size_t getInputSize(uint32_t batch_size) {
-		return (2 * MODEL_KV_HEADS + MODEL_QO_HEADS) * MODEL_HEAD_DIM * batch_size;
+	static size_t getInputSize(uint32_t batch_size) {
+		return (2 * ModelConfig.model_kv_heads_gpu + ModelConfig.model_qo_heads_gpu) * ModelConfig.model_head_dim * batch_size;
 	}
 	size_t getInputSize() { return getInputSize(batch_size); }
-	static constexpr size_t getOutputSize(uint32_t batch_size) {
-		return MODEL_QO_HEADS * MODEL_HEAD_DIM * batch_size;
+	static size_t getOutputSize(uint32_t batch_size) {
+		return ModelConfig.model_qo_heads_gpu * ModelConfig.model_head_dim * batch_size;
 	}
 	size_t getOutputSize() { return getOutputSize(batch_size); }
 };
@@ -57,6 +57,8 @@ class DecodeGemvWrapper : public GemvWrapper {
 public:
 	std::vector<int32_t> qo_indptr_h{0};
 	thrust::device_vector<int32_t> qo_indptr_d;
+	pllmTensor<int32_t> qo_indptr_tensor;
+	int32_t* qo_indptr;
 	int* device_KQV_ready;
 	int* device_GEMV_ready;
 
@@ -67,7 +69,7 @@ public:
 	
 	DecodeGemvWrapper() {
 
-		for(uint32_t i = 0; i < 2048; ++i) {
+		for(int i = 0; i < ModelConfig.max_batch_size; ++i) {
 				qo_indptr_h.push_back(qo_indptr_h.back() + 1);
 			}
 		qo_indptr_d = thrust::device_vector<int32_t>(qo_indptr_h);
@@ -76,6 +78,7 @@ public:
 
 	void init(uint32_t batch_size,
 			  int32_t block_num,
+			  pllmTensor<int32_t> qo_indptr, // from input
 			  pllmTensor<int32_t> kv_indptr, // from input
 			  int32_t* kv_indices, // from input
 			  pllmTensor<int32_t> kv_last_page_len, // from input
@@ -91,46 +94,45 @@ public:
 		// spdlog::info("batch_size: {}", batch_size);
 		assert(kv_indptr.layout == PllmLayout::ROW_MAJOR);
 		assert(kv_indptr.size() == batch_size + 1);
-		assert(kv_indptr.dim1 == 1);
+
 		this->kv_indptr = kv_indptr.ptr;
 
 		this->kv_indices = kv_indices;
 
 		assert(kv_last_page_len.size() == batch_size);
-		assert(kv_last_page_len.dim1 == 1);
 		this->kv_last_page_len = kv_last_page_len.ptr;
 
 		assert(input.layout == PllmLayout::ROW_MAJOR);
 		if (input.size() != 0) {
-			assert(input.dim1 == batch_size);
-			assert(input.dim2 == MODEL_QO_HEADS * MODEL_HEAD_DIM);
+			assert(input.dim2 == ModelConfig.model_qo_heads_gpu * ModelConfig.model_head_dim);
 		}
 		assert(output.layout == PllmLayout::ROW_MAJOR);
-		if (input.size() != 0) {
-			assert(output.dim1 == batch_size);
-			assert(input.dim2 == MODEL_QO_HEADS * MODEL_HEAD_DIM);
+		if (output.size() != 0) {
+			assert(input.dim2 == ModelConfig.model_qo_heads_gpu * ModelConfig.model_head_dim);
 		}
 		this->q = input.ptr;
 		this->o = output.ptr;
 		this->device_KQV_ready = device_KQV_ready;
 		this->device_GEMV_ready = device_GEMV_ready;
 
+		qo_indptr_tensor = qo_indptr;
+		this->qo_indptr = qo_indptr.ptr;
 		kv_indptr_tensor = kv_indptr;
 		kv_last_page_len_tensor = kv_last_page_len;
 		input_tensor = input;
 		output_tensor = output;
 
 		// Note(Yilong): we only use prefill kernels under GQA Scenarios.
-		if constexpr(MODEL_KV_HEADS != MODEL_QO_HEADS) {
+		if (ModelConfig.model_kv_heads_gpu != ModelConfig.model_qo_heads_gpu) {
 			// buffer = thrust::device_vector<char>(workspace_size_in_bytes);
 			
 			handler.BeginForward((void*)thrust::raw_pointer_cast(buffer.data()),
 								 workspace_size_in_bytes,
 								 qo_indptr_h.data(),
 								 batch_size,
-								 MODEL_QO_HEADS,
-								 MODEL_KV_HEADS,
-								 MODEL_HEAD_DIM,
+								 ModelConfig.model_qo_heads_gpu,
+								 ModelConfig.model_kv_heads_gpu,
+								 ModelConfig.model_head_dim,
 								 LaunchType::SmallBlk); // Preprocess is coupled with the warp layout.
 		}
 	}
@@ -139,11 +141,11 @@ public:
 		constexpr flashinfer::QKVLayout kv_layout = flashinfer::QKVLayout::kNHD;
 		using namespace flashinfer;
 
-		constexpr int num_kv_heads = MODEL_KV_HEADS;
-		constexpr int head_dim = MODEL_HEAD_DIM;
-		constexpr int page_size = FRAME_PAGE_SIZE;
-		constexpr int num_qo_heads = MODEL_QO_HEADS;
-		constexpr auto rotary_mode = PosEncodingMode::kNone;
+		int num_kv_heads = ModelConfig.model_kv_heads_gpu;
+		int head_dim = ModelConfig.model_head_dim;
+		int page_size = ModelConfig.frame_page_size;
+		int num_qo_heads = ModelConfig.model_qo_heads_gpu;
+		auto rotary_mode = PosEncodingMode::kNone;
 
 		// building KV cache structure
 		paged_kv_t<PageStorage::kIndices, kv_layout, half, int32_t> paged_kv(
@@ -169,7 +171,7 @@ public:
 		// 	spdlog::warn("kv_indptr[{}]: {}", i, host_kv_indptr[i]);
 		// }
 
-		if constexpr(num_qo_heads == num_kv_heads) {
+		if (num_qo_heads == num_kv_heads) {
 			// Memory-bound setting: Use default FlashInfer API
 			// Note(Yilong): To add cooperative kernel for better performance.
 			cudaError_t status =
@@ -206,7 +208,8 @@ public:
 																	 int32_t>(
 				&handler,
 				q,
-				thrust::raw_pointer_cast(qo_indptr_d.data()),
+				// thrust::raw_pointer_cast(qo_indptr_d.data()),
+				this->qo_indptr,
 				/*q_offset=*/nullptr,
 				paged_kv,
 				o,
@@ -279,19 +282,18 @@ public:
 		this->block_num = block_num;
 
 		assert(qo_indptr.layout == PllmLayout::ROW_MAJOR);
+		spdlog::info("qo_indptr.size(): {}", qo_indptr.size());
+		spdlog::info("batch_size: {}", batch_size);
 		assert(qo_indptr.size() == batch_size + 1);
-		assert(qo_indptr.dim1 == 1);
 		this->qo_indptr = qo_indptr.ptr;
 
 		assert(kv_indptr.layout == PllmLayout::ROW_MAJOR);
 		assert(kv_indptr.size() == batch_size + 1);
-		assert(kv_indptr.dim1 == 1);
 		this->kv_indptr = kv_indptr.ptr;
 
 		this->kv_indices = kv_indices;
 
 		assert(kv_last_page_len.size() == batch_size);
-		assert(kv_last_page_len.dim1 == 1);
 		this->kv_last_page_len = kv_last_page_len.ptr;
 
 		this->q = input.ptr;
@@ -310,9 +312,9 @@ public:
 							 workspace_size_in_bytes,
 							 this->qo_indptr,
 							 this->batch_size,
-							 MODEL_QO_HEADS,
-							 MODEL_KV_HEADS,
-							 MODEL_HEAD_DIM,
+							 ModelConfig.model_qo_heads_gpu,
+							 ModelConfig.model_kv_heads_gpu,
+							 ModelConfig.model_head_dim,
 							 LaunchType::AllBlk);
 		spdlog::info("after handler");
 	}
@@ -321,11 +323,11 @@ public:
 		constexpr flashinfer::QKVLayout kv_layout = flashinfer::QKVLayout::kNHD;
 		using namespace flashinfer;
 
-		constexpr int num_kv_heads = MODEL_KV_HEADS;
-		constexpr int head_dim = MODEL_HEAD_DIM;
-		constexpr int page_size = FRAME_PAGE_SIZE;
-		constexpr int num_qo_heads = MODEL_QO_HEADS;
-		constexpr auto rotary_mode = PosEncodingMode::kNone;
+		int num_kv_heads = ModelConfig.model_kv_heads_gpu;
+		int head_dim = ModelConfig.model_head_dim;
+		int page_size = ModelConfig.frame_page_size;
+		int num_qo_heads = ModelConfig.model_qo_heads_gpu;
+		auto rotary_mode = PosEncodingMode::kNone;
 
 		// building KV cache structure
 		paged_kv_t<PageStorage::kIndices, kv_layout, half, int32_t> paged_kv(
@@ -372,10 +374,12 @@ public:
 	}
 
 	OperatorWrapper& logImpl(std::shared_ptr<spdlog::logger> logger = default_logger) override{
-		log_tensor(logger, name + " kv_indices", kv_indptr_tensor, 1, 20);
+		log_tensor(logger, name + " kv_indptr", kv_indptr_tensor, 1, 20);
+		log_tensor(logger, name + " qo_indptr", qo_indptr_tensor, 1, 20);
 		log_tensor(logger, name + " kv_last_page_len", kv_last_page_len_tensor, 1, 20);
 		log_tensor(logger, name + " in", input_tensor, 10, 20);
 		log_tensor(logger, name + " out", output_tensor, 10, 20);
+		log_tensor(logger, name+" kv_data", pllmTensor<half>(kv_data, size_t(ModelConfig.max_page_num * ModelConfig.frame_page_size * 2), size_t(ModelConfig.model_head_dim * ModelConfig.model_kv_heads_gpu), PllmLayout::ROW_MAJOR), 32, 20, 102 * 32);
 		return *this;
 	}
 };

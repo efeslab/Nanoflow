@@ -168,10 +168,9 @@ __global__ void rowMaxKernel(half *d_matrix, half *d_maxVals, int *d_argMax, int
 
     int tid = threadIdx.x;
     int row = blockIdx.x;
-    int index = row * cols + tid;
 
     half maxVal = -10000;
-    int maxIdx = -1;
+    int maxIdx = 0;
 
     // Process multiple elements per thread if necessary
     for (int i = tid; i < cols; i += blockDim.x) {
@@ -206,10 +205,96 @@ __global__ void rowMaxKernel(half *d_matrix, half *d_maxVals, int *d_argMax, int
 }
 
 // Wrapper function to launch the kernel
-void computeRowMax(half *d_matrix, half *d_maxVals, int *d_argMax, int rows, int cols) {
+void computeRowMax(half *d_matrix, half *d_maxVals, int *d_argMax, int rows, int cols, cudaStream_t stream) {
     dim3 blockSize(1024);
     dim3 gridSize(rows);
     size_t sharedMemSize = blockSize.x * (sizeof(half) + sizeof(int));
 
-    rowMaxKernel<<<gridSize, blockSize, sharedMemSize>>>(d_matrix, d_maxVals, d_argMax, cols);
+    rowMaxKernel<<<gridSize, blockSize, sharedMemSize, stream>>>(d_matrix, d_maxVals, d_argMax, cols);
+}
+
+
+__global__ void copyLinesHalf(const __half* input, __half* output, const int* keeplist, int numCols) {
+    int row = blockIdx.x;
+    int threadId = threadIdx.x;
+
+    // Calculate the row to copy based on the keeplist format
+    int sourceRow = keeplist[row + 1] - 1;
+
+    int elementsPerThread = sizeof(float4) / sizeof(__half);
+
+    // Each thread processes elements in a loop
+    for (int i = threadId * elementsPerThread; i < numCols; i += blockDim.x * elementsPerThread) {
+        float4* srcPtr = (float4*)(input + sourceRow * numCols + i);
+        float4* dstPtr = (float4*)(output + row * numCols + i);
+        
+        *dstPtr = *srcPtr;
+    }
+}
+
+// Wrapper function
+void copySelectedRows(int numKeepRows, int numCols, const int* d_keeplist, const __half* d_input, __half* d_output, cudaStream_t stream) {
+    // Define block size (number of threads per block)
+    int blockSize = 128;  // You can adjust this as needed
+    
+    // Define grid size (number of blocks in the grid)
+    int gridSize = numKeepRows;  // One block per row in the keeplist
+
+    // Launch the kernel
+    copyLinesHalf<<<gridSize, blockSize, 0, stream>>>(d_input, d_output, d_keeplist, numCols);
+    
+    // Synchronize to check for errors
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+    }
+}
+
+// Kernel function using float4, each block copies one row
+__global__ void replicateKQVBiasKernel(const half* __restrict__ input, half* __restrict__ output, int n) {
+    int row = blockIdx.x;     // Each block handles one row
+    int tid = threadIdx.x;
+
+    const int elements_per_float4 = 8;  // Each float4 can hold 8 half elements
+    int num_float4 = n / elements_per_float4;   // Number of float4 copies needed per row
+    int remainder = n % elements_per_float4;    // Remaining elements to process
+
+    const float4* input_f4 = reinterpret_cast<const float4*>(input);
+    float4* output_f4 = reinterpret_cast<float4*>(output);
+
+    // Copy using float4
+    for (int i = tid; i < num_float4; i += blockDim.x) {
+        int idx = i;
+        int out_idx = row * num_float4 + i;
+        // if (blockIdx.x == 0) {
+        //     printf("row: %d, idx: %d, out_idx: %d\n", row, idx, out_idx);
+        // }
+        output_f4[out_idx] = input_f4[idx];
+    }
+
+    // Handle remaining elements
+    if (tid == 0 && remainder > 0) {
+        int start_idx = num_float4 * elements_per_float4;
+        for (int i = 0; i < remainder; ++i) {
+            output[row * n + start_idx + i] = input[start_idx + i];
+        }
+    }
+}
+
+// Wrapper function with cudaStream_t parameter
+void replicateKQVBias(const half* d_input, half* d_output, int n, int m, cudaStream_t stream) {
+    int threads_per_block = 128;
+    int blocks_per_grid = m;
+
+
+    // Launch kernel on the specified stream
+    replicateKQVBiasKernel<<<blocks_per_grid, threads_per_block, 0, stream>>>(d_input, d_output, n);
+
+    // Check if kernel launch was successful
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
+    }
+
+    // No device synchronization
 }
