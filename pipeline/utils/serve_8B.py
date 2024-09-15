@@ -54,6 +54,8 @@ pipeline_map = {
     "NON_OVERLAP_LOCAL": pllm_python.PipelineType.NON_OVERLAP_LOCAL,
     "NANOBATCH_LOCAL": pllm_python.PipelineType.NANOBATCH_LOCAL,
     "KQVBIAS": pllm_python.PipelineType.KQVBIAS,
+    "NANOBATCH_KQVBIAS": pllm_python.PipelineType.NANOBATCH_KQVBIAS,
+    "NONOVERLAP_KQVBIAS": pllm_python.PipelineType.NONOVERLAP_KQVBIAS,
 }
 
 pipetype = pllm_python.PipelineType.PLLM

@@ -79,7 +79,7 @@ int main(int argc, char** argv) {
 	updateData.resize(nranks);
 	int global_batch_size = j["pipeline_configs"]["global_batch_size"];
 	for (int rank = 0; rank < nranks; ++rank) {
-		createUpdateData(updateData[rank], rank, global_batch_size);
+		createUpdateData(updateData[rank], rank, global_batch_size, 1024, 512);
 	}
 
 #endif
@@ -119,6 +119,12 @@ int main(int argc, char** argv) {
 	}
 	else if (pipeDesc == "KQVBIAS") {
 		p = Worker::PipelineType::KQVBIAS;
+	}
+	else if (pipeDesc == "NONOVERLAP_KQVBIAS") {
+		p = Worker::PipelineType::NONOVERLAP_KQVBIAS;
+	}
+	else if (pipeDesc == "NANOBATCH_KQVBIAS") {
+		p = Worker::PipelineType::NANOBATCH_KQVBIAS;
 	}
 	else {
 		spdlog::error("Unknown pipeline type {}", pipeDesc);

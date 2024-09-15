@@ -55,10 +55,12 @@ def load_single_weight(i, weight_path):
         layer_weight.W_U = to_vortex_weight(original_tensors[f"U_{l}"])
         layer_weight.W_G = to_vortex_weight(original_tensors[f"G_{l}"])
         layer_weight.W_D = to_vortex_weight(original_tensors[f"D_{l}"])
-        layer_weight.W_KQV = to_vortex_weight(original_tensors[f"KQV_{l}"])
-        layer_weight.B_KQV = to_vortex_weight(original_tensors[f"BKQV_{l}"])
+        layer_weight.W_KQV = to_vortex_weight(original_tensors[f"KQV_{l}"])        
         layer_weight.W_LN_Attention = to_vortex_weight(original_tensors[f"LNATT_{l}"])
         layer_weight.W_LN_FFN = to_vortex_weight(original_tensors[f"LNFFN_{l}"])
+        if f"BKQV_{l}" in original_tensors: # compatibility for 8B models (local pipeline)
+            # print(f"Loading BKQV_{l}")
+            layer_weight.B_KQV = to_vortex_weight(original_tensors[f"BKQV_{l}"])
         layer_weights.append(layer_weight)
     model_weight.layer_weight = layer_weights
     return original_tensors, model_weight, i

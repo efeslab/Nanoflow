@@ -282,7 +282,7 @@ __global__ void replicateKQVBiasKernel(const half* __restrict__ input, half* __r
 }
 
 // Wrapper function with cudaStream_t parameter
-void replicateKQVBias(const half* d_input, half* d_output, int n, int m, cudaStream_t stream) {
+void replicateKQVBias(const half* d_input, half* d_output, int m, int n, cudaStream_t stream) {
     int threads_per_block = 128;
     int blocks_per_grid = m;
 

@@ -57,5 +57,5 @@
         "hf_path": "../../../hf/hub/models--Qwen--Qwen2-72B-Instruct/snapshots/fddbbd7b69a1fd7cf9b659203b37ae3eb89059e1",
         "pipeline_type": "KQVBIAS"
     }
-  }
+  } 
      

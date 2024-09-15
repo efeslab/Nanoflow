@@ -29,6 +29,8 @@ Pipeline::Pipeline(vortexInitData* input_data, int rank, int nranks, int vnranks
 	, kqv_bias(kqv_bias)
 	, gemv_dep() {
 	spdlog::info("Pipeline constructor");
+	spdlog::info("nanobatch_only: {}", nanobatch_only);
+	spdlog::info("kqv_bias: {}", kqv_bias);
 	// sampled tokens 
 	cudaMallocHost(&outputTokens, 4096*sizeof(int));
 
@@ -1052,7 +1054,7 @@ void Pipeline::config(vortexConfigData* config_data){
 			// spdlog::info("b_kqv: {}", (size_t)input_data->weight.layer_weight[layer].B_KQV.ptr);
 			// pllmTensor<half> B_KQV_tensor = pllmTensor{input_data->weight.layer_weight[layer].B_KQV.ptr, ModelConfig.kqv_n, 1, PllmLayout::ROW_MAJOR};
 			// log_tensor(spdlog::default_logger(), "B_KQV_tensor", B_KQV_tensor, ModelConfig.kqv_n, 1);
-			replicateKQVBias(input_data->weight.layer_weight[layer].B_KQV.ptr, (half*)KQV_bias.ptr, ModelConfig.kqv_n, globalbatch, stream_gemm);
+			replicateKQVBias(input_data->weight.layer_weight[layer].B_KQV.ptr, (half*)KQV_bias.ptr, globalbatch, ModelConfig.kqv_n, stream_gemm);
 		}
 	}
 	

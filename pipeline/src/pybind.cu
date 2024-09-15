@@ -231,11 +231,13 @@ PYBIND11_MODULE(pllm_python, m) {
         .value("PLLM", Worker::PipelineType::PLLM)
         .value("NONOVERLAP", Worker::PipelineType::NONOVERLAP)
         .value("NANOBATCH", Worker::PipelineType::NANOBATCH)
-        .value("PLLMOFFLOAD", Worker::PipelineType::PLLMOFFLOAD)
-        .value("KQVBIAS", Worker::PipelineType::KQVBIAS)
+        .value("PLLMOFFLOAD", Worker::PipelineType::PLLMOFFLOAD)        
         .value("LOCAL", Worker::PipelineType::LOCAL)
         .value("NON_OVERLAP_LOCAL", Worker::PipelineType::NON_OVERLAP_LOCAL)
         .value("NANOBATCH_LOCAL", Worker::PipelineType::NANOBATCH_LOCAL)
+        .value("NONOVERLAP_KQVBIAS", Worker::PipelineType::NONOVERLAP_KQVBIAS)
+        .value("NANOBATCH_KQVBIAS", Worker::PipelineType::NANOBATCH_KQVBIAS)
+        .value("KQVBIAS", Worker::PipelineType::KQVBIAS)
         ;
 
     pybind11::class_<vortexWeight>(m, "VortexWeight")

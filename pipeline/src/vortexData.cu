@@ -58,13 +58,15 @@ void createInitData(vortexInitData& data, vortexModelWeight& weight, int rank) {
 
 
 
-void createUpdateData(vortexUpdateData& data, int rank, int global_batch_size) {
+void createUpdateData(vortexUpdateData& data, int rank, int global_batch_size, int avg_prefill_length, int avg_decode_length) {
 	cudaSetDevice(rank);
 	// avg prefill length 1024, avg decode length 512
-	spdlog::info("global_batch_size = {}", global_batch_size);
-	int decodePrefillBorder = global_batch_size / 3; // 1024 * 1/3 real decode prefill border not nanobatch 1 size
-	int prefillNum = 2;// (global_batch_size - decodePrefillBorder + 1023) / 1024; // 1024-340 only contain 1 prefill (avg 1024)
-	int denseBatch = global_batch_size; //
+	spdlog::info("[createUpdateData]: global_batch_size = {}, avg_prefill_length = {}, avg_decode_length = {}", global_batch_size, avg_prefill_length, avg_decode_length);
+	int decodePrefillBorder = static_cast<int>(global_batch_size * static_cast<float>(avg_decode_length) / (avg_decode_length + avg_prefill_length)); // 1024 * 1/3 real decode prefill border not nanobatch 1 size
+	spdlog::info("decodePrefillBorder = {}", decodePrefillBorder);
+	int prefillNum = (global_batch_size - decodePrefillBorder + avg_prefill_length - 1) / avg_prefill_length;// (global_batch_size - decodePrefillBorder + 1023) / 1024; // 1024-340 only contain 1 prefill (avg 1024)
+	spdlog::info("prefillNum = {}", prefillNum);
+	int denseBatch = global_batch_size; 
 
 	int* input_tokens;
 	CUDA_CHECK(cudaMallocHost(&input_tokens, denseBatch * sizeof(int)));
@@ -75,8 +77,13 @@ void createUpdateData(vortexUpdateData& data, int rank, int global_batch_size) {
 	}
 	CUDA_CHECK(cudaMemcpy(input_tokens, host_input_tokens, denseBatch* sizeof(int), cudaMemcpyHostToDevice));
 	
+	std::vector<int32_t> prefillLengths;
+	for (int i = 0; i < prefillNum - 1; i++)
+	{
+		prefillLengths.push_back(avg_prefill_length);
+	}
+	prefillLengths.push_back(denseBatch - decodePrefillBorder - (prefillNum - 1) * avg_prefill_length);
 
-	int prefillLengths[] = {1024 ,  denseBatch - 1024- decodePrefillBorder };
 	std::vector<int32_t> input_indptr={0};
 	for (int i = 0; i < decodePrefillBorder; i++) {
 		input_indptr.push_back(i+1);
@@ -85,6 +92,12 @@ void createUpdateData(vortexUpdateData& data, int rank, int global_batch_size) {
 	{
 		input_indptr.push_back(input_indptr.back() + prefillLengths[i]);
 	}
+
+	spdlog::info("input_indptr size = {}", input_indptr.size());
+	// for (int i = 0; i < input_indptr.size(); i++)
+	// {
+	// 	spdlog::info("input_indptr[{}] = {}", i, input_indptr[i]);
+	// }
 
 	int32_t * input_indptr_device;
 	CUDA_CHECK(cudaMallocHost(&input_indptr_device, (decodePrefillBorder + prefillNum + 1) * sizeof(int32_t)));

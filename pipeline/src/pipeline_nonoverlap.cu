@@ -6,10 +6,11 @@ NonOverlapPipeline::NonOverlapPipeline(vortexInitData* input_data,
 									   int nrank,
 									   int nranks,
 									   int vnranks,
-									   bool local)
-	: PipelineBase(input_data, nrank, nranks, vnranks),
-	  local(local)
-	{
+									   bool kqv_bias)
+	: PipelineBase(input_data, nrank, nranks, vnranks)
+	, kqv_bias(kqv_bias) {
+	spdlog::info("Init pipeline (non-overlap)");
+	spdlog::info("kqv_bias: {}", kqv_bias);
 	// sampled tokens 
 	cudaMallocHost(&outputTokens, 4096*sizeof(int));
 	init();
@@ -42,7 +43,7 @@ vortexOutputData NonOverlapPipeline::run() {
 	embedding.run().log(private_logger);
 
 	for (int iter = 0; iter < ModelConfig.run_layer; ++iter) {
-		setWeight(iter);
+		setWeight(iter%ModelConfig.model_layer);
 		layerNormAttention.run().log(private_logger);
 		KQV->run().log(private_logger);
 		roPEAppend.run().log(private_logger);
@@ -158,6 +159,16 @@ void NonOverlapPipeline::config(vortexConfigData* config_data) {
 	LOGITS->set_shape(globalbatch, ModelConfig.vocab_size, ModelConfig.model_hidden_dim);
 	dual.set_shape(globalbatch, ModelConfig.model_ff_dim_gpu, ModelConfig.model_hidden_dim);
 
+	spdlog::info("kqv_bias: {}", kqv_bias);
+	if (kqv_bias) {
+		for (int layer = 0; layer < ModelConfig.model_layer; layer++) {
+			pllmTensor<cutlass::half_t> KQV_bias = tmpBufferM.allocTensor(globalbatch, ModelConfig.kqv_n, PllmLayout::ROW_MAJOR);
+			KQV_biases.push_back(KQV_bias);
+			replicateKQVBias(input_data->weight.layer_weight[layer].B_KQV.ptr, (half*)KQV_bias.ptr, globalbatch, ModelConfig.kqv_n, stream_all);
+		}
+	}
+
+
 	spdlog::info("Init schedule");
 	ScheduleInit();
 	spdlog::info("Init gemm");
@@ -195,6 +206,9 @@ void NonOverlapPipeline::setName(){
 }
 void NonOverlapPipeline::setWeight(int layer) {
 
+	if (kqv_bias) {
+		KQV->setC(KQV_biases[layer]);
+	}
 	bool success = true;
 	success &= O->set_weight(input_data->weight.layer_weight[layer].W_O1);
 
@@ -359,9 +373,9 @@ void NonOverlapPipeline::GEMVOpUpdate() {
 			  kv_last_page_len_split[0],
 			  tensor_cast<cutlass::half_t, half>(gemvInput),
 			  tensor_cast<cutlass::half_t, half>(gemvOutput));
-	log_tensor(spdlog::default_logger(), "GEMV kv_indptr_split", pllmTensor{update_data.kv_indptr, total_batch_size + 1}, 1, total_batch_size + 1);
-	log_tensor(spdlog::default_logger(), "GEMV kv_last_page_len_split", pllmTensor{update_data.kv_last_page_len, total_batch_size}, 1, total_batch_size);
-	log_tensor(spdlog::default_logger(), "GEMV input_ptr_split", pllmTensor{update_data.input_indptr, total_batch_size + 1}, 1, total_batch_size + 1);
+	// log_tensor(spdlog::default_logger(), "GEMV kv_indptr_split", pllmTensor{update_data.kv_indptr, total_batch_size + 1}, 1, total_batch_size + 1);
+	// log_tensor(spdlog::default_logger(), "GEMV kv_last_page_len_split", pllmTensor{update_data.kv_last_page_len, total_batch_size}, 1, total_batch_size);
+	// log_tensor(spdlog::default_logger(), "GEMV input_ptr_split", pllmTensor{update_data.input_indptr, total_batch_size + 1}, 1, total_batch_size + 1);
 
 	prefill.init(update_data.prefillNum,
 				 108,
@@ -389,7 +403,7 @@ void NonOverlapPipeline::GEMMOpInit() {
 	// UG->init();
 	dual.init();
 	D->init(0.125);
-	KQV->init();
+	KQV->init(1);
 	for (int i = 0; i < gemmNum; ++i) {
 		gemms[i]->setStream(stream_all);
 	}

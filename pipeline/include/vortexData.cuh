@@ -111,7 +111,7 @@ struct vortexConfigData{
 };
 vortexModelWeight modelWeightToGPU(vortexModelWeight& modelWeight, int rank);
 void createInitData(vortexInitData& data, vortexModelWeight& weight, int rank);
-void createUpdateData(vortexUpdateData& data, int rank, int global_batch_size);
+void createUpdateData(vortexUpdateData& data, int rank, int global_batch_size, int avg_prefill_length, int avg_decode_length);
 void createModelWeight(vortexModelWeight& data, int rank);
 void createModelWeightCPU(vortexModelWeight& data, int rank);
 void allocateKVData(vortexInitData& data, int rank);

@@ -15,7 +15,7 @@ void silu_and_multiply(half *d_input, half *d_output, int M, int N, cudaStream_t
 void extractRankSubmatrixHalfDevice(half* d_inputMatrix, half* d_outputMatrix, int M, int N, int nrank, int rank, cudaStream_t stream);
 void computeRowMax(half *d_matrix, half *d_maxVals, int *d_argMax, int rows, int cols, cudaStream_t stream);
 void copySelectedRows(int numKeepRows, int numCols, const int* d_keeplist, const __half* d_input, __half* d_output, cudaStream_t stream);
-void replicateKQVBias(const half* d_input, half* d_output, int n, int m, cudaStream_t stream);
+void replicateKQVBias(const half* d_input, half* d_output, int m, int n, cudaStream_t stream);
 namespace flashinfer {
 
 template <uint32_t head_dim, uint32_t bdx, uint32_t vec_size, flashinfer::PageStorage page_storage, flashinfer::QKVLayout layout,

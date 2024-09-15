@@ -231,12 +231,15 @@ void Worker::init() {
 	}
 
 	spdlog::info("Creating pipeline, rank {}, core {}", rank, sched_getcpu());
-	if (PipeTy == PipelineType::PLLM || PipeTy == PipelineType::PLLMOFFLOAD || PipeTy == PipelineType::NANOBATCH || PipeTy == PipelineType::KQVBIAS)
+	if (PipeTy == PipelineType::PLLM || PipeTy == PipelineType::PLLMOFFLOAD || PipeTy == PipelineType::NANOBATCH || PipeTy == PipelineType::KQVBIAS || PipeTy == PipelineType::NANOBATCH_KQVBIAS)
 	{
-		pipeline = std::make_unique<Pipeline>(input, rank, nranks, vnranks, PipeTy == PipelineType::PLLMOFFLOAD, PipeTy == PipelineType::NANOBATCH, PipeTy == PipelineType::KQVBIAS);
+		pipeline = std::make_unique<Pipeline>(input, rank, nranks, vnranks, 
+											PipeTy == PipelineType::PLLMOFFLOAD, 
+											(PipeTy == PipelineType::NANOBATCH || PipeTy == PipelineType::NANOBATCH_KQVBIAS), 
+											(PipeTy == PipelineType::KQVBIAS || PipeTy == PipelineType::NANOBATCH_KQVBIAS));
 	}
-	else if (PipeTy == PipelineType::NONOVERLAP)
-		pipeline = std::make_unique<NonOverlapPipeline>(input, rank, nranks, vnranks);
+	else if (PipeTy == PipelineType::NONOVERLAP || PipeTy == PipelineType::NONOVERLAP_KQVBIAS)
+		pipeline = std::make_unique<NonOverlapPipeline>(input, rank, nranks, vnranks, PipeTy == PipelineType::NONOVERLAP_KQVBIAS);
 	else if (PipeTy == PipelineType::LOCAL || PipeTy == PipelineType::NANOBATCH_LOCAL)
 		pipeline = std::make_unique<LocalPipeline>(input, rank, nranks, vnranks, PipeTy == PipelineType::NANOBATCH_LOCAL);
 	else if (PipeTy == PipelineType::NON_OVERLAP_LOCAL)

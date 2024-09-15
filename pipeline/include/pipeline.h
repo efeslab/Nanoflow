@@ -224,10 +224,11 @@ public:
 
 	cudaStream_t stream_all;
 	int* outputTokens;
-	bool local;
+	bool kqv_bias = false;
+	std::vector<pllmTensor<cutlass::half_t>> KQV_biases;
 
 public:
-	NonOverlapPipeline(vortexInitData* input_data, int nrank, int nranks, int vnranks, bool local = false);
+	NonOverlapPipeline(vortexInitData* input_data, int nrank, int nranks, int vnranks, bool kqv_bias = false);
 	void ScheduleInit();
 	void GEMMOpInit();
 	void GEMVOpInit();
