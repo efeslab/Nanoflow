@@ -44,12 +44,13 @@ def main():
                 continue
             
             skip_cycles = 2000 if int(output_len) < 10 else 10000
+            output_prefix = os.path.join(type_result_base, f"{input_len}-{output_len}-{rate}")
             # Construct the command
             command = [
                 "python", "serve_8B.py",
                 f"--config_path=../config_all/llama2-70B/{pipeline_type}.json",
                 f"--trace_path={trace_path}",
-                f"--output_prefix={os.path.join(type_result_base, f"{input_len}-{output_len}-{rate}")}",
+                f"--output_prefix={output_prefix}",
                 f"--skip_cycles={skip_cycles}",
                 f"--empty_weight=True",
                 f"--run_cycles=1500"

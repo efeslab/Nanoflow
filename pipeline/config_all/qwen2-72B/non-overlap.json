@@ -29,21 +29,23 @@
     "model_configs": {
         "gpu_num": 8,
         "run_layer": 80,
-        "allocate_kv_data_batch": 1480,
+        "allocate_kv_data_batch": 1300,
         "frame_page_size": 16,
-        "max_batch_size": 6144,
+        "max_batch_size": 2048,
         "gpu_mem": 68719476736,
         "page_mem_size": 32768
     },
     "pipeline_configs": {
         "gemm_op_tag": [
-    	"128_128_32_64_64_32_1_5_RowMajor_RowMajor_RowMajor",
-        "128_128_32_64_64_32_2_5_RowMajor_RowMajor_RowMajor",
-        "128_128_32_64_64_32_1_5_RowMajor_RowMajor_RowMajor",
-        "128_128_32_64_64_32_2_5_RowMajor_RowMajor_RowMajor",
-        "128_128_32_64_64_32_3_5_RowMajor_RowMajor_RowMajor",
-        "128_128_32_64_64_32_3_5_RowMajor_RowMajor_RowMajor",
-		"128_256_32_64_64_32_1_3_RowMajor_RowMajor_RowMajor"
+    	"128_128_32_64_64_32_3_5_RowMajor_RowMajor_RowMajor",
+            "128_128_32_64_64_32_1_4_RowMajor_RowMajor_RowMajor",
+            "128_128_32_64_64_32_1_5_RowMajor_RowMajor_RowMajor",
+            "128_128_32_64_64_32_1_4_RowMajor_RowMajor_RowMajor",
+            "128_64_64_64_32_64_2_3_RowMajor_RowMajor_RowMajor",
+            "128_128_32_64_64_32_2_5_RowMajor_RowMajor_RowMajor",
+            "128_128_32_64_64_32_1_5_RowMajor_RowMajor_RowMajor",
+            "128_64_64_64_32_64_2_3_RowMajor_RowMajor_RowMajor",
+            "128_256_32_64_64_32_2_3_RowMajor_RowMajor_RowMajor"
         ],
         "global_batch_size": 2048,
         "nanobatch_1_size": 640,

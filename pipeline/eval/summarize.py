@@ -3,7 +3,7 @@ import csv
 import os
 from datetime import datetime
 
-base_dir = "/code/pllm/compute-bound/eval/"
+base_dir = "./"
 save_dir = base_dir + "eval_results/"
 offline_const = base_dir + "eval-fix-offline/results/"
 offline_real = base_dir + "eval-real-offline/results/"
