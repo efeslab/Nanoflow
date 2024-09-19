@@ -3,6 +3,7 @@
 #include <concepts>
 #include <cassert>
 #include "tensor.cuh"
+#include "spdlog/spdlog.h"
 
 template <typename Tdst, typename Tsrc>
 inline Tdst type_cast(Tsrc src) {
@@ -47,6 +48,10 @@ public:
 			return pllmTensor<T>{alloc(M * N), M, N, layout};
 		else
 			return pllmTensor<T>{alloc(M * N), N, M, layout};
+	}
+
+	size_t getAllocation(){
+		return allocated;
 	}
 
 private:

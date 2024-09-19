@@ -7,4 +7,4 @@
 
 
 __global__ void moveKVcacheKernel(int finished_req_num, int32_t * finished_index,
-                                         int32_t* kv_indptr, int32_t* kv_indices, half* output, half* kv_data, bool host_to_gpu = true);
+                                         int32_t* kv_indptr, int32_t* kv_indices, half* output, half* kv_data, int page_mem_size, bool host_to_gpu = true);

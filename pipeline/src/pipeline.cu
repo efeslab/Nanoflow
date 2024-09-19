@@ -11,6 +11,7 @@ PipelineBase::PipelineBase(vortexInitData* input_data, int nrank, int nranks, in
 	, vnranks(vnranks)
 	, tmpBufferM(ptr_cast<cutlass::half_t>(input_data->tmp_buffer), input_data->tmp_buffer_size) {
 	spdlog::info("rank: {}, nranks: {}", rank, nranks);
+	spdlog::info("tmp_buffer_size {}", input_data->tmp_buffer_size);
 	std::string private_file_name = "log_" + std::to_string(rank) + ".txt";
 	private_logger = spdlog::basic_logger_mt("private_logger" + std::to_string(rank), private_file_name, true);
 	private_logger->set_level(spdlog::level::info);
@@ -21,11 +22,15 @@ PipelineBase::PipelineBase(vortexInitData* input_data, int nrank, int nranks, in
 
 
 
-Pipeline::Pipeline(vortexInitData* input_data, int rank, int nranks, int vnranks, bool enable_offload)
+Pipeline::Pipeline(vortexInitData* input_data, int rank, int nranks, int vnranks, bool enable_offload, bool nanobatch_only, bool kqv_bias)
 	: PipelineBase(input_data, rank, nranks, vnranks)
 	, enable_offload(enable_offload)
+	, nanobatch_only(nanobatch_only)
+	, kqv_bias(kqv_bias)
 	, gemv_dep() {
 	spdlog::info("Pipeline constructor");
+	spdlog::info("nanobatch_only: {}", nanobatch_only);
+	spdlog::info("kqv_bias: {}", kqv_bias);
 	// sampled tokens 
 	cudaMallocHost(&outputTokens, 4096*sizeof(int));
 
@@ -54,7 +59,6 @@ Pipeline::Pipeline(vortexInitData* input_data, int rank, int nranks, int vnranks
 		cudaMemcpy(load_idx, load_idx_host, 2048*sizeof(int32_t), cudaMemcpyHostToDevice);
 		
 	}
-
 	spdlog::info("allocation done");
 	init();
 }
@@ -70,16 +74,13 @@ void Pipeline::StreamInit() {
 void Pipeline::setName() {
 	SET_NAME_PTR(O1);
 	SET_NAME_PTR(O2);
-	SET_NAME_PTR(UG1);
-	SET_NAME_PTR(UG2);
 	SET_NAME_PTR(D1);
 	SET_NAME_PTR(D2);
 	SET_NAME_PTR(KQV1);
 	SET_NAME_PTR(KQV2);
 	SET_NAME_PTR(KQV3);
 	SET_NAME_PTR(KQV4);
-	SET_NAME_PTR(LOGITS1);
-	SET_NAME_PTR(LOGITS2);
+	SET_NAME_PTR(LOGITS);
 
 	SET_NAME_REF(AG_O1);
 	SET_NAME_REF(AR_O2);
@@ -107,20 +108,72 @@ void Pipeline::setName() {
 	SET_NAME_REF(layerNormFFN2);
 	SET_NAME_REF(layerNormModel1);
 
-	SET_NAME_REF(activation1);
-	SET_NAME_REF(activation2);
-
-	for (int i = 0; i < 4; i++) {
-		SET_NAME_REF(roPEAppends[i]);
-	}
+	SET_NAME_REF(roPEAppends[0]);
+	SET_NAME_REF(roPEAppends[1]);
+	SET_NAME_REF(roPEAppends[2]);
+	SET_NAME_REF(roPEAppends[3]);
 
 	SET_NAME_REF(pageAgg);
 	SET_NAME_REF(pageDisp);
 	SET_NAME_REF(splitTensor);
 
-	SET_NAME_REF(maxSampler1);
-	SET_NAME_REF(maxSampler2);
 
+	SET_NAME_REF(maxSampler);
+	SET_NAME_REF(dual1);
+	SET_NAME_REF(dual2);
+	SET_NAME_REF(keepToken);
+	SET_NAME_REF(copyTensor);
+
+}
+
+void Pipeline::assignSameStream(){
+
+	for (auto gemm : gemms) {
+		gemm->setStream(stream_gemm);
+	}
+
+	for (auto gemv : gemvs) {
+		gemv->setStream(stream_gemm);
+	}
+	prefill.setStream(stream_gemm);
+
+	// assign same stream
+	AG_O1.setStream(stream_gemm);
+	AR_O2.setStream(stream_gemm);
+	AR_D1.setStream(stream_gemm);
+	AR1_D2.setStream(stream_gemm);
+	AR2_D2.setStream(stream_gemm);
+	AG1_GEMV.setStream(stream_gemm);
+
+	genEmbedding1.setStream(stream_gemm);
+	genEmbedding2_1_partial.setStream(stream_gemm);
+	genEmbedding2_1.setStream(stream_gemm);
+	genEmbedding2_2.setStream(stream_gemm);
+	genEmbedding2_2_partial.setStream(stream_gemm);
+
+	dual1.setStream(stream_gemm);
+	dual2.setStream(stream_gemm);
+
+	layerNormAttention1.setStream(stream_gemm);
+	layerNormAttention2_1.setStream(stream_gemm);
+	layerNormAttention2_2.setStream(stream_gemm);
+	layerNormFFN1.setStream(stream_gemm);
+	layerNormFFN2.setStream(stream_gemm);
+	layerNormModel1.setStream(stream_gemm);
+
+	for (int i = 0; i < 4; i++) {
+		roPEAppends[i].setStream(stream_gemm);
+	}
+
+	pageAgg.setStream(stream_gemm);
+	pageDisp.setStream(stream_gemm);
+
+	splitTensor.setStream(stream_gemm);
+
+	maxSampler.setStream(stream_gemm);
+
+	keepToken.setStream(stream_gemm);
+	copyTensor.setStream(stream_gemm);
 }
 
 
@@ -144,28 +197,31 @@ void Pipeline::GEMMOpInit() {
 
 	O1->init(1);
 	O2->init(0.125);
-	UG1->init();
-	UG2->init();
 	D1->init(0.125);
 	D2->init(0.125);
-	KQV1->init();
-	KQV2->init();
-	KQV3->init();
-	KQV4->init();
+	KQV1->init(1);
+	KQV2->init(1);
+	KQV3->init(1);
+	KQV4->init(1);
 
-	LOGITS1->set_weight(input_data->weight.lm_head); // important
-	LOGITS2->set_weight(input_data->weight.lm_head);
 
-	LOGITS1->init();
-	LOGITS2->init();
+	LOGITS ->set_weight(input_data->weight.lm_head);
 
-	LOGITS1->set_weight(input_data->weight.lm_head);
-	LOGITS2->set_weight(input_data->weight.lm_head);
+
+	LOGITS ->init();
+
+
+	LOGITS ->set_weight(input_data->weight.lm_head);
 
 	for (auto gemm : gemms) {
 		gemm->setStream(stream_gemm);
 	}
-	UG2->updateEventExistance(true, true);
+	// UG2->updateEventExistance(true, true);
+	dual1.init();
+	dual2.init();
+	dual1.setStream(stream_gemm);
+	dual2.setStream(stream_gemm);
+	dual2.updateEventExistance(true, true);
 }
 
 void Pipeline::GEMVOpInit() {
@@ -198,8 +254,6 @@ void Pipeline::OtherOpInit(){
 	layerNormAttention2_2.setStream(stream_other);
 	layerNormFFN1.setStream(stream_other);
 	layerNormFFN2.setStream(stream_other);
-	activation1.setStream(stream_gemm);
-	activation2.setStream(stream_gemm);
 	layerNormModel1.setStream(stream_other);
 	// layerNormModel2_1.setStream(stream_other);
 	// layerNormModel2_2.setStream(stream_other);
@@ -217,8 +271,10 @@ void Pipeline::OtherOpInit(){
 	pageAgg.setStream(stream_cpy);
 	pageDisp.setStream(stream_cpy);
 
-	maxSampler1.setStream(stream_gemm);
-	maxSampler2.setStream(stream_gemm);
+	maxSampler.setStream(stream_gemm);
+
+	keepToken.setStream(stream_gemm);
+	copyTensor.setStream(stream_gemm);
 }
 
 void Pipeline::NetOpInit() {
@@ -230,8 +286,8 @@ void Pipeline::NetOpInit() {
 	AR_O2.setStream(stream_net);
 	AR_O2.updateEventExistance(true, true);
 	AR_D1.setStream(stream_net);
-	AR1_D2.setEpsilon(1e-5);
-	AR2_D2.setEpsilon(1e-5);
+	AR1_D2.setEpsilon(ModelConfig.rms_norm_eps);
+	AR2_D2.setEpsilon(ModelConfig.rms_norm_eps);
 }
 
 void PipelineBase::NetOpPrepare() {
@@ -297,9 +353,9 @@ void Pipeline::ScheduleInit() {
 	// Nanobatch metadata
 	// KQV{1,2,3,4} output and AG{1,2}_GEMV both need to live on a contiguous buffer.
 	// The KQV{1,2,3,4} => GEMV{1,2,3,4} dependency will be embedded in their kernel implementation
-	const int kdim = MODEL_HEAD_DIM * MODEL_KV_HEADS;
-	const int qdim = MODEL_HEAD_DIM * MODEL_QO_HEADS;
-	const int vdim = MODEL_HEAD_DIM * MODEL_KV_HEADS;
+	const int kdim = ModelConfig.model_head_dim * ModelConfig.model_kv_heads_gpu;
+	const int qdim = ModelConfig.model_head_dim *  ModelConfig.model_qo_heads_gpu;
+	const int vdim = ModelConfig.model_head_dim *  ModelConfig.model_kv_heads_gpu;
 	const auto& KQV_shared_output = tmpBufferM.allocTensor(config_data.global_batch_size, kdim + qdim + vdim, getMajor(GEMM_NAME::KQV1, 2));
 
 	const auto& Q_shared = tmpBufferM.allocTensor(config_data.global_batch_size, qdim, getMajor(GEMM_NAME::KQV1, 2));
@@ -311,7 +367,7 @@ void Pipeline::ScheduleInit() {
 
 	// GEMV -> AG -> O1 -> UGD1
 	// GEMV -> O2 (split K) -> AR -> UGD2
-	const auto& GEMV_output_shared = tmpBufferM.allocTensor((O1->M + O2->M), MODEL_HIDDEN_DIM_PERGPU, getMajor(GEMM_NAME::O2, 0));
+	const auto& GEMV_output_shared = tmpBufferM.allocTensor((O1->M + O2->M),  ModelConfig.model_hidden_dim_pergpu, getMajor(GEMM_NAME::O2, 0));
 	spdlog::info(config_data.gemm_op_tag[static_cast<int>(GEMM_NAME::O1)]);
 	spdlog::info(config_data.gemm_op_tag[static_cast<int>(GEMM_NAME::O2)]);
 	gemvAggregateOutput = tensor_cast<cutlass::half_t, half>(GEMV_output_shared);
@@ -333,16 +389,20 @@ void Pipeline::ScheduleInit() {
 	// O1 -> AG_O1
 	
 	O1->setD(tmpBufferM.allocTensor(O1->M, O1->N, getMajor(GEMM_NAME::O1, 2)));
-	AG_O1.init(comm, connections, rank, nranks, O1->getD(), tmpBufferM.allocTensor(UG1->M, UG1->K, getMajor(GEMM_NAME::O1, 2)));
+	AG_O1.init(comm, connections, rank, nranks, O1->getD(), tmpBufferM.allocTensor(dual1.M, dual1.K, PllmLayout::ROW_MAJOR));
 	// BEFORE_LN_FFN_1_TR.setInput(AG_O1.getOutput()).setOutput(tmpBufferM.allocTensor(UG1->M, UG1->K, getMajor(GEMM_NAME::D1, 2)));
 	// AG_O1 -> LN_FFN1
-	layerNormFFN1.setInput(AG_O1.getOutput()).setOutput(tmpBufferM.allocTensor(UG1->M, UG1->K, getMajor(GEMM_NAME::UG1, 0)));
+	layerNormFFN1.setInput(AG_O1.getOutput()).setOutput(tmpBufferM.allocTensor(dual1.M, dual1.K, PllmLayout::ROW_MAJOR));
 	// LN_FFN1 -> UG1
-	UG1->setA(layerNormFFN1.getOutput()).setOutput(tmpBufferM.allocTensor(UG1->M, UG1->N, getMajor(GEMM_NAME::UG1, 2)));
+	const auto& Dual1_output_0 = tmpBufferM.allocTensor(dual1.M, dual1.N, PllmLayout::ROW_MAJOR);
+	const auto& Dual1_output_1 = tmpBufferM.allocTensor(dual1.M, dual1.N, PllmLayout::ROW_MAJOR);
+	const auto& activation1_output = tmpBufferM.allocTensor(D1->M, D1->K, PllmLayout::ROW_MAJOR);
+	dual1.setA(layerNormFFN1.getOutput());
+	dual1.setC(tmpBufferM.allocTensor(dual1.M, dual1.N, PllmLayout::ROW_MAJOR));
+	dual1.setD(Dual1_output_0, Dual1_output_1, activation1_output);
 	// UG1 -> activation1
-	activation1.setInput(UG1->getD()).setOutput(tmpBufferM.allocTensor(D1->M, D1->K, getMajor(GEMM_NAME::D1, 0)));
 	// activation1 -> D1
-	D1->setA(activation1.getOutput());
+	D1->setA(activation1_output);
 	// D1 -> AR_D1
 	AR_D1.init(comm, connections, rank, nranks, tmpBufferM.allocTensor(D1->M, D1->N, getMajor(GEMM_NAME::D1, 2)), tmpBufferM.allocTensor(D1->M, D1->N, getMajor(GEMM_NAME::D1, 2)));
 	D1->setOutput(AR_D1.getInput());
@@ -369,16 +429,21 @@ void Pipeline::ScheduleInit() {
 	// (prev)AG2_GEMV ->O2
 	O2->setA(GEMV_output_O1O2[1]);
 	// O2 -> AG_O2
-	AR_O2.init(comm, connections, rank, nranks, tmpBufferM.allocTensor(UG2->M, UG2->K, getMajor(GEMM_NAME::O2, 2)), tmpBufferM.allocTensor(UG2->M, UG2->K, getMajor(GEMM_NAME::O2, 2)));
+	AR_O2.init(comm, connections, rank, nranks, tmpBufferM.allocTensor(dual2.M, dual2.K, getMajor(GEMM_NAME::O2, 2)), tmpBufferM.allocTensor(dual2.M, dual2.K, getMajor(GEMM_NAME::O2, 2)));
 	O2->setD(AR_O2.getInput());
 	// AG_O2 -> LN_FFN2
-	layerNormFFN2.setInput(AR_O2.getOutput()).setOutput(tmpBufferM.allocTensor(UG2->M, UG2->K, getMajor(GEMM_NAME::UG2, 0)));
+	layerNormFFN2.setInput(AR_O2.getOutput()).setOutput(tmpBufferM.allocTensor(dual2.M, dual2.K, PllmLayout::ROW_MAJOR));
 	// LN_FFN2 -> UG2
-	UG2->setA(layerNormFFN2.getOutput()).setOutput(tmpBufferM.allocTensor(UG2->M, UG2->N, getMajor(GEMM_NAME::UG2, 2)));
 	// UG2 -> activation2
-	activation2.setInput(UG2->getD()).setOutput(tmpBufferM.allocTensor(D2->M, D2->K, getMajor(GEMM_NAME::D2, 0)));
+	const auto& Dual2_output_0 = tmpBufferM.allocTensor(dual2.M, dual2.N, PllmLayout::ROW_MAJOR);
+	const auto& Dual2_output_1 = tmpBufferM.allocTensor(dual2.M, dual2.N, PllmLayout::ROW_MAJOR);
+
+	const auto& activation2_output = tmpBufferM.allocTensor(D2->M, D2->K, PllmLayout::ROW_MAJOR);
+	dual2.setA(layerNormFFN2.getOutput());
+	dual2.setC(tmpBufferM.allocTensor(dual2.M, dual2.N, PllmLayout::ROW_MAJOR));
+	dual2.setD(Dual2_output_0, Dual2_output_1, activation2_output);
 	// activation2 -> D2
-	D2->setA(activation2.getOutput()).setOutput(tmpBufferM.allocTensor(D2->M, D2->N, getMajor(GEMM_NAME::D2, 2)));
+	D2->setA(activation2_output).setOutput(tmpBufferM.allocTensor(D2->M, D2->N, PllmLayout::ROW_MAJOR));
 	D2->setC(AR_O2.getOutput());
 	// D2 ->  D2_AR1 | D2_AR2
 	const auto& AR12_D2_input = D2->getD().splitTensor(getDim(GEMM_NAME::D2, 2), KQV3->M, KQV4->M);
@@ -392,7 +457,7 @@ void Pipeline::ScheduleInit() {
 	AR1_D2.init(comm, connections, rank, nranks, AR12_D2_input[0], AR12_output[0], AR1_before_split[0]);
 	AR2_D2.init(comm, connections, rank, nranks, AR12_D2_input[1], AR12_output[1], AR1_before_split[1]);
 	// LN_Attention2_1/2 needs a shared contiguous buffer for the self-attention residual connection
-	const auto& LN_Attn2_shared_output = tmpBufferM.allocTensor(KQV3->M + KQV4->M, KQV3->K, getMajor(GEMM_NAME::LOGITS2, 0));
+	const auto& LN_Attn2_shared_output = tmpBufferM.allocTensor(KQV3->M + KQV4->M, KQV3->K, PllmLayout::ROW_MAJOR);
 	const auto& LN_Attn2_output = LN_Attn2_shared_output.splitTensor(getDim(GEMM_NAME::KQV1, 0), KQV3->M, KQV4->M);
 	// TODO: O2 should setC(special column slice of LN_Attn2_shared_output)
 	// e.g.,
@@ -424,37 +489,55 @@ void Pipeline::ScheduleInit() {
 
 
 	// connect logits generation
+	const auto & shared_layerNormModel_output = tmpBufferM.allocTensor(config_data.global_batch_size, D2->N, PllmLayout::ROW_MAJOR);
+	const auto & shared_layerNormModel_output_split = shared_layerNormModel_output.splitTensor(PllmDimension::ROW, D1->M, D2->M);	
+	layerNormModel1.setInput(AR_D1.getOutput()).setOutput(shared_layerNormModel_output_split[0]);
+	copyTensor.setInput(tensor_cast<cutlass::half_t, half>(shared_AR_output))
+			  .setOutput(tensor_cast<cutlass::half_t, half>(shared_layerNormModel_output_split[1])); //layer norm shared output of every rank
 
-	layerNormModel1.setInput(AR_D1.getOutput()).setOutput(layerNormAttention1.getOutput());
-	// layerNormModel2_1.setInput(AR1_D2.getOutput()).setOutput(layerNormAttention2_1.getOutput());
-	// layerNormModel2_2.setInput(AR2_D2.getOutput()).setOutput(layerNormAttention2_2.getOutput());
 
-	LOGITS1->setA(layerNormModel1.getOutput().getSubTensor(rank, vnranks, PllmDimension::ROW));
-	LOGITS1->setOutput(tmpBufferM.allocTensor(LOGITS1->M, LOGITS1->N, getMajor(GEMM_NAME::LOGITS1, 2)));
-	pllmTensor<int> sample_output1 = {(int*)tmpBufferM.alloc(LOGITS1->M * sizeof(int) / sizeof (half)), LOGITS1->M, 1, PllmLayout::ROW_MAJOR};
-	maxSampler1.init(tensor_cast<cutlass::half_t, half>(LOGITS1->getD()), 
-					 tensor_cast<cutlass::half_t, half>(tmpBufferM.allocTensor(LOGITS1->M, 1, PllmLayout::ROW_MAJOR)),
-					 sample_output1); 
-
-	LOGITS2->setA(shared_AR_output.getSubTensor(rank, vnranks, PllmDimension::ROW));
-	LOGITS2->setOutput(tmpBufferM.allocTensor(LOGITS2->M, LOGITS2->N, getMajor(GEMM_NAME::LOGITS2, 2)));
 	
-	pllmTensor<int> sample_output2 = {(int*)tmpBufferM.alloc(LOGITS2->M * sizeof(int) / sizeof (half)), LOGITS2->M, 1, PllmLayout::ROW_MAJOR};
-	maxSampler2.init(tensor_cast<cutlass::half_t, half>(LOGITS2->getD()), 
-					 tensor_cast<cutlass::half_t, half>(tmpBufferM.allocTensor(LOGITS2->M, 1, PllmLayout::ROW_MAJOR)),
-					 sample_output2);
+	const auto & keep_token_output = tmpBufferM.allocTensor(config_data.global_batch_size, D2->N , PllmLayout::ROW_MAJOR);
+	keepToken.setInput(tensor_cast<cutlass::half_t, half>(shared_layerNormModel_output))
+			 .setOutput(tensor_cast<cutlass::half_t, half>(keep_token_output));
+	
+	const auto & LOGITS_output = tmpBufferM.allocTensor(config_data.global_batch_size, LOGITS->N , PllmLayout::ROW_MAJOR);
+	LOGITS->setA(keep_token_output);
+	LOGITS->setOutput(LOGITS_output);
+
+	int* sample_output_alloc = (int*)tmpBufferM.alloc(config_data.global_batch_size * sizeof(int) / sizeof (half));
+	pllmTensor<int> sample_output = {sample_output_alloc, config_data.global_batch_size, 1, PllmLayout::ROW_MAJOR};
+	const auto& maxSampler_maxVals = tmpBufferM.allocTensor(config_data.global_batch_size, 1, PllmLayout::ROW_MAJOR);
+	maxSampler.init(tensor_cast<cutlass::half_t, half>(LOGITS_output), 
+					 tensor_cast<cutlass::half_t, half>(maxSampler_maxVals),
+					 sample_output);
+	spdlog::info("allocated num: {}", tmpBufferM.getAllocation());
 }
 
 
 void Pipeline::setWeight(int layer) {
 	// Set weight before run the layer
+	if (kqv_bias) {
+		// private_logger->info("KQV_biases[layer].dim1 {}, dim2 {}", KQV_biases[layer].dim1, KQV_biases[layer].dim2);
+
+		const auto& KQV_biases_split = KQV_biases[layer].splitTensor(PllmDimension::ROW, KQV1->M, KQV2->M, KQV3->M, KQV4->M);
+		// private_logger->info("kqv_biases_split[0].ptr: {}, KQV1->M: {}", (size_t)KQV_biases_split[0].ptr, KQV1->M);
+		// private_logger->info("kqv_biases_split[1].ptr: {}, KQV2->M: {}", (size_t)KQV_biases_split[1].ptr, KQV2->M);
+		// private_logger->info("kqv_biases_split[2].ptr: {}, KQV3->M: {}", (size_t)KQV_biases_split[2].ptr, KQV3->M);
+		// private_logger->info("kqv_biases_split[3].ptr: {}, KQV4->M: {}", (size_t)KQV_biases_split[3].ptr, KQV4->M);
+		// spdlog::info("set KQV biases");
+		KQV1->setC(KQV_biases_split[0]);
+		KQV2->setC(KQV_biases_split[1]);
+		KQV3->setC(KQV_biases_split[2]);
+		KQV4->setC(KQV_biases_split[3]);
+		// private_logger->info("KQV_biases[layer].dim1 {}, dim2 {}", KQV_biases[layer].dim1, KQV_biases[layer].dim2);
+	}
+
 	bool success = true;
 	success &= O1->set_weight(input_data->weight.layer_weight[layer].W_O1);
 	success &= O2->set_weight(input_data->weight.layer_weight[layer].W_O2);
 
-	success &= UG1->set_weight(input_data->weight.layer_weight[layer].W_UG);
-	success &= UG2->set_weight(input_data->weight.layer_weight[layer].W_UG);
-
+	
 	success &= D1->set_weight(input_data->weight.layer_weight[layer].W_D);
 	success &= D2->set_weight(input_data->weight.layer_weight[layer].W_D);
 
@@ -463,11 +546,13 @@ void Pipeline::setWeight(int layer) {
 	success &= KQV3->set_weight(input_data->weight.layer_weight[layer].W_KQV);
 	success &= KQV4->set_weight(input_data->weight.layer_weight[layer].W_KQV);
 
+	success &= dual1.set_weight(input_data->weight.layer_weight[layer].W_G, input_data->weight.layer_weight[layer].W_U);
+	success &= dual2.set_weight(input_data->weight.layer_weight[layer].W_G, input_data->weight.layer_weight[layer].W_U);
 
 	success &= layerNormAttention1.setWeight(input_data->weight.layer_weight[layer].W_LN_Attention);
 	success &= layerNormAttention2_1.setWeight(input_data->weight.layer_weight[layer].W_LN_Attention);
 	success &= layerNormAttention2_2.setWeight(input_data->weight.layer_weight[layer].W_LN_Attention);
-	if (layer < MODEL_LAYER -1){
+	if (layer < ModelConfig.model_layer-1){
 		success &= AR1_D2.setWeight(input_data->weight.layer_weight[layer+1].W_LN_Attention);
 		success &= AR2_D2.setWeight(input_data->weight.layer_weight[layer+1].W_LN_Attention);
 	} else{
@@ -524,7 +609,7 @@ vortexOutputData Pipeline::run() {
 	cudaEventRecord(events[EventManager::CAPTURE_GEMM_START], stream_gemm);
 	cudaStreamWaitEvent(stream_gemv, events[EventManager::CAPTURE_GEMM_START], 0);
 	cudaStreamWaitEvent(stream_net, events[EventManager::CAPTURE_GEMM_START], 0);
-	constexpr int totalIter = 10000;
+
 
 	// setup phase
 	genEmbedding1.run().log(private_logger);
@@ -534,17 +619,17 @@ vortexOutputData Pipeline::run() {
 	genEmbedding2_2_partial.run().log(private_logger);
 
 
-	splitTensor.run().log(private_logger);
+	splitTensor.wait(genEmbedding1).run().log(private_logger);
 
 	AR_D1.recordEndEvent();
 	AR2_D2.recordEndEvent();
 	AR1_D2.recordEndEvent();
 	
-	for(int iter = 0; iter < RUN_LAYER; ++iter) {
+	for(int iter = 0; iter < ModelConfig.run_layer; ++iter) {
 		private_logger->info(">>>>>>>>>>>>>>>>>>>>>>>>>> layer: {}", iter);
 		// new starting point
 
-		setWeight(iter%MODEL_LAYER);
+		setWeight(iter%ModelConfig.model_layer);
 							
 		layerNormAttention1.wait(AR_D1).wait(genEmbedding1).run().log(private_logger);
 		if (iter == 0){				
@@ -607,20 +692,22 @@ vortexOutputData Pipeline::run() {
 
 		// gemv_dep.clearAll(stream_net);
 
-		UG1->wait_for_start(AR_O2).wait(layerNormFFN1).run().log(private_logger);
+		
+		dual1.wait_for_start(AR_O2).wait(layerNormFFN1).run().log(private_logger);
 
-		activation1.run().log(private_logger);
-
+		
 		D1->run().log(private_logger);
 
-		if (enable_offload) pageAgg.wait(activation1).run();
+		// if (enable_offload) pageAgg.wait(activation1).run();
+		if (enable_offload) pageAgg.wait(dual1).run();
 
 
 
-		UG2->wait(layerNormFFN2).run().log(private_logger);
+	
+		dual2.wait(layerNormFFN2).run().log(private_logger);
 
 		if (enable_offload) {
-			cudaStreamWaitEvent(stream_cpy, UG2->start_event);
+			cudaStreamWaitEvent(stream_cpy, dual2.start_event);
 			int split = 1;
 			for (int j = 0; j < split; j++)
 				cudaMemcpyAsync(offloadKVCache+ j*2048*2*32*sizeof(half)*4/split, deviceOffloadKVCache, 2048*2*32*sizeof(half)*4/split, cudaMemcpyDeviceToHost, stream_cpy);
@@ -628,9 +715,9 @@ vortexOutputData Pipeline::run() {
 				cudaMemcpyAsync(deviceLoadKVCache, offloadKVCache+ j*2048*2*32*sizeof(half) *4/split , 2048*2*32*sizeof(half)*4/split, cudaMemcpyHostToDevice, stream_cpy);
 		}
 
-		activation2.run().log(private_logger);
+	
 
-		AR_D1.configRun(8, 1024, true).wait_for_start(*UG2).run().log(private_logger);
+		AR_D1.configRun(8, 1024, true).wait_for_start(dual2).run().log(private_logger);
 
 		splitTensor.run().log(private_logger);
 		
@@ -646,13 +733,12 @@ vortexOutputData Pipeline::run() {
 	}
 
 	layerNormModel1.wait(AR_D1).run().log(private_logger);
-	LOGITS1->wait(layerNormModel1).run().log(private_logger);
-	maxSampler1.run().log(private_logger);
-
-	LOGITS2->wait(AR1_D2).wait(AR2_D2).run().log(private_logger);
-	maxSampler2.run().log(private_logger);
-
-	cudaMemcpyAsync(outputTokens, input_data->tmp_buffer, 2048*sizeof(int), cudaMemcpyDeviceToHost, stream_cpy);
+	copyTensor.wait(AR1_D2).wait(AR2_D2).run().log(private_logger);
+	
+	keepToken.wait(copyTensor).wait(layerNormModel1).run().log(private_logger);
+	LOGITS->wait(keepToken).run().log(private_logger);
+	maxSampler.wait(LOGITS).run().log(private_logger);
+	
 	cudaEventRecord(events[EventManager::CAPTURE_GEMV_END], stream_gemv);
 	cudaEventRecord(events[EventManager::CAPTURE_NET_END], stream_net);
 	cudaStreamWaitEvent(stream_gemm, events[EventManager::CAPTURE_GEMV_END], 0);
@@ -689,15 +775,15 @@ vortexOutputData Pipeline::run() {
 
 	// Compute average runtime and GFLOPs.
 	runtime_ms = double(runtime_ms);
-	double gflops = totalCompute() / runtime_ms / 1e6;
-	double bandwidth = sizeof(__half) * (96731136 + 1.25 / 80 * 160 * 1024 * 1024 * 1024 / 2) /
-					   (runtime_ms / 1000) / (1 << 30);
-
-	spdlog::info("Total running cost (ms) of one microbatch is {}", runtime_ms);
+	
+	spdlog::error("Total running cost (ms) of one microbatch is {}", runtime_ms);
 
 	// Copy output data back to host
-	CUDA_CHECK(cudaMemcpy(output_data.sampled_token_array1, maxSampler1.d_argMax.ptr, output_data.partial_num_1* sizeof(int), cudaMemcpyDeviceToHost));
-	CUDA_CHECK(cudaMemcpy(output_data.sampled_token_array2, maxSampler2.d_argMax.ptr, output_data.partial_num_2 * sizeof(int), cudaMemcpyDeviceToHost));
+	// CUDA_CHECK(cudaMemcpy(output_data.sampled_token_array1, maxSampler1.d_argMax.ptr, output_data.partial_num_1* sizeof(int), cudaMemcpyDeviceToHost));
+	// CUDA_CHECK(cudaMemcpy(output_data.sampled_token_array2, maxSampler2.d_argMax.ptr, output_data.partial_num_2 * sizeof(int), cudaMemcpyDeviceToHost));
+    
+	
+	CUDA_CHECK(cudaMemcpy(output_data.sampled_token_array, maxSampler.d_argMax.ptr, output_data.sampled_tokens* sizeof(int), cudaMemcpyDeviceToHost));
 
 	return output_data;
 }
@@ -715,7 +801,7 @@ void Pipeline::GEMVOpUpdate() {
 	auto getDim = [this](GEMM_NAME name, int idx) {return static_cast<PllmDimension>(getMajorType(config_data.gemm_op_tag[static_cast<int>(name)], idx));};
 	spdlog::info("Update GEMV");
 
-	uint32_t arr[] = {update_data.gemv_batch_size[0], update_data.gemv_batch_size[1], update_data.gemv_batch_size[2], update_data.gemv_batch_size[3], update_data.prefillNum};
+	uint32_t arr[] = {uint32_t(update_data.gemv_batch_size[0]), uint32_t(update_data.gemv_batch_size[1]), uint32_t(update_data.gemv_batch_size[2]), uint32_t(update_data.gemv_batch_size[3]), uint32_t(update_data.prefillNum)};
 	std::span<uint32_t, 5> batch_sizes(arr, 5);
 	std::span<int32_t, 4> gemv_num_blocks(update_data.gemv_num_blocks, 4);
 	auto total_batch_size = std::accumulate(batch_sizes.begin(), batch_sizes.end(), 0);
@@ -727,7 +813,7 @@ void Pipeline::GEMVOpUpdate() {
 	pllmTensor kv_last_page_len = pllmTensor{update_data.kv_last_page_len, total_batch_size};
 	const auto& kv_last_page_len_split = kv_last_page_len.splitTensor(PllmDimension::ROW, batch_sizes);
 
-	pllmTensor kv_indices = pllmTensor{update_data.kv_indices, MAX_PAGE_NUM};
+	pllmTensor kv_indices = pllmTensor{update_data.kv_indices, ModelConfig.max_page_num};
 
 	pllmTensor input_ptr = pllmTensor{update_data.input_indptr, total_batch_size + 1};
 	const auto& input_ptr_split = input_ptr.splitTensor(PllmDimension::ROW, batch_sizes,/*overlap suffix*/ 1U);
@@ -735,35 +821,29 @@ void Pipeline::GEMVOpUpdate() {
 	pllmTensor rev_input_indptr = pllmTensor{update_data.rev_input_indptr, config_data.global_batch_size};
 	pllmTensor per_token_offset = pllmTensor{update_data.per_token_offset, config_data.global_batch_size};
 
-	const auto& GEMV_input = gemvQ.splitTensor(getDim(GEMM_NAME::KQV1, 2),
-									batch_sizes[0],
-									batch_sizes[1],
-									batch_sizes[2],
-									batch_sizes[3],
-									MAX_BATCH_SIZE - update_data.decodePrefillBorder);
+	// const auto& GEMV_input = gemvQ.splitTensor(getDim(GEMM_NAME::KQV1, 2),
+	// 								batch_sizes[0],
+	// 								batch_sizes[1],
+	// 								batch_sizes[2],
+	// 								batch_sizes[3],
+	// 								ModelConfig.max_batch_size - update_data.decodePrefillBorder);
 
-	const auto& GEMV_output = gemvAggregateOutput.splitTensor(getDim(GEMM_NAME::KQV1, 2),
-									batch_sizes[0],
-									batch_sizes[1],
-									batch_sizes[2],
-									batch_sizes[3],
-									MAX_BATCH_SIZE - update_data.decodePrefillBorder);
+	// const auto& GEMV_output = gemvAggregateOutput.splitTensor(getDim(GEMM_NAME::KQV1, 2),
+	// 								batch_sizes[0],
+	// 								batch_sizes[1],
+	// 								batch_sizes[2],
+	// 								batch_sizes[3],
+	// 								ModelConfig.max_batch_size - update_data.decodePrefillBorder);
 
-	const int kdim = MODEL_HEAD_DIM * MODEL_KV_HEADS;
-	const int qdim = MODEL_HEAD_DIM * MODEL_QO_HEADS;
-	const int vdim = MODEL_HEAD_DIM * MODEL_KV_HEADS;
 
-	int req_num = update_data.decodePrefillBorder + update_data.prefillNum;
 	
-	int* host_input_ptr = new int[req_num + 1]; // each request start from ptr[i] and end before ptr[i+1]
-	cudaMemcpy(host_input_ptr, update_data.input_indptr, (req_num + 1) * sizeof(int), cudaMemcpyDeviceToHost);
-	update_token_num = host_input_ptr[req_num];
+	update_token_num = update_data.decodePrefillBorder + update_data.prefillTokensNum;
 	const auto& Q_split = gemvQ.splitTensor(getDim(GEMM_NAME::KQV1, 2), KQV1->M, KQV2->M, KQV3->M, KQV4->M);
 	const auto& KQV_split = KQV_output.splitTensor(getDim(GEMM_NAME::KQV1, 2), KQV1->M, KQV2->M, KQV3->M, KQV4->M);
 	const auto& rev_input_indptr_split = rev_input_indptr.splitTensor(getDim(GEMM_NAME::KQV1, 2), KQV1->M, KQV2->M, KQV3->M, KQV4->M);
 	const auto& per_token_offset_split = per_token_offset.splitTensor(getDim(GEMM_NAME::KQV1, 2), KQV1->M, KQV2->M, KQV3->M, KQV4->M);
 
-	int token_remaining = update_token_num;
+	size_t token_remaining = update_token_num;
 	for (int i = 0; i < 4; i++)
 	{
 		if (token_remaining > KQV_ptrs[i] -> M){
@@ -781,39 +861,43 @@ void Pipeline::GEMVOpUpdate() {
 
 	GEMV1.init(batch_sizes[0],
 			gemv_num_blocks[0],
+			input_ptr_split[0],
 			kv_indptr_split[0],
 			update_data.kv_indices,
 			kv_last_page_len_split[0],
-			GEMV_input[0],
-			GEMV_output[0],
+			gemvQ,
+			gemvAggregateOutput,
 			gemv_dep.device_KQV_ready,
 			gemv_dep.device_GEMV_ready);
 	
 	GEMV2.init(batch_sizes[1],
 			gemv_num_blocks[1],
+			input_ptr_split[1],
 			kv_indptr_split[1],
 			update_data.kv_indices,
 			kv_last_page_len_split[1],
-			GEMV_input[1],
-			GEMV_output[1],
+			gemvQ,
+			gemvAggregateOutput,
 			gemv_dep.device_KQV_ready,
 			gemv_dep.device_GEMV_ready);
 
 	GEMV3.init(batch_sizes[2],
 			gemv_num_blocks[2],
+			input_ptr_split[2],
 			kv_indptr_split[2],
 			update_data.kv_indices,
 			kv_last_page_len_split[2],
-			GEMV_input[2],
-			GEMV_output[2]);
+			gemvQ,
+			gemvAggregateOutput);
 
 	GEMV4.init(batch_sizes[3],
 			gemv_num_blocks[3],
+			input_ptr_split[3],
 			kv_indptr_split[3],
 			update_data.kv_indices,
 			kv_last_page_len_split[3],
-			GEMV_input[3],
-			GEMV_output[3]);
+			gemvQ,
+			gemvAggregateOutput);
 	
 	// ::log_tensor(spdlog::default_logger(), "input_ptr_split[4]", input_ptr_split[4], 1, 3);
 
@@ -891,6 +975,24 @@ void Pipeline::update(vortexUpdateData* update_data_) {
 	genEmbedding2_1_partial.setInput(partial_input_2_1);
 	genEmbedding2_2_partial.setInput(partial_input_2_2);
 
+	int req_num = update_data.decodePrefillBorder + update_data.prefillNum;
+	keepToken.update(req_num, update_data.input_indptr); 
+	keepToken.output.dim1 = req_num; // update doesn't change tensor dim
+
+	auto logits_a = keepToken.output.getSubTensor(rank, nranks, PllmDimension::ROW);
+	int sample_batch_size = logits_a.dim1;
+	if(sample_batch_size == 0) {
+		sample_batch_size = 1;
+	}
+
+	LOGITS->set_shape((sample_batch_size+127)/128*128, ModelConfig.vocab_size, ModelConfig.model_hidden_dim);
+	logits_a.dim1 = (sample_batch_size+127)/128*128;
+	LOGITS->setA(tensor_cast<half, cutlass::half_t> (logits_a));
+	LOGITS->init();
+
+	maxSampler.set_batch_size(sample_batch_size);
+	output_data.sampled_tokens = sample_batch_size;
+
 	GEMVOpUpdate();
 
 	// log first batch size
@@ -914,7 +1016,7 @@ void Pipeline::config(vortexConfigData* config_data){
 
 	this->config_data = * config_data;
 
-	for(int i = 0; i < gemmNum; i++) {
+	for(size_t i = 0; i < static_cast<size_t>(GEMM_NAME::NUM); i++) {
 		gemms[i] = generateGEMM(this->config_data.gemm_op_tag[i]);
 		spdlog::info("GEMM {} created, tag: {}", i, this->config_data.gemm_op_tag[i]);
 	}
@@ -929,30 +1031,39 @@ void Pipeline::config(vortexConfigData* config_data){
 	int nano2 = globalbatch - nano1;
 	int kqv_batch[] = {config_data->kqv1_size, nano1 - config_data->kqv1_size, config_data->kqv3_size, nano2 - config_data->kqv3_size};
 
-	O1 ->set_shape(nano1, MODEL_HIDDEN_DIM_PERGPU, MODEL_HIDDEN_DIM);
-	O2 ->set_shape(nano2, MODEL_HIDDEN_DIM, MODEL_HIDDEN_DIM_PERGPU);
-	UG1 ->set_shape(nano1, UG_N, MODEL_HIDDEN_DIM);
-	UG2 ->set_shape(nano2, UG_N, MODEL_HIDDEN_DIM);
-	D1 ->set_shape(nano1, MODEL_HIDDEN_DIM, MODEL_FF_DIM_GPU);
-	D2 ->set_shape(nano2, MODEL_HIDDEN_DIM, MODEL_FF_DIM_GPU);
-	KQV1 -> set_shape(kqv_batch[0], KQV_N, MODEL_HIDDEN_DIM);
-	KQV2 -> set_shape(kqv_batch[1], KQV_N, MODEL_HIDDEN_DIM);
-	KQV3 -> set_shape(kqv_batch[2], KQV_N, MODEL_HIDDEN_DIM);
-	KQV4 -> set_shape(kqv_batch[3], KQV_N, MODEL_HIDDEN_DIM);
-	LOGITS1 -> set_shape(nano1/nranks, 32000, MODEL_HIDDEN_DIM);
-	LOGITS2 -> set_shape(nano2/nranks, 32000, MODEL_HIDDEN_DIM);
+	O1 ->set_shape(nano1,  ModelConfig.model_hidden_dim_pergpu, ModelConfig.model_hidden_dim);
+	O2 ->set_shape(nano2, ModelConfig.model_hidden_dim,  ModelConfig.model_hidden_dim_pergpu);
+	dual1.set_shape(nano1, ModelConfig.model_ff_dim_gpu, ModelConfig.model_hidden_dim);
+	dual2.set_shape(nano2, ModelConfig.model_ff_dim_gpu, ModelConfig.model_hidden_dim);
+	
+	D1 ->set_shape(nano1, ModelConfig.model_hidden_dim, ModelConfig.model_ff_dim_gpu);
+	D2 ->set_shape(nano2, ModelConfig.model_hidden_dim, ModelConfig.model_ff_dim_gpu);
+	KQV1 -> set_shape(kqv_batch[0], ModelConfig.kqv_n, ModelConfig.model_hidden_dim);
+	KQV2 -> set_shape(kqv_batch[1], ModelConfig.kqv_n, ModelConfig.model_hidden_dim);
+	KQV3 -> set_shape(kqv_batch[2], ModelConfig.kqv_n, ModelConfig.model_hidden_dim);
+	KQV4 -> set_shape(kqv_batch[3], ModelConfig.kqv_n, ModelConfig.model_hidden_dim);
+	LOGITS -> set_shape(globalbatch, ModelConfig.vocab_size, ModelConfig.model_hidden_dim);
 
-
-	activation1.config(nano1, UG_N/2);
-	activation2.config(nano2, UG_N/2);
-
+	spdlog::info("kqv bias: {}", kqv_bias);
+	if (kqv_bias) {
+		spdlog::info("process KQV biases");
+		for (int layer = 0; layer < ModelConfig.model_layer; layer++) {
+			pllmTensor<cutlass::half_t> KQV_bias = tmpBufferM.allocTensor(globalbatch, ModelConfig.kqv_n, PllmLayout::ROW_MAJOR);
+			KQV_biases.push_back(KQV_bias);
+			// replicateKQVBias(input_data->weight.layer_weight[layer].B_KQV.ptr, (half*)KQV_bias.ptr, ModelConfig.kqv_n, globalbatch, stream_gemm);
+			// spdlog::info("b_kqv: {}", (size_t)input_data->weight.layer_weight[layer].B_KQV.ptr);
+			// pllmTensor<half> B_KQV_tensor = pllmTensor{input_data->weight.layer_weight[layer].B_KQV.ptr, ModelConfig.kqv_n, 1, PllmLayout::ROW_MAJOR};
+			// log_tensor(spdlog::default_logger(), "B_KQV_tensor", B_KQV_tensor, ModelConfig.kqv_n, 1);
+			replicateKQVBias(input_data->weight.layer_weight[layer].B_KQV.ptr, (half*)KQV_bias.ptr, globalbatch, ModelConfig.kqv_n, stream_gemm);
+		}
+	}
+	
 	setName();
 
 	spdlog::info("Init schedule");
 	ScheduleInit();
 	spdlog::info("Init gemm");
 	GEMMOpInit();
-	// No longer need GEMVOpInit and OtherOpInit at this moment.
 	spdlog::info("Init gemv");
 	GEMVOpInit();
 	spdlog::info("Init other");
@@ -962,11 +1073,16 @@ void Pipeline::config(vortexConfigData* config_data){
 
 	// init the output 
 	output_data = vortexOutputData();
-	output_data.partial_num_1 = config_data->nanobatch_1_size / nranks;
-	output_data.partial_num_2 = (config_data->global_batch_size - config_data->nanobatch_1_size)/ nranks;
-	output_data.sampled_token_array1 = new int[config_data->nanobatch_1_size];
-	output_data.sampled_token_array2 = new int[config_data->global_batch_size - config_data->nanobatch_1_size];
+	// output_data.partial_num_1 = config_data->nanobatch_1_size / nranks;
+	// output_data.partial_num_2 = (config_data->global_batch_size - config_data->nanobatch_1_size)/ nranks;
+	// output_data.sampled_token_array1 = new int[config_data->nanobatch_1_size];
+	// output_data.sampled_token_array2 = new int[config_data->global_batch_size - config_data->nanobatch_1_size];
+	output_data.sampled_token_array = new int[config_data->global_batch_size];
 	output_data.global_batch_size = config_data->global_batch_size;
 
 	D2->updateEventExistance(true, true);
+
+	if (nanobatch_only){
+		assignSameStream();
+	}
 }

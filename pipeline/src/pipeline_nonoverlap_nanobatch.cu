@@ -30,7 +30,6 @@ vortexOutputData NonOverlapNanoBatchPipeline::run() {
 		CUDA_CHECK(cudaEventRecord(events[EventManager::GEMM_TIMING_START], stream_all));
 	if(enableGraph) cudaStreamBeginCapture(stream_all, cudaStreamCaptureModeGlobal);
 
-	constexpr int totalIter = 10000;
 	constexpr int kNetNblocks = 64;
 
 	// TODO: setup phase
@@ -39,7 +38,7 @@ vortexOutputData NonOverlapNanoBatchPipeline::run() {
 	// GEMV_START(stream_gemm);
 
 
-	for (int iter = 1; iter <= RUN_LAYER*2; ++iter) {
+	for (int iter = 1; iter <= ModelConfig.run_layer*2; ++iter) {
 		O->run();
 		AG_O(stream_all, kNetNblocks, 1024, true);
 		layerNormFFN.run();
@@ -49,7 +48,7 @@ vortexOutputData NonOverlapNanoBatchPipeline::run() {
 		AR_D(stream_all, kNetNblocks, 1024, true);
 		layerNormAttention.run();
 
-		if (iter == RUN_LAYER*2) break;
+		if (iter == ModelConfig.run_layer*2) break;
 		setWeight(iter%5);
 		KQV->run();
 		roPEAppend.run();
@@ -100,8 +99,7 @@ vortexOutputData NonOverlapNanoBatchPipeline::run() {
 
 	vortexOutputData d;
 	d.global_batch_size = 0;
-	d.partial_num_1 = 0;
-	d.partial_num_2 = 0;
+	d.sampled_tokens = 0;
 
 	return d;
 }
@@ -126,15 +124,15 @@ void NonOverlapNanoBatchPipeline::config(vortexConfigData* config_data) {
     }
 	this->config_data = *config_data;
     int globalbatch = config_data->global_batch_size / 2;
-    O ->set_shape(globalbatch, MODEL_HIDDEN_DIM_PERGPU, MODEL_HIDDEN_DIM);
-    UG ->set_shape(globalbatch, MODEL_FF_DIM_GPU + MODEL_FF_DIM_GPU, MODEL_HIDDEN_DIM);
-    D ->set_shape(globalbatch, MODEL_HIDDEN_DIM, MODEL_FF_DIM_GPU);
+    O ->set_shape(globalbatch, ModelConfig.model_hidden_dim_pergpu, ModelConfig.model_hidden_dim);
+    UG ->set_shape(globalbatch, ModelConfig.model_ff_dim_gpu + ModelConfig.model_ff_dim_gpu, ModelConfig.model_hidden_dim);
+    D ->set_shape(globalbatch, ModelConfig.model_hidden_dim, ModelConfig.model_ff_dim_gpu);
 	KQV->set_shape(globalbatch,
-				   (MODEL_KV_HEADS + MODEL_KV_HEADS + MODEL_QO_HEADS) * MODEL_HEAD_DIM,
-				   MODEL_HIDDEN_DIM);
+				   (ModelConfig.model_kv_heads_gpu + ModelConfig.model_kv_heads_gpu + ModelConfig.model_qo_heads_gpu) * ModelConfig.model_head_dim,
+				   ModelConfig.model_hidden_dim);
 	KQV_START->set_shape(globalbatch,
-						 (MODEL_KV_HEADS + MODEL_KV_HEADS + MODEL_QO_HEADS) * MODEL_HEAD_DIM,
-						 MODEL_HIDDEN_DIM);
+						 (ModelConfig.model_kv_heads_gpu + ModelConfig.model_kv_heads_gpu + ModelConfig.model_qo_heads_gpu) * ModelConfig.model_head_dim,
+						 ModelConfig.model_hidden_dim);
 	spdlog::info("Init schedule");
 	ScheduleInit();
 	spdlog::info("Init gemm");
@@ -186,8 +184,8 @@ void NonOverlapNanoBatchPipeline::ScheduleInit() {
 	// LN_Attention -> O residual connection
 	O->setC(layerNormAttention.getOutput().getSubTensor(rank, vnranks, getDim(GEMM_NAME::D, 2)));
 	KQV->setA(layerNormAttention.getOutput()).setOutput(tmpBufferM.allocTensor(KQV->M, KQV->N, getMajor(GEMM_NAME::KQV, 2)));
-	gemvInput = tmpBufferM.allocTensor(MAX_BATCH_SIZE, KQV->N, PllmLayout::ROW_MAJOR);
-	gemvOutput = tmpBufferM.allocTensor(MAX_BATCH_SIZE,KQV->N, PllmLayout::ROW_MAJOR);
+	gemvInput = tmpBufferM.allocTensor(ModelConfig.max_batch_size, KQV->N, PllmLayout::ROW_MAJOR);
+	gemvOutput = tmpBufferM.allocTensor(ModelConfig.max_batch_size,KQV->N, PllmLayout::ROW_MAJOR);
 	// TODO: ropeAppend is not implemented yet
 	O_TR.setInput(gemvOutput).setOutput(AG_GEMV.getInput().getSubTensor(rank, vnranks, static_cast<PllmDimension>(!((int)getDim(GEMM_NAME::O, 2)))));
 
@@ -221,15 +219,15 @@ void NonOverlapNanoBatchPipeline::GEMVOpUpdate() {
 	const auto& [gemvDec_input, gemvPrefill_input] =
 		tensor_cast<cutlass::half_t, half>(gemvInput).splitTensor(getMajor(GEMM_NAME::O, 0),
 				  decode_batch_size,
-				  MAX_BATCH_SIZE - decode_batch_size);
+				  ModelConfig.max_batch_size - decode_batch_size);
 	const auto& [gemvDec_output, gemvPrefill_output] =
 		tensor_cast<cutlass::half_t, half>(gemvOutput).splitTensor(getMajor(GEMM_NAME::O, 0),
 				  decode_batch_size,
-				  MAX_BATCH_SIZE - decode_batch_size);
+				  ModelConfig.max_batch_size - decode_batch_size);
 	spdlog::info("Decode batch size: {}", decode_batch_size);
 
 	
-	uint32_t arr[] = {decode_batch_size, update_data.prefillNum};
+	uint32_t arr[] = {uint32_t(decode_batch_size), uint32_t(update_data.prefillNum)};
 	std::span<uint32_t, 2> batch_sizes(arr, 2);
 	spdlog::info("Batch sizes: {}, {}", batch_sizes[0], batch_sizes[1]);
 	auto total_batch_size = std::accumulate(batch_sizes.begin(), batch_sizes.end(), 0);
@@ -244,6 +242,7 @@ void NonOverlapNanoBatchPipeline::GEMVOpUpdate() {
 	decode_batch_size = update_data.decodePrefillBorder/2;
 	GEMV.init(decode_batch_size,
 			  update_data.gemv_num_blocks[0],
+			  input_ptr_split[0],
 			  kv_indptr_split[0],
 			  update_data.kv_indices,
 			  kv_last_page_len_split[0],

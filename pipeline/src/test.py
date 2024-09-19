@@ -25,31 +25,6 @@ def load_config(filename):
     config.kqv3Size = config_dict["kqv3_size"]
     return config
 
-def genVortexConfig(rank):
-    gemm_op_tag = ["128_128_32_64_64_32_1_5_ColumnMajor_RowMajor_ColumnMajor",
-    "128_128_32_64_64_32_1_4_ColumnMajor_RowMajor_ColumnMajor",
-    "128_128_32_64_64_32_3_4_ColumnMajor_RowMajor_RowMajor",
-    "128_128_32_64_64_32_1_5_ColumnMajor_RowMajor_RowMajor",
-    "128_256_32_64_64_32_1_3_ColumnMajor_RowMajor_RowMajor",
-    "128_128_32_64_64_32_1_4_ColumnMajor_RowMajor_RowMajor",
-    "128_64_64_64_32_64_2_3_RowMajor_RowMajor_RowMajor",
-    "128_128_32_64_64_32_2_5_RowMajor_RowMajor_RowMajor",
-    "128_128_32_64_64_32_1_5_RowMajor_RowMajor_RowMajor",
-    "128_128_32_64_64_32_1_5_RowMajor_RowMajor_RowMajor",
-    "128_128_32_64_64_32_2_4_ColumnMajor_RowMajor_RowMajor"]
-    global_batch_size = 2048
-    nanobatch_1_size = 640
-    kqv1_size = 256
-    kqv3_size = 640
-    
-    config = pllm_python.VortexConfigData()
-    config.setGemmOpTag(gemm_op_tag)
-    config.globalBatchSize = global_batch_size
-    config.nanobatch1Size = nanobatch_1_size
-    config.kqv1Size = kqv1_size
-    config.kqv3Size = kqv3_size
-    return config
-
 def genInitData(rank):
     data = pllm_python.VortexInitData()
 
@@ -57,23 +32,7 @@ def genInitData(rank):
     hiddenDim = 8192
 
     # init gemv
-    head_dim = 128
-    seqlen = 1024
-    batch_size = 1350
-    page_size = 16
-    num_kv_heads = 1
-
-
-    pages_per_seq = (seqlen + page_size - 1) // page_size
-    num_pages = pages_per_seq * batch_size
-
-    layer_num=5
-
-
-
     temp = torch.randn([hiddenDim, hiddenDim * 4], dtype=torch.half, device=f'cuda:{rank}')
-    temp2 = torch.randn([hiddenDim, hiddenDim * 4], dtype=torch.half, device=f'cuda:{rank}')
-
 
     data.setTmpBuffer(temp.data_ptr(), temp.numel() * temp.element_size())
     data.tmp_buffer_size = 5*1024*1024*1024
@@ -86,16 +45,17 @@ def genUpdateData(rank):
     # input
 
     decodePrefillBorder = 0
-    denseBatch = 2048
-    hiddenDim = 8192
+    denseBatch = 1024
 
     input_embedding = torch.ones(denseBatch, dtype=torch.int32, device='cpu')
-    input_embedding[1] = 6324
-    input_embedding[2] = 29892
-    input_embedding[3] = 29871
+    input_embedding[0] = 128000
+    input_embedding[1] = 21694
+    input_embedding[2] = 11
+    input_embedding[3] = 358
+    input_embedding[4] = 2846
     
-    for i in range(4, denseBatch):
-        input_embedding[i] = input_embedding[i%4]
+    for i in range(5, denseBatch):
+        input_embedding[i] = input_embedding[i%5]
 
     input_indptr_cpu = [0]
     for i in range(decodePrefillBorder):
@@ -107,8 +67,8 @@ def genUpdateData(rank):
     page_size = 16
     
     
-    prefill_num = denseBatch // 4
-    prefill_tokens = [4] * int(prefill_num)
+    prefill_num = denseBatch // 5
+    prefill_tokens = [5] * int(prefill_num)
     prefill_pages = [(i + page_size - 1) // page_size for i in prefill_tokens] # important!!!!
     total_prefill_pages = sum(prefill_pages)
 
@@ -175,6 +135,9 @@ def genUpdateData(rank):
     data.setGemvNumBlocks(gemv_block_num)
     data.setRevInputIndptr(rev_input_indptr.data_ptr())
     data.setPerTokenOffset(per_token_offset.data_ptr())
+    data.setKeepTokenList(0)
+    data.keepTokenListLength = 0
+    data.prefillTokensNum = sum(prefill_tokens)
     data.decodePrefillBorder = decodePrefillBorder
     data.prefillNum = prefill_num
     
@@ -183,20 +146,22 @@ def genUpdateData(rank):
     return data, result_save
 
 
-nranks = torch.cuda.device_count()
-pllm_python.setRank(nranks,8)
+# nranks = torch.cuda.device_count()
+# pllm_python.setRank(nranks,8)
+nranks = 1
+pllm_python.setRank(nranks, 1)
 
 data_array = []
 config_array = []
 update_array = []
 save_data = []
-tensor_saved, model_weights = load_weights(8,8, '../utils/nanoflow_weight/')
+tensor_saved, model_weights = load_weights(1,1, '../utils/nanoflow_weight_8B/')
 for i in range(nranks):
     init_data = genInitData(i)
     init_data.setWeight(model_weights[i],123)
     
     data_array.append(init_data)
-    config_array.append(load_config("../config/2048.json"))
+    config_array.append(load_config("../config/llama3-8B/1024.json"))
     (data, result_save) = genUpdateData(i)
     update_array.append(data)
     save_data.append(result_save)
@@ -217,10 +182,11 @@ if False:
 
     prof.export_chrome_trace("trace.json")
 else:
-    pllm_python.init(data_array, pllm_python.PipelineType.PLLM)
+    pllm_python.setModelConfig("/code/pllm/compute-bound/modelConfig/llama3-8B.json")
+    pllm_python.init(data_array, pllm_python.PipelineType.LOCAL)
     pllm_python.config(config_array)
     pllm_python.update(update_array)
-    for i in range(3):
+    for i in range(1):
         t = time.time()
         out = pllm_python.run()
         sampled_token_array = pllm_python.getPipelineOutput()

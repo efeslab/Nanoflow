@@ -124,3 +124,12 @@ std::string formatCollection(const T* collection, size_t size) {
     }
     return formatted;
 }
+
+
+inline std::string getCUDAErrorString(){
+    cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess) {
+        return cudaGetErrorString(error);
+    }
+    return std::string("");
+}

@@ -23,7 +23,7 @@ build
 __pycache__
 *.prof
 new-small-gemv/src/generated/
-compute-bound/src/generated/
+pipeline/src/generated/
 /detailedGemmKernelPerf/CMakeFiles/
 *.json
 *.json.gz
@@ -33,3 +33,7 @@ trace_processor
 *.tar.gz
 !pipeline/config/*
 Anaconda3-2024.02-1-Linux-x86_64.sh
+*.log
+*.csv
+*.req_*
+*.schedule

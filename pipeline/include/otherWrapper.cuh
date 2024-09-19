@@ -87,7 +87,7 @@ class LayerNorm: public VectorOpWrapper<1>
 
     bool setWeight(vortexWeight weight) {
         this->weight = (cutlass::half_t*)weight.ptr;
-        pllm_tensor_weight = pllmTensor<half>(weight.ptr, 1, weight.size(), PllmLayout::ROW_MAJOR);
+        pllm_tensor_weight = pllmTensor<half>(weight.ptr, size_t(1), weight.size(), PllmLayout::ROW_MAJOR);
         return true;
     }
 
@@ -95,10 +95,10 @@ class LayerNorm: public VectorOpWrapper<1>
 
         assert(this->pllm_tensor_input.layout == PllmLayout::ROW_MAJOR);
         assert(this->pllm_tensor_output.layout == PllmLayout::ROW_MAJOR);
-        assert(this->pllm_tensor_input.dimC == MODEL_HIDDEN_DIM);
+        assert(this->pllm_tensor_input.dimC == ModelConfig.model_hidden_dim);
 
-        // spdlog::info("LayerNorm row {}, col {}", input_size / MODEL_HIDDEN_DIM, MODEL_HIDDEN_DIM);
-        rms_norm((half*)output, (half*)input, (half*)weight, input_size / MODEL_HIDDEN_DIM, MODEL_HIDDEN_DIM, 1e-5, stream);
+        // spdlog::info("LayerNorm row {}, col {}", input_size / ModelConfig.model_hidden_dim, ModelConfig.model_hidden_dim);
+        rms_norm((half*)output, (half*)input, (half*)weight, input_size / ModelConfig.model_hidden_dim, ModelConfig.model_hidden_dim, ModelConfig.rms_norm_eps, stream);
     }
 
     OperatorWrapper& logImpl(std::shared_ptr<spdlog::logger> logger = default_logger) override {
@@ -145,7 +145,7 @@ class GenEmbedding : public OtherWrapper
         this->input_size = tokens_tensor.size();
         this->pllm_tensor_tokens = tokens_tensor;
         if(output_size) {
-            assert(input_size * MODEL_HIDDEN_DIM == output_size);
+            assert(input_size * ModelConfig.model_hidden_dim == output_size);
         } 
         // spdlog::info("GenEmbedding input size {}", input_size);
     }
@@ -159,7 +159,7 @@ class GenEmbedding : public OtherWrapper
         this->output_size = output.size();
         this->pllm_tensor_output = output;
         if(input_size) {
-            assert(input_size * MODEL_HIDDEN_DIM == output_size);
+            assert(input_size * ModelConfig.model_hidden_dim == output_size);
         }
     }
 
@@ -167,7 +167,7 @@ class GenEmbedding : public OtherWrapper
         dim3 block(128, 1, 1);
         dim3 grid(input_size, 1, 1);
 
-        genEmbedding<<<grid, block, 0, stream>>>(tokens, weight, output, MODEL_HIDDEN_DIM);
+        genEmbedding<<<grid, block, 0, stream>>>(tokens, weight, output, ModelConfig.model_hidden_dim);
     }
 
     OperatorWrapper& logImpl(std::shared_ptr<spdlog::logger> logger = default_logger) override {
@@ -294,7 +294,7 @@ class SleepWrapper: public OtherWrapper
         cudaSleep<<<1,1, 0 , stream>>>(10);
     }
 
-    void wait(cudaStream_t stream, int us = 10){
+    void sleep(cudaStream_t stream, int us = 10){
         cudaSleep<<<1,1, 0 , stream>>>(us);
     }
 };
@@ -319,7 +319,7 @@ class RoPEAppend : public OtherWrapper
 
     void setKVData(half* kv_data)
     {
-        this -> kv_data = pllmTensor<half>(kv_data, MAX_PAGE_NUM, MODEL_HEAD_DIM * MODEL_KV_HEADS, PllmLayout::ROW_MAJOR);
+        this -> kv_data = pllmTensor<half>(kv_data, size_t(ModelConfig.max_page_num * ModelConfig.frame_page_size * 2), size_t(ModelConfig.model_head_dim * ModelConfig.model_kv_heads_gpu), PllmLayout::ROW_MAJOR);
     }
 
     void setKVData(pllmTensor<half> kv_data)
@@ -346,11 +346,10 @@ class RoPEAppend : public OtherWrapper
         constexpr flashinfer::QKVLayout kv_layout = flashinfer::QKVLayout::kNHD;
 		using namespace flashinfer;
 
-		constexpr int num_kv_heads = MODEL_KV_HEADS;
-		constexpr int head_dim = MODEL_HEAD_DIM;
-		constexpr int page_size = FRAME_PAGE_SIZE;
-		constexpr int num_qo_heads = MODEL_QO_HEADS;
-		constexpr auto rotary_mode = PosEncodingMode::kNone;
+		int num_kv_heads = ModelConfig.model_kv_heads_gpu;
+		int head_dim = ModelConfig.model_head_dim;
+		int page_size = ModelConfig.frame_page_size;
+		int num_qo_heads = ModelConfig.model_qo_heads_gpu;
 
 		// building KV cache structure
 		paged_kv_t<PageStorage::kIndices, kv_layout, half, int32_t> paged_kv(
@@ -372,8 +371,10 @@ class RoPEAppend : public OtherWrapper
             num_qo_heads, 
             q_out.ptr,
             kqv_ready_counter, 
-            1.f, 
-            1e4, 
+            ModelConfig.factor, 
+            ModelConfig.rope_theta, 
+            ModelConfig.smooth_a,
+            ModelConfig.smooth_b,
             stream
         );
     }
@@ -381,7 +382,12 @@ class RoPEAppend : public OtherWrapper
     OperatorWrapper& logImpl(std::shared_ptr<spdlog::logger> logger = default_logger) override {
         log_tensor(logger, name+" kqv", kqv_input, 10, 20);
         log_tensor(logger, name+" q_out", q_out, 10, 20);
-        log_tensor(logger, name+" kv_data", kv_data, 32, 20);
+        log_tensor(logger, name+" kv_data", kv_data, 32, 20, 102 * 32); // start row = 102*32 to show the last page of ropeAppend1
+        log_tensor(logger, name+" rev_input_indptr", rev_input_indptr, 1, 512);
+        log_tensor(logger, name+" per_token_offset", per_token_offset, 1, 512);
+        log_tensor(logger, name+" kv_indices", kv_indices, 1, 512);
+        log_tensor(logger, name+" kv_indptr", kv_indptr, 1, 512);
+        log_tensor(logger, name+" kv_last_page_len", kv_last_page_len, 1, 512);
         return *this;
     }
 };
@@ -430,7 +436,7 @@ class PageAggregator : public OtherWrapper
     void work() override{
         dim3 block(256, 1, 1);
         dim3 grid(8, 1, 1);
-        moveKVcacheKernel<<<grid, block, 0, stream>>>(finished_req_num, finished_idx, kv_indptr, kv_indices, output, kv_data, false);
+        moveKVcacheKernel<<<grid, block, 0, stream>>>(finished_req_num, finished_idx, kv_indptr, kv_indices, output, kv_data, ModelConfig.page_mem_size, false);
     }
 };
 
@@ -461,7 +467,7 @@ class PageDispatcher : public OtherWrapper
     void work() override{
         dim3 block(256, 1, 1);
         dim3 grid(8, 1, 1);
-        moveKVcacheKernel<<<grid, block, 0, stream>>>(load_req_num, load_idx, kv_indptr, kv_indices, host_input, kv_data, true);
+        moveKVcacheKernel<<<grid, block, 0, stream>>>(load_req_num, load_idx, kv_indptr, kv_indices, host_input, kv_data, ModelConfig.page_mem_size, true);
     }
 };
 
@@ -471,6 +477,7 @@ class MaxSampling : public OtherWrapper
     pllmTensor<half> d_matrix;
     pllmTensor<half> d_maxVals;
     pllmTensor<int> d_argMax;
+    int batch_size;
 
     void init(pllmTensor<half> d_matrix, pllmTensor<half> d_maxVals, pllmTensor<int> d_argMax)
     {
@@ -480,13 +487,82 @@ class MaxSampling : public OtherWrapper
     }
 
     void work() override{
-        computeRowMax(d_matrix.ptr, d_maxVals.ptr, d_argMax.ptr, d_matrix.dim1, d_matrix.dim2);
+        computeRowMax(d_matrix.ptr, d_maxVals.ptr, d_argMax.ptr, batch_size, d_matrix.dim2, stream);
+    }
+
+    OperatorWrapper& set_batch_size(int batch_size){
+        this->batch_size = batch_size;
+        return *this;
     }
 
     OperatorWrapper& logImpl(std::shared_ptr<spdlog::logger> logger = default_logger) override {
         log_tensor(logger, name+" d_matrix", d_matrix, 10, 20);
         log_tensor(logger, name+" d_maxVals", d_maxVals, 1, 20);
-        log_tensor(logger, name+" d_argMax", d_argMax, 1, 20);
+        log_tensor(logger, name+" d_argMax", d_argMax, 1, batch_size);
+        return *this;
+    }
+};
+
+class KeepToken : public OtherWrapper
+{
+    public:
+    int req_num;
+
+    pllmTensor<half> input;
+    pllmTensor<half> output;
+    int32_t * input_indptr;
+
+    void update(int req_num, int32_t * input_indptr)
+    {
+        this->req_num = req_num;
+        this->input_indptr = input_indptr;
+    }
+
+    void work() override{
+        copySelectedRows(req_num, input.dim2, input_indptr,  input.ptr,  output.ptr, stream);
+    }
+
+    OperatorWrapper& logImpl(std::shared_ptr<spdlog::logger> logger = default_logger) override {
+        log_tensor(logger, name+" input", input, 10, 20);
+        log_tensor(logger, name+" output", output, 10, 20);
+        return *this;
+    }
+
+    KeepToken& setOutput(pllmTensor<half> output){
+        this->output = output;
+        return *this;
+    }
+    
+    KeepToken& setInput(pllmTensor<half> input){
+        this->input = input;
+        return *this;
+    }
+};
+
+class CopyTensor : public OtherWrapper
+{
+    public:
+    pllmTensor<half> input;
+    pllmTensor<half> output;
+
+
+    void work() override{
+        CUDA_CHECK(cudaMemcpyAsync(output.ptr, input.ptr, input.size() * sizeof(half), cudaMemcpyDeviceToDevice, stream));
+    }
+
+    OperatorWrapper& logImpl(std::shared_ptr<spdlog::logger> logger = default_logger) override {
+        log_tensor(logger, name+" input", input, 10, 20);
+        log_tensor(logger, name+" output", output, 10, 20);
+        return *this;
+    }
+
+    CopyTensor& setOutput(pllmTensor<half> output){
+        this->output = output;
+        return *this;
+    }
+    
+    CopyTensor& setInput(pllmTensor<half> input){
+        this->input = input;
         return *this;
     }
 };

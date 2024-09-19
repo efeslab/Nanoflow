@@ -26,19 +26,20 @@ struct BaseGEMMWrapper : public OperatorWrapper{
 	using ElementOutput = cutlass::half_t;
 	using ElementAccumulator = float;
 
-	int M, N, K;
+	size_t M, N, K;
 	void set_shape(int m, int n, int k) {
 		M = m;
 		N = n;
 		K = k;
+		spdlog::info("name:{} M:{}, N:{}, K:{}", name, M, N, K);
 	}
-	int mk() const {
+	size_t mk() const {
 		return M * K;
 	}
-	int kn() const {
+	size_t kn() const {
 		return K * N;
 	}
-	int mn() const {
+	size_t mn() const {
 		return M * N;
 	}
 
@@ -134,17 +135,17 @@ struct CutlassGEMMWrapper : public BaseGEMMWrapper {
 	pllmTensor<ElementOutput> pllm_tensor_d;
 
 
-	cutlass::device_memory::allocation<uint8_t> workspace;
+	uint8_t* workspace;
 
 	using TensorRefA = cutlass::TensorRef<ElementInputA, LayoutInputA>;
 	using TensorRefB = cutlass::TensorRef<ElementInputB, LayoutInputB>;
 	using TensorRefC = cutlass::TensorRef<ElementOutput, LayoutOutput>;
 	using TensorRefD = cutlass::TensorRef<ElementOutput, LayoutOutput>;
 
-	const int& kLda = std::is_same_v<LayoutInputA, cutlass::layout::RowMajor> ? K : M;
-	const int& kLdb = std::is_same_v<LayoutInputB, cutlass::layout::RowMajor> ? N : K;
-	const int& kLdc = std::is_same_v<LayoutOutput, cutlass::layout::RowMajor> ? N : M;
-	const int& kLdd = kLdc;
+	const size_t& kLda = std::is_same_v<LayoutInputA, cutlass::layout::RowMajor> ? K : M;
+	const size_t& kLdb = std::is_same_v<LayoutInputB, cutlass::layout::RowMajor> ? N : K;
+	const size_t& kLdc = std::is_same_v<LayoutOutput, cutlass::layout::RowMajor> ? N : M;
+	const size_t& kLdd = kLdc;
 
 	ElementComputeEpilogue alpha, beta;
 	Gemm gemm_op;
@@ -250,7 +251,9 @@ struct CutlassGEMMWrapper : public BaseGEMMWrapper {
 	// Call set{A,B,C,D} to configure the input/output tensors before calling this init.
 	// Assuming all tensor operands are setup.
 	void init(ElementComputeEpilogue beta_) override {
-		problem_size = cutlass::gemm::GemmCoord({M, N, K});
+		problem_size = cutlass::gemm::GemmCoord({int(M), int(N), int(K)});
+		spdlog::info("name:{} M:{}, N:{}, K:{}, a, b, c, d: {}, {}, {}, {}", name, M, N, K, (size_t)tensor_a_ref.data(),  (size_t)tensor_b_ref.data(),  (size_t)tensor_c_ref.data(),  (size_t)tensor_d_ref.data());
+		spdlog::info("lda, ldb, ldc, ldd: {}, {}, {}, {}", kLda, kLdb, kLdc, kLdd);
 		beta = beta_;
 		typename Gemm::Arguments arguments{problem_size,
 										   tensor_a_ref,
@@ -260,10 +263,10 @@ struct CutlassGEMMWrapper : public BaseGEMMWrapper {
 										   {alpha, beta},
 										   split_k};
 		size_t workspace_size = Gemm::get_workspace_size(arguments);
-		workspace = cutlass::device_memory::allocation<uint8_t>(workspace_size);
+		cudaMalloc(&workspace, workspace_size);
 		cutlass::Status status = gemm_op.can_implement(arguments);
 		CUTLASS_CHECK(status);
-		status = gemm_op.initialize(arguments, workspace.get());
+		status = gemm_op.initialize(arguments, workspace);
 		CUTLASS_CHECK(status);
 		inited = true;
 	}
@@ -283,7 +286,7 @@ struct CutlassGEMMWrapper : public BaseGEMMWrapper {
 		cutlass::Status status;
 		// cutlass::Status status = gemm_op.can_implement(arguments);
 		// CUTLASS_CHECK(status);
-		status = gemm_op.update(arguments, workspace.get());
+		status = gemm_op.update(arguments, workspace);
 		CUTLASS_CHECK(status);
 		pllm_tensor_b = pllmTensor<ElementInputB>(data_b, K, N, PllmLayout::ROW_MAJOR);
 	}
@@ -299,7 +302,7 @@ struct CutlassGEMMWrapper : public BaseGEMMWrapper {
 										   {alpha, beta},
 										   split_k};
 		cutlass::Status status;
-		status = gemm_op.update(arguments, workspace.get());
+		status = gemm_op.update(arguments, workspace);
 		CUTLASS_CHECK(status);
 	}
 
@@ -314,7 +317,7 @@ struct CutlassGEMMWrapper : public BaseGEMMWrapper {
 										   {alpha, beta},
 										   split_k};
 		cutlass::Status status;
-		status = gemm_op.update(arguments, workspace.get());
+		status = gemm_op.update(arguments, workspace);
 		CUTLASS_CHECK(status);
 	}
 
@@ -355,7 +358,7 @@ struct CutlassGEMMWrapper : public BaseGEMMWrapper {
 
 		bool passed = true;
 
-		for(int i = 0; i < M * N; i++) {
+		for(size_t i = 0; i < M * N; i++) {
 			if((abs(data_d[i] - tensor_d_standard.host_data()[i]) -0.01) / abs(tensor_d_standard.host_data()[i]) > 1e-1) {
 				passed = false;
 				spdlog::error("i: {}, d: {}, standard: {}", i,
