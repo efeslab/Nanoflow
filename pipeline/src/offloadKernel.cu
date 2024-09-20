@@ -1,65 +1,35 @@
-import os
-import sys
-import subprocess
-import argparse
+#include "offloadKernel.cuh"
+#include <cstdio>
 
-def main():
-    # Ensure the script is called with the correct number of arguments
-    arg_parser = argparse.ArgumentParser()
-    arg_parser.add_argument("--trace_base", type=str, default="../../../datasets/traces", help="The base directory containing the traces.")
-    arg_parser.add_argument("--executor_base", type=str, default="../../utils", help="The base directory containing the executor.")  
-    arg_parse = arg_parser.parse_args()
-    
-    current_dir = os.getcwd()
-    trace_base = os.path.abspath(arg_parse.trace_base)
-    executor_base =  arg_parse.executor_base
-    result_base = os.path.join(current_dir, "results")
+__device__ void pageCopy(half* input, half* output, int page_mem_size){
 
-    fix_trace = os.path.join(trace_base, "fixed")
-    
-    pipeline_types = ["non-overlap", "nanobatch-only", "pllm-offload"]
+    int copyIter = page_mem_size / sizeof(float4) / blockDim.x;
+    // printf("copyIter: %d\n", copyIter);
+    float4* input4 = (float4*)input;
+    float4* output4 = (float4*)output;
 
-    # Create the result directory if it doesn't exist
-    os.makedirs(result_base, exist_ok=True)
-    
-    for pipeline_type in pipeline_types:
-        type_result_base = os.path.join(result_base, pipeline_type)
-        os.makedirs(type_result_base, exist_ok=True)
-        # Loop through each trace file in the fixed trace directory
-        for trace in os.listdir(fix_trace):
-            trace_path = os.path.join(fix_trace, trace)
-            print(f"Running offline throughput experiment trace: {trace_path}")
-            
-            base_trace_name = os.path.splitext(trace)[0]  # Get the base name without extension
-            parts = base_trace_name.split('-')  # Split by '-'
-            input_len = parts[0]
-            output_len = parts[1]
-            rate = parts[2]
+    for (int i = 0; i < copyIter; i++){
+        output4[i * blockDim.x + threadIdx.x] = input4[i * blockDim.x + threadIdx.x];
+    }
+}
 
-            log_file = os.path.join(type_result_base, f"{input_len}-{output_len}-{rate}.log")
-            result_file = os.path.join(type_result_base, f"{input_len}-{output_len}-{rate}.stat.csv")
-            # Check if the output file already exists
-            if os.path.isfile(result_file):
-                print(f"Offline throughput experiment input_len: {input_len}, output_len: {output_len}, rate: {rate} already exists. Skipping...")
-                continue
-            
-            skip_cycles = 2000 if int(output_len) < 10 else 10000
-            output_prefix = os.path.join(type_result_base, f"{input_len}-{output_len}-{rate}")
-            # Construct the command
-            command = [
-                "python", "serve_8B.py",
-                f"--config_path=../config_all/llama2-70B/{pipeline_type}.json",
-                f"--trace_path={trace_path}",
-                f"--output_prefix={output_prefix}",
-                f"--skip_cycles={skip_cycles}",
-                f"--empty_weight=True",
-                f"--run_cycles=1500"
-            ]
-            # print (command)
+__global__ void moveKVcacheKernel(int finished_req_num, int32_t * finished_index, 
+                                       int32_t* kv_indptr, int32_t* kv_indices, half* host_ptr, half* kv_data, int page_mem_size, bool host_to_gpu){
+    page_mem_size /= sizeof(half);
+    for (int i = 0; i < finished_req_num; i++){
+        int idx = finished_index[i];
+        int start = kv_indptr[idx];
+        int end = kv_indptr[idx + 1];
 
-            # Execute the command and log the output
-            with open(log_file, "w") as log:
-                subprocess.run(command, cwd=executor_base, stdout=log, stderr=log)
-
-if __name__ == "__main__":
-    main()
+        for (int j = start + blockIdx.x; j < end; j += gridDim.x){
+            int page_idx = kv_indices[j];
+            half* page = kv_data + page_idx * page_mem_size;
+            half* host_page = host_ptr + j * page_mem_size;
+            // printf("page_idx: %d\n", page_idx);
+            if (host_to_gpu)
+                pageCopy(host_page, page, page_mem_size);
+            else
+                pageCopy(page, host_page, page_mem_size);
+        }
+    }
+}
