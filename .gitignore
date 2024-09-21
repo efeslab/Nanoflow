@@ -37,3 +37,4 @@ Anaconda3-2024.02-1-Linux-x86_64.sh
 *.csv
 *.req_*
 *.schedule
+!figures/*

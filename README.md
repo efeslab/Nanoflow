@@ -7,24 +7,33 @@
 </p>
 
 
-# Introduction
 
-NanoFlow is a throughput-oriented high-performance serving framework for LLMs. With key techniques including *intra-device parallelism, asynchronous CPU scheduling, and SSD offloading*, NanoFlow consistently delivers superior throughput compared to vLLM, Deepspeed-FastGen, and TensorRT-LLM. Comprehensive evaluations, ranging from Llama2-70B, Qwen2-72B, DeepSeek-67B, Mixtral-8x7B, and LLaMA3-8B on a 8xA100 80GB DGX node, show that **NanoFlow achieves up to 1.91x throughput boost compared to TensorRT-LLM.**
+NanoFlow is a throughput-oriented high-performance serving framework for LLMs.  NanoFlow consistently delivers superior throughput compared to vLLM, Deepspeed-FastGen, and TensorRT-LLM. **NanoFlow achieves up to 1.91x throughput boost compared to TensorRT-LLM.** The key features of NanoFlow include:
+
+- **Intra-device parallelism**: Maximizes hardware utilization by exploiting nano-batching and execution unit scheduling to overlap different resource demands inside a single device.
+- **Asynchronous CPU scheduling**: Achieves highly efficient CPU scheduling by adopting asynchronous control flow for GPU execution, CPU batch formation and KV-cache management.
 
 
+
+## News
+- [2024/09] 🚀 We supported Llama2 70B, Llama3 70B, Llama3.1 70B, Llama3 8B, Llama3.1 8B and Qwen2 72B models, and released experiment scripts for evaluation results.
+
+## Introduction
+
+
+
+The key insight behinds NanoFlow is that traditional pipeline design of existing frameworks under-utilizes hardware resources due to the sequential execution of operations. Therefore, NanoFlow proposes intra-device parallelism (as shown in the following gif), which use nano-batches to schedule the compute-, memory-, network-bound operations for simultaneous execution. Such overlapping leaves compute-bound operations on the critical path and boost the resource utilization.
 <p align="center">
   <img src="./figures/SystemDesign.png" alt="system design" width="90%">
 </p>
 <p align="center"><em>Overview of NanoFlow's key components</em></p>
-
-The key insight behinds NanoFlow is that traditional pipeline design of existing frameworks under-utilizes hardware resources due to the sequential execution of operations. Therefore, NanoFlow proposes intra-device parallelism (as shown in the following gif), which use nano-batches to schedule the compute-, memory-, network-bound operations for simultaneous execution. Such overlapping leaves compute-bound operations on the critical path and boost the resource utilization.
 
 <p align="center">
   <img src="./figures/pipeline.gif" alt="system design" width="90%">
 </p>
 <p align="center"><em>Illustration of intra-device parallelism</em></p>
 
-With highly utilized GPU, the overhead of CPU, which consists of KV-Cache management, batch formation, and retired requests selection, takes significant part ($>10$%) of inference time. Therefore, NanoFlow adopts an asyncronous control flow as shown in the following figure. At any iteration $i$, NanoFlow makes batching decisions and allocates the KV-cache entries for the next iteration before the end of the current iteration. NanoFlow directly launches iteration $i + 1$ without detecting the end-of-sequence (EOS) tokens generated in iteration $i$ and retires completed requests at iteration $i+2$.
+With highly utilized GPU, the overhead of CPU, which consists of KV-cache management, batch formation, and retired requests selection, takes significant part ($>10$%) of inference time. Therefore, NanoFlow adopts an asyncronous control flow as shown in the following figure. At any iteration $i$, NanoFlow makes batching decisions and allocates the KV-cache entries for the next iteration before the end of the current iteration. NanoFlow directly launches iteration $i + 1$ without detecting the end-of-sequence (EOS) tokens generated in iteration $i$ and retires completed requests at iteration $i+2$.
 
 
 <p align="center">
@@ -32,7 +41,7 @@ With highly utilized GPU, the overhead of CPU, which consists of KV-Cache manage
 </p>
 <p align="center"><em>Explanation of asyncronous control flow scheduling</em></p>
 
-To avoid recomputation and reuse the KV-Cache from multi-round conversations, NanoFlow eagerly offloads the KV-Cache of finished requests to SSDs. In one iteration, NanoFlow selects the KV-Cache of the retired requests and copies them to the host in parallel to the on-the-fly inference operations, via a layer-by-layer manner. Our calculation shows that only 5GB/s are needed for the offloading bandwidth of serving LLaMA2-70B, while a single SSD can reach 3GB/s. 
+To avoid recomputation and reuse the KV-cache from multi-round conversations, NanoFlow eagerly offloads the KV-cache of finished requests to SSDs. In one iteration, NanoFlow selects the KV-cache of the retired requests and copies them to the host in parallel to the on-the-fly inference operations, via a layer-by-layer manner. Our calculation shows that only 5GB/s are needed for the offloading bandwidth of serving LLaMA2-70B, while a single SSD can reach 3GB/s. 
 
 With all mentioned techniques implemented, we now open-source NanoFlow of a Cpp-based backend and a Python-based demo frontend in ~4K lines. NanoFlow integrates state-of-the-art kernel libraries including [CUTLASS](https://github.com/NVIDIA/cutlass) for GEMM, [FlashInfer](https://github.com/flashinfer-ai/flashinfer) for Attention, and [MSCCL++](https://github.com/microsoft/mscclpp) for Network. This codebase also contains necessary scripts for environment setup and experiment reproduction.
 
@@ -91,19 +100,23 @@ chmod +x ./installAnaconda.sh
 yes | ./setup.sh
 ```
 
-### Download the model
-```bash
-./modelDownload.sh
-```
-
-## Serving datasets
+### Serve different models
 ```bash
 ./serve.sh
 ```
+![Nanoflow](./figures/serve.png)
+
 ![Nanoflow](./figures/SampleOutput.png)
 
 
-## Evaluation Results
+## Evaluation
+
+```bash
+./perf.sh
+```
+Result figures can be found in `Nanoflow/pipeline/eval`.
+
+
 ![Nanoflow](./figures/OfflineThroughput.png)
 
 ## Citation
