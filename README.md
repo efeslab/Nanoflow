@@ -16,7 +16,7 @@ NanoFlow is a throughput-oriented high-performance serving framework for LLMs.  
 
 
 ## News
-- [2024/09] 🚀 We supported Llama2 70B, Llama3 70B, Llama3.1 70B, Llama3 8B, Llama3.1 8B and Qwen2 72B models, and released experiment scripts for evaluation results.
+- [2024/09] 🚀 Nanoflow now supports Llama2 70B, Llama3 70B, Llama3.1 70B, Llama3 8B, Llama3.1 8B and Qwen2 72B models. We also released experiment scripts to reproduce the evaluation results.
 
 ## Introduction
 
