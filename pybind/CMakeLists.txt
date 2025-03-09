@@ -89,7 +89,7 @@ function(add_pybind_module TARGET_NAME)
 endfunction()
 
 # Add modules
-add_pybind_module(example_module SOURCES src/test.cpp)
+add_pybind_module(example_module SOURCES src/test.cu)
 add_pybind_module(bind_genEmbedding SOURCES src/bind_genEmbedding.cu)
 add_pybind_module(bind_rms_norm SOURCES src/bind_rms_norm.cu)
 add_pybind_module(bind_silu_multiply SOURCES src/bind_silu_multiply.cu)

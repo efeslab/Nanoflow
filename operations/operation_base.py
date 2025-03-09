@@ -1,3 +1,4 @@
+from param import String
 import torch
 import sqlite3
 from abc import ABC, abstractmethod
@@ -14,6 +15,7 @@ class Operations:
         self.first_layer_only = False
         self.last_layer_only = False
         self.weight_name = None
+        self.tag = "torch"
 
         # Connect to the database
         self.conn = sqlite3.connect('performance.db')
@@ -65,6 +67,10 @@ class Operations:
         rows = self.cursor.fetchall()
         for row in rows:
             print(row)
+            
+    def config_tag(self, tag):
+        self.tag = tag
+        return self
     
     def __str__(self):
         return self.name   

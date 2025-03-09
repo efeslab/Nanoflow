@@ -9,7 +9,12 @@ from core.weightWrapper import WeightWrapper
 from core.processWeight import process_weight_no_transpose
 import bind_genEmbedding
 
+def gen_embedding_torch(tokens, embedding, output):
+    output.copy_(embedding[tokens])
+
 class GenEmbedding(Operations):
+    
+    
     def __init__(self, name):
         super().__init__(name)
         self.inputs = {
@@ -21,6 +26,12 @@ class GenEmbedding(Operations):
         self.weights = {
             "embedding": WeightWrapper()
         }
+        self.impl_map = {}
+        self.init_impl_map()
+    
+    def init_impl_map(self):
+        self.impl_map["torch"] = gen_embedding_torch
+        self.impl_map["cuda"] = bind_genEmbedding.genEmbedding
     
     def setShape(self, hidden_dim, vocab_size):
         self.hidden_dim = hidden_dim
@@ -65,8 +76,8 @@ class GenEmbedding(Operations):
         # create a new tensor to store the output
         # output_temp = torch.zeros((self.batch_size, self.hidden_dim), dtype=torch.float16, device=self.inputs["token"].tensor.device)
         # print("tokens: ", tokens)
-        bind_genEmbedding.genEmbedding(tokens, embedding, self.outputs["output"].tensor)
-
+        # bind_genEmbedding.genEmbedding(tokens, embedding, self.outputs["output"].tensor)
+        self.impl_map[self.tag](tokens, embedding, self.outputs["output"].tensor)
         # self.outputs["output"].tensor.copy_(embedding[tokens])
         # self.outputs["output"].tensor.copy_(output_temp)
     
