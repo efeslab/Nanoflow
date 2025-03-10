@@ -8,7 +8,7 @@ from operations.operation_base import Operations
 from operations.activation.silu import Activation
 from operations.embedding.embedding import GenEmbedding
 from operations.globalOp.globalOp import GlobalInput, GlobalOutput
-from operations.gemm.gemm import GEMM, GEMMNoBias, GEMMCombineWeight
+from operations.gemm.gemm import GEMM
 from operations.norm.rmsnorm import LayerNorm
 from operations.sampling.max_sampling import Sampling
 from operations.rope.rope import RopeAppend
@@ -50,7 +50,7 @@ class Pipeline():
 
         self.layerNormAttn   = LayerNorm("LayerNormAttn").setWeightName("model.layers.{layer}.input_layernorm.weight")
 
-        self.kqv             = GEMMCombineWeight("KQV").setWeightName([
+        self.kqv             = GEMM("KQV").setWeightName([
             "model.layers.{layer}.self_attn.q_proj.weight",
             "model.layers.{layer}.self_attn.k_proj.weight",
             "model.layers.{layer}.self_attn.v_proj.weight"
@@ -65,20 +65,20 @@ class Pipeline():
         self.pfAttn          = PFAttn("PFAttn")
         self.pfAttn.externals["KVCache"] = self.kv_cache
 
-        self.o               = GEMM("O").setWeightName("model.layers.{layer}.self_attn.o_proj.weight")
+        self.o               = GEMM("O", True).setWeightName("model.layers.{layer}.self_attn.o_proj.weight")
 
         self.layerNormFFN    = LayerNorm("LayerNormFFN").setWeightName("model.layers.{layer}.post_attention_layernorm.weight")
 
-        self.ug              = GEMMCombineWeight("UG").setWeightName([
+        self.ug              = GEMM("UG").setWeightName([
             "model.layers.{layer}.mlp.up_proj.weight",
             "model.layers.{layer}.mlp.gate_proj.weight"
         ])
 
         self.activation      = Activation("Activation")
 
-        self.d               = GEMM("D").setWeightName("model.layers.{layer}.mlp.down_proj.weight")
+        self.d               = GEMM("D", True).setWeightName("model.layers.{layer}.mlp.down_proj.weight")
 
-        self.getLogits       = GEMMNoBias("GetLogits").setWeightName("lm_head.weight")
+        self.getLogits       = GEMM("GetLogits").setWeightName("lm_head.weight")
         self.getLogits.last_layer_only = True
 
         self.modelLayerNorm  = LayerNorm("ModelLayerNorm").setWeightName("model.norm.weight")
@@ -176,7 +176,8 @@ class Pipeline():
         self.global_output.setBatchSize(self.batch_size)
     
     def config_algorithm(self):
-        pass
+        self.gen_embedding.config_tag("cuda")
+        self.activation.config_tag("torch")
 
     def config(self):
         self.config_batch_size()

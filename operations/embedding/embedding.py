@@ -8,12 +8,21 @@ from core.IOWrapper import IOWrapper, IOBufferType
 from core.weightWrapper import WeightWrapper
 from core.processWeight import process_weight_no_transpose
 import bind_genEmbedding
+from operations.impl_base import OperationImpl
 
-def gen_embedding_torch(tokens, embedding, output):
-    output.copy_(embedding[tokens])
-
+class GenEmbeddingTorch(OperationImpl):
+    category_tag = "torch"
+    def run(self, tokens, embedding, output):
+        print("using torch")
+        output.copy_(embedding[tokens])
+        
+class GenEmbeddingCuda(OperationImpl):
+    category_tag = "cuda"
+    def run(self, tokens, embedding, output):
+        print("using cuda")
+        bind_genEmbedding.genEmbedding(tokens, embedding, output)
+        
 class GenEmbedding(Operations):
-    
     
     def __init__(self, name):
         super().__init__(name)
@@ -30,9 +39,9 @@ class GenEmbedding(Operations):
         self.init_impl_map()
     
     def init_impl_map(self):
-        self.impl_map["torch"] = gen_embedding_torch
-        self.impl_map["cuda"] = bind_genEmbedding.genEmbedding
-    
+        self.add_impl(GenEmbeddingTorch)
+        self.add_impl(GenEmbeddingCuda)
+        
     def setShape(self, hidden_dim, vocab_size):
         self.hidden_dim = hidden_dim
         self.vocab_size = vocab_size
@@ -55,7 +64,7 @@ class GenEmbedding(Operations):
                 # record the time
                 start_time = time.perf_counter()
             
-                bind_genEmbedding.genEmbedding(input, embedding, output)
+                self.impl.run(input, embedding, output)
 
                 if round > 0:
                     latency = time.perf_counter() - start_time
@@ -73,13 +82,7 @@ class GenEmbedding(Operations):
         # Retrieve token indices from input and the embedding matrix from weight_map.
         tokens = self.inputs["token"].tensor  # expected shape: (1, batch_size)
         embedding = self.weights["embedding"].weight_map[layer]  # expected shape: (vocab_size, hidden_dim)
-        # create a new tensor to store the output
-        # output_temp = torch.zeros((self.batch_size, self.hidden_dim), dtype=torch.float16, device=self.inputs["token"].tensor.device)
-        # print("tokens: ", tokens)
-        # bind_genEmbedding.genEmbedding(tokens, embedding, self.outputs["output"].tensor)
-        self.impl_map[self.tag](tokens, embedding, self.outputs["output"].tensor)
-        # self.outputs["output"].tensor.copy_(embedding[tokens])
-        # self.outputs["output"].tensor.copy_(output_temp)
+        self.impl.run(tokens, embedding, self.outputs["output"].tensor)
     
     def processWeight(self, global_weight_map, total_layers, cached = False):
         return process_weight_no_transpose(global_weight_map, self.weight_name, self.weights["embedding"], total_layers, cached)

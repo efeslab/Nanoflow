@@ -8,6 +8,18 @@ from core.IOWrapper import IOWrapper, IOBufferType
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none, process_weight_layer
 import bind_silu_multiply
+from operations.impl_base import OperationImpl
+
+class SiluMultiplyTorch(OperationImpl):
+    category_tag = "torch"
+    def run(self, x, output):
+        A, B = torch.split(x, x.shape[-1] // 2, dim=-1)
+        output.copy_(A * torch.nn.functional.silu(B))
+        
+class SiluMultiplyCuda(OperationImpl):
+    category_tag = "cuda"
+    def run(self, x, output):
+        bind_silu_multiply.silu_multiply(x, output)
 
 class Activation(Operations):
     def __init__(self, name):
@@ -19,6 +31,12 @@ class Activation(Operations):
             "output": IOWrapper(self, 'output', IOBufferType.FULL)
         }
         self.act_fn = torch.nn.SiLU()
+        self.impl_map = {}
+        self.init_impl_map()
+    
+    def init_impl_map(self):
+        self.add_impl(SiluMultiplyTorch)
+        self.add_impl(SiluMultiplyCuda)
         
     def setShape(self, N):
         self.N = N
@@ -79,11 +97,5 @@ class Activation(Operations):
             print(row)
         
     def run(self, layer):
-        # start_time = time.time()
         x = self.inputs["input"].tensor
-        bind_silu_multiply.silu_multiply(x, self.outputs["output"].tensor)
-        # print("time: ", time.time() - start_time)
-        # self.outputs["output"].tensor.copy_(output)
-        # Split the input along the last dimension.
-        # A, B = torch.split(x, self.N, dim=-1)
-        # self.outputs["output"].tensor.copy_(A * self.act_fn(B))
+        self.impl.run(x, self.outputs["output"].tensor)
