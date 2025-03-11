@@ -5,7 +5,7 @@
 #include "cuda_fp16.h"
 #include "flashinfer/pos_enc.cuh"
 #include "flashinfer/page.cuh"
-#include "spdlog/spdlog.h"
+// #include "spdlog/spdlog.h"
 
 
 __global__ void genEmbedding(int* tokens, half* weights, half* out_embedding, int Hdim);

@@ -10,13 +10,13 @@ from core.processWeight import process_weight_none, process_weight_layer
 import bind_silu_multiply
 from operations.impl_base import OperationImpl
 
-class SiluMultiplyTorch(OperationImpl):
+class SiluMultiplyTorchImpl(OperationImpl):
     category_tag = "torch"
     def run(self, x, output):
         A, B = torch.split(x, x.shape[-1] // 2, dim=-1)
         output.copy_(A * torch.nn.functional.silu(B))
         
-class SiluMultiplyCuda(OperationImpl):
+class SiluMultiplyCudaImpl(OperationImpl):
     category_tag = "cuda"
     def run(self, x, output):
         bind_silu_multiply.silu_multiply(x, output)
@@ -35,8 +35,8 @@ class Activation(Operations):
         self.init_impl_map()
     
     def init_impl_map(self):
-        self.add_impl(SiluMultiplyTorch)
-        self.add_impl(SiluMultiplyCuda)
+        self.add_impl(SiluMultiplyTorchImpl)
+        self.add_impl(SiluMultiplyCudaImpl)
         
     def setShape(self, N):
         self.N = N

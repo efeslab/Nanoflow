@@ -10,16 +10,16 @@ from core.processWeight import process_weight_no_transpose
 import bind_genEmbedding
 from operations.impl_base import OperationImpl
 
-class GenEmbeddingTorch(OperationImpl):
+class GenEmbeddingTorchImpl(OperationImpl):
     category_tag = "torch"
     def run(self, tokens, embedding, output):
-        print("using torch")
+        # print("using torch")
         output.copy_(embedding[tokens])
         
-class GenEmbeddingCuda(OperationImpl):
+class GenEmbeddingCudaImpl(OperationImpl):
     category_tag = "cuda"
     def run(self, tokens, embedding, output):
-        print("using cuda")
+        # print("using cuda")
         bind_genEmbedding.genEmbedding(tokens, embedding, output)
         
 class GenEmbedding(Operations):
@@ -39,8 +39,8 @@ class GenEmbedding(Operations):
         self.init_impl_map()
     
     def init_impl_map(self):
-        self.add_impl(GenEmbeddingTorch)
-        self.add_impl(GenEmbeddingCuda)
+        self.add_impl(GenEmbeddingTorchImpl)
+        self.add_impl(GenEmbeddingCudaImpl)
         
     def setShape(self, hidden_dim, vocab_size):
         self.hidden_dim = hidden_dim

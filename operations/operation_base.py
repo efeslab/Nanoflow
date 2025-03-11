@@ -85,7 +85,7 @@ class Operations:
         for row in rows:
             print(row)
             
-    def config_tag(self, tag):
+    def config_tag(self, tag, parameter_map = {}):
         self.tag = tag
         parts = tag.split(":", 1)
         category_tag = ""
@@ -96,11 +96,11 @@ class Operations:
             category_tag = parts[0]
             impl_tag = parts[1]
         self.impl  = self.impl_map[category_tag]()
-        self.config_impl(impl_tag)
+        self.config_impl(impl_tag, parameter_map)
         return self
     
-    def config_impl(self, impl_tag):
-        self.impl.config(impl_tag)
+    def config_impl(self, impl_tag, parameter_map):
+        self.impl.config(impl_tag, parameter_map)
         
     def get_all_tags(self):
         tag_list = []

@@ -59,7 +59,7 @@ class Executor():
                     f.write("\n")
                     f.write(str(inputs.tensor.shape))
                     f.write("\n")
-                    torch.save(inputs.tensor.cpu(), f"./out/{op.name}_{layer}_{inputs.name}")
+                    # torch.save(inputs.tensor.cpu(), f"./out/{op.name}_{layer}_{inputs.name}")
                     
 
                 for weights in op.weights.values():
@@ -68,7 +68,7 @@ class Executor():
                     f.write("\n")
                     f.write(str(weights.weight_map[layer].shape))
                     f.write("\n")
-                    torch.save(weights.weight_map[layer].cpu(), f"./out/{op.name}_{layer}_{weights.name}")
+                    # torch.save(weights.weight_map[layer].cpu(), f"./out/{op.name}_{layer}_{weights.name}")
 
                 f.flush()
 
@@ -82,7 +82,7 @@ class Executor():
                     f.write("\n")
                     f.write(str(outputs.tensor.shape))
                     f.write("\n")
-                    torch.save(outputs.tensor.cpu(), f"./out/{op.name}_{layer}_{outputs.name}")
+                    # torch.save(outputs.tensor.cpu(), f"./out/{op.name}_{layer}_{outputs.name}")
 
                 f.flush()
             f.close()

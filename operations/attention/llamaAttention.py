@@ -4,6 +4,7 @@ from operations.operation_base import Operations
 from core.IOWrapper import IOWrapper, IOBufferType
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none, process_weight_layer
+from operations.impl_base import OperationImpl
 from flash_attn import flash_attn_func
 
 
@@ -45,6 +46,73 @@ class DecAttn(Operations):
         # self.outputs["output"].tensor = Q @ KVdata.T
         pass
     
+class PFAttnTorchImpl(OperationImpl):
+    category_tag = "torch"
+
+    def run(self, scale, head_dim, num_qo_heads, q, k, v, output
+    ):
+        # print("using torch")
+        
+        # Compute attention scores.
+        # Use Einstein summation notation: for each query (q) and head (h), compute dot product with each key (k)
+        # resulting in scores of shape: [n_q, num_qo_heads, n_k]
+        scores = torch.einsum("qhd,khd->qhk", q, k) * scale
+        
+        # -------------------------------
+        # Add Causal Mask to Attention
+        # -------------------------------
+        # Determine the number of query tokens.
+        n_q = q.shape[0]
+        n_k = k.shape[0]
+        # Assume that the KV cache has 'past' tokens (from previous timesteps) and new tokens,
+        # so that n_k = past_length + n_q.
+        past_length = max(n_k - n_q, 0)
+        
+        if past_length > 0:
+            # For the new tokens (the last n_q keys), build a lower-triangular mask.
+            # For each query position i (0-indexed among the new tokens), allow attending only
+            # to new keys with positions <= i.
+            new_mask = torch.tril(torch.ones(n_q, n_q, dtype=torch.bool, device=scores.device))
+            # For the past tokens (first past_length keys), we allow full attention.
+            past_mask = torch.ones(n_q, past_length, dtype=torch.bool, device=scores.device)
+            # Concatenate the masks along the key dimension.
+            causal_mask = torch.cat([past_mask, new_mask], dim=1)  # shape: [n_q, n_k]
+        else:
+            # If there is no past context (i.e. n_k == n_q), use a standard lower-triangular mask.
+            causal_mask = torch.tril(torch.ones(n_q, n_k, dtype=torch.bool, device=scores.device))
+        
+        # Expand the causal mask to match the scores' shape: [n_q, num_qo_heads, n_k].
+        # Then mask out disallowed (future) positions by setting them to -inf.
+        scores = scores.masked_fill(~causal_mask.unsqueeze(1), float("-inf"))
+        
+        # Apply softmax over the key dimension.
+        attn_weights = torch.softmax(scores, dim=-1)
+        
+        # Compute attention output as the weighted sum over the value vectors.
+        # Resulting shape: [n_q, num_qo_heads, head_dim]
+        out = torch.einsum("qhk,khd->qhd", attn_weights, v)
+        # Flatten heads back to shape: [n_q, num_qo_heads * head_dim]
+        out = out.reshape(-1, num_qo_heads * head_dim)
+        # Write the computed output into the operator's output tensor.
+        output.copy_(out)
+
+class PFAttnCudaImpl(OperationImpl):
+    category_tag = "cuda"
+    def run(self, scale, head_dim, num_qo_heads, q, k, v, output
+    ):
+        q = q.unsqueeze(0)
+        k = k.unsqueeze(0)
+        v = v.unsqueeze(0)
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
+
+        out = flash_attn_func(q, k, v, causal=True, softmax_scale=scale)
+        out = out.reshape(-1, num_qo_heads * head_dim)
+
+        # print(f"output shape: {output.shape}")
+        output.copy_(out)
+
 class PFAttn(Operations):
     def __init__(self, name):
         super().__init__(name)
@@ -59,6 +127,12 @@ class PFAttn(Operations):
         self.externals = {
             "KVCache": None
         }
+        self.impl_map = {}
+        self.init_impl_map()
+
+    def init_impl_map(self):
+        self.add_impl(PFAttnTorchImpl)
+        self.add_impl(PFAttnCudaImpl)
     
     def setShape(self, num_kv_heads, num_qo_heads, head_dim):
         self.num_kv_heads = num_kv_heads
@@ -175,27 +249,6 @@ class PFAttn(Operations):
 
     
     def run(self, layer):
-        """
-        For each batch element, this method retrieves the query portion (Q) of shape
-        [n_q, num_qo_heads * head_dim] and then uses the external KV cache to get the stored keys and values.
-        
-        The attention operation is performed per head as follows:
-        1. Reshape the query tensor to [n_q, num_qo_heads, head_dim].
-        2. Retrieve the cached keys and values (sub_k and sub_v) and reshape them to
-            [n_k, num_kv_heads, head_dim] (where n_k is the number of cached keys).
-        3. Compute the group size as: group_size = num_qo_heads // num_kv_heads.
-            This tells you how many query heads correspond to each key/value head.
-        4. Expand (repeat) the key and value tensors along the head dimension so that each query head
-            has a corresponding key and value (i.e. each key/value head is repeated group_size times).
-        5. Compute attention scores for each head via dot-product scaling (using the factor 1/sqrt(head_dim)).
-        6. **Apply a causal mask over the scores** so that each query position can only attend to
-            allowed keys (i.e. those coming from the past or up to the current position among the new tokens).
-        7. Apply softmax over the key dimension to obtain attention weights.
-        8. Use the attention weights to compute a weighted sum over the value vectors.
-        9. Flatten the output back to shape [n_q, num_qo_heads * head_dim] and write it to the output.
-        
-        The final output is written to self.outputs["output"].tensor.
-        """
         Q = self.inputs["Q"].tensor
         scale = 1.0 / (self.head_dim ** 0.5)
         # Compute group size: how many query heads correspond to one key/value head.
@@ -218,6 +271,7 @@ class PFAttn(Operations):
             #   sub_v: [n_k, num_kv_heads * head_dim]
             sub_k, sub_v = self.externals["KVCache"].get(layer, i)
             n_k = sub_k.shape[0]
+
             # Reshape keys and values so that the head dimension is explicit.
             # New shapes: [n_k, num_kv_heads, head_dim]
             sub_k = sub_k.view(n_k, self.num_kv_heads, self.head_dim)
@@ -228,61 +282,5 @@ class PFAttn(Operations):
             # New shapes after repeat: [n_k, num_qo_heads, head_dim]
             expanded_k = sub_k.repeat_interleave(group_size, dim=1)
             expanded_v = sub_v.repeat_interleave(group_size, dim=1)
-            
-            # # Compute attention scores.
-            # # Use Einstein summation notation: for each query (q) and head (h), compute dot product with each key (k)
-            # # resulting in scores of shape: [n_q, num_qo_heads, n_k]
-            # scores = torch.einsum("qhd,khd->qhk", sub_q, expanded_k) * scale
-            
-            # # -------------------------------
-            # # Add Causal Mask to Attention
-            # # -------------------------------
-            # # Determine the number of query tokens.
-            # n_q = sub_q.shape[0]
-            # # Assume that the KV cache has 'past' tokens (from previous timesteps) and new tokens,
-            # # so that n_k = past_length + n_q.
-            # past_length = max(n_k - n_q, 0)
-            
-            # if past_length > 0:
-            #     # For the new tokens (the last n_q keys), build a lower-triangular mask.
-            #     # For each query position i (0-indexed among the new tokens), allow attending only
-            #     # to new keys with positions <= i.
-            #     new_mask = torch.tril(torch.ones(n_q, n_q, dtype=torch.bool, device=scores.device))
-            #     # For the past tokens (first past_length keys), we allow full attention.
-            #     past_mask = torch.ones(n_q, past_length, dtype=torch.bool, device=scores.device)
-            #     # Concatenate the masks along the key dimension.
-            #     causal_mask = torch.cat([past_mask, new_mask], dim=1)  # shape: [n_q, n_k]
-            # else:
-            #     # If there is no past context (i.e. n_k == n_q), use a standard lower-triangular mask.
-            #     causal_mask = torch.tril(torch.ones(n_q, n_k, dtype=torch.bool, device=scores.device))
-            
-            # # Expand the causal mask to match the scores' shape: [n_q, num_qo_heads, n_k].
-            # # Then mask out disallowed (future) positions by setting them to -inf.
-            # scores = scores.masked_fill(~causal_mask.unsqueeze(1), float("-inf"))
-            
-            # # Apply softmax over the key dimension.
-            # attn_weights = torch.softmax(scores, dim=-1)
-            
-            # # Compute attention output as the weighted sum over the value vectors.
-            # # Resulting shape: [n_q, num_qo_heads, head_dim]
-            # out = torch.einsum("qhk,khd->qhd", attn_weights, expanded_v)
-            # # Flatten heads back to shape: [n_q, num_qo_heads * head_dim]
-            # out = out.reshape(-1, self.num_qo_heads * self.head_dim)
-            # # Write the computed output into the operator's output tensor.
-            # self.outputs["output"].tensor[start:end, :].copy_(out)
 
-            # Use flash attention to compute the attention scores and output.
-            sub_q = sub_q.unsqueeze(0)
-            expanded_k = expanded_k.unsqueeze(0)
-            expanded_v = expanded_v.unsqueeze(0)
-            embed_dim = self.head_dim
-            num_heads = self.num_qo_heads
-            sub_q = sub_q.contiguous()
-            expanded_k = expanded_k.contiguous()
-            expanded_v = expanded_v.contiguous()
-
-            output = flash_attn_func(sub_q, expanded_k, expanded_v, causal=True, softmax_scale=scale)
-            output = output.reshape(-1, self.num_qo_heads * self.head_dim)
-
-            # print(f"output shape: {output.shape}")
-            self.outputs["output"].tensor[start:end, :].copy_(output)
+            self.impl.run(scale, self.head_dim, self.num_qo_heads, sub_q, expanded_k, expanded_v, self.outputs["output"].tensor[start:end, :])

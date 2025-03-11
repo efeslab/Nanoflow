@@ -156,6 +156,7 @@ class Pipeline():
         weight_manager = WeightManager()
         weight_manager.load_from_safe_tensor(weight_path)
         weight_manager.set_weight(self.operation_list, self.layer)
+        torch.cuda.empty_cache()
     
     def config_batch_size(self):
         self.gen_embedding.setBatchSize(self.batch_size)
@@ -177,7 +178,24 @@ class Pipeline():
     
     def config_algorithm(self):
         self.gen_embedding.config_tag("cuda")
+        self.layerNormAttn.config_tag("torch")
         self.activation.config_tag("torch")
+        self.kqv.config_tag("cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", {"M" : self.batch_size, "N": self.kqv_heads * self.head_dim, "K": self.hidden_dim, "alpha": 1.0, "bias": False})
+        self.ropeAppend.config_tag("torch")
+        # self.decAttn.config_tag("torch")
+        self.pfAttn.config_tag("torch")
+        self.layerNormFFN.config_tag("cuda")
+
+        # self.ug.config_tag("cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", {"M" : self.batch_size, "N": self.intermediate_dim * 2, "K": self.hidden_dim, "alpha": 1.0, "bias": False})
+        # self.d.config_tag("cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", {"M" : self.batch_size, "N": self.hidden_dim, "K": self.intermediate_dim, "alpha": 1.0, "bias": True, "beta": 1.0})
+        # self.getLogits.config_tag("cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", {"M" : self.batch_size, "N": self.vocab_size, "K": self.hidden_dim, "alpha": 1.0, "bias": False})
+        # self.kqv.config_tag("torch", {"alpha": 1.0, "bias" : False})
+        self.o.config_tag("torch", {"alpha": 1.0, "bias" : True, "beta": 1.0})
+        self.ug.config_tag("torch", {"alpha": 1.0, "bias" : False})
+        self.d.config_tag("torch", {"alpha": 1.0, "bias" : True, "beta": 1.0})
+        self.modelLayerNorm.config_tag("torch")
+        self.sample.config_tag("cuda")
+        self.getLogits.config_tag("torch", {"alpha": 1.0, "bias" : False})
 
     def config(self):
         self.config_batch_size()
@@ -190,7 +208,7 @@ class Pipeline():
         flattened = [item for sublist in input_ids for item in sublist]
         self.batch_size = len(flattened)
         # print(f"batch_size: {self.batch_size}")
-        self.config_batch_size()
+        self.config()
         self.update_allocate_buffers()
         input_tensor = torch.tensor(flattened, dtype=torch.int32, device='cuda')
         # get cumulative sum of the number of tokens in each input

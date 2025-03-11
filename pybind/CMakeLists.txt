@@ -12,6 +12,7 @@ if(CMAKE_CUDA_ARCHITECTURES STREQUAL "90")
 endif()
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=0)
 
 #set(CMAKE_C_COMPILER "/usr/bin/gcc-11")
 #set(CMAKE_CXX_COMPILER "/usr/bin/g++-11")
@@ -60,6 +61,17 @@ find_package(Torch REQUIRED)
 find_library(TORCH_PYTHON_LIBRARY torch_python PATH "${TORCH_INSTALL_PREFIX}/lib")
 find_library(MSCCLPP_LIBRARY NAMES mscclpp PATHS ${MSCCLPP_DIR}/lib NO_DEFAULT_PATH)
 
+# --------------- Build GEMM Libraries -----------------#
+
+set (GEMM_BASE_SRC "${CMAKE_SOURCE_DIR}/src/generate-gemm")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${GEMM_BASE_SRC}/genGEMM.py ${GEMM_BASE_SRC}/gemmFactory.in)
+execute_process(COMMAND make WORKING_DIRECTORY ${GEMM_BASE_SRC})
+file(GLOB GEMM_SRC "${GEMM_BASE_SRC}/*.cu")
+add_library(gemm_lib STATIC ${GEMM_SRC})
+target_include_directories(gemm_lib PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(gemm_lib PRIVATE ${PARENT_DIR}/3rdparty/cutlass/include)
+target_include_directories(gemm_lib PRIVATE ${PARENT_DIR}/3rdparty/cutlass/tools/util/include)
+
 # Helper function to create Python modules
 function(add_pybind_module TARGET_NAME)
     cmake_parse_arguments(PARSE_ARGV 1 ARG "" "" "SOURCES;LIBS")
@@ -95,3 +107,4 @@ add_pybind_module(bind_rms_norm SOURCES src/bind_rms_norm.cu)
 add_pybind_module(bind_silu_multiply SOURCES src/bind_silu_multiply.cu)
 add_pybind_module(bind_sample SOURCES src/bind_sample.cu)
 add_pybind_module(bind_gemm SOURCES src/bind_gemm.cu)
+target_link_libraries(bind_gemm PRIVATE gemm_lib)

@@ -5,6 +5,21 @@ from core.IOWrapper import IOWrapper, IOBufferType
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none, process_weight_layer
 import bind_rms_norm
+from operations.impl_base import OperationImpl
+
+class LayerNormTorchImpl(OperationImpl):
+    category_tag = "torch"
+    def run(self, x, weight, output, epsilon):
+        # print("using torch")
+        rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + epsilon)
+        normalized_x = x / rms
+        output.copy_(normalized_x.to(torch.float16) * weight)
+
+class LayerNormCudaImpl(OperationImpl):
+    category_tag = "cuda"
+    def run(self, x, weight, output, epsilon):
+        # print("using cuda")
+        bind_rms_norm.rms_norm(output, x, weight, epsilon)
 
 class LayerNorm(Operations):
     def __init__(self, name):
@@ -18,6 +33,12 @@ class LayerNorm(Operations):
         self.weights = {
             "weight": WeightWrapper(),
         }
+        self.impl_map = {}
+        self.init_impl_map()
+
+    def init_impl_map(self):
+        self.add_impl(LayerNormTorchImpl)
+        self.add_impl(LayerNormCudaImpl)
     
     def setShape(self, hidden_dim):
         self.hidden_dim = hidden_dim
@@ -53,18 +74,10 @@ class LayerNorm(Operations):
 
     def run(self, layer):
         x = self.inputs["input"].tensor
-        # x = x.to(torch.float32)
         epsilon = 1e-5
-        # # Compute the root-mean-square (RMS) along the last dimension.
-        # rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + epsilon)
-        # normalized_x = x / rms
         weight_val = self.weights["weight"].weight_map[layer]
-        # print("weight_val ", weight_val.shape)
-        # # Scale the normalized values by the learned weight.
-
-        bind_rms_norm.rms_norm(self.outputs["output"].tensor, x, weight_val, epsilon)
-
-        # self.outputs["output"].tensor.copy_(normalized_x.to(torch.float16) * weight_val)
+        
+        self.impl.run(x, weight_val, self.outputs["output"].tensor, epsilon)
     
     def processWeight(self, global_weight_map, total_layers, cached = False):
         return process_weight_layer(global_weight_map, self.weight_name, self.weights["weight"], total_layers, cached)

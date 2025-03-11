@@ -136,6 +136,6 @@ struct BaseGEMMWrapperTemplate : public BaseGEMMWrapper {
 		output_d = data_d;
 		return *this;
 	}
-	virtual ~BaseGEMMWrapperTemplate() = default;
+	
 	virtual void updateArgument() = 0;
 };

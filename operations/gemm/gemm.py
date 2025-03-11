@@ -80,12 +80,37 @@ from operations.impl_base import OperationImpl
 #             self.weights["B"].weight_map[l] = torch.cat([global_weight_map[name.format(layer=l)].t() for name in self.weight_name], dim=1).contiguous()
 class GEMMTorchImpl(OperationImpl):
     category_tag = "torch"
-    def config(self, tag, parameter_map):
+    def config(self, impl_tag, parameter_map):
         self.alpha = parameter_map["alpha"]
-        self.beta = parameter_map["beta"]
+        self.bias = parameter_map["bias"]
+        self.beta = 0.0
+        if self.bias:
+            self.beta = parameter_map["beta"]
     
     def run(self, A, B, C, D):
-        D.copy_(A.matmul(B) * self.alpha + C * self.beta)
+        if self.bias:
+            D.copy_(A.matmul(B) * self.alpha + C * self.beta)
+        else:
+            D.copy_(A.matmul(B) * self.alpha)
+
+class GEMMCudaImpl(OperationImpl):
+    category_tag = "cuda"
+    def config(self, impl_tag, parameter_map):
+        self.M = parameter_map["M"]
+        self.N = parameter_map["N"]
+        self.K = parameter_map["K"]
+        self.alpha = parameter_map["alpha"]
+        self.bias = parameter_map["bias"]
+        self.beta = 0.0
+        if self.bias:
+            self.beta = parameter_map["beta"]
+
+        bind_gemm.configGEMM(impl_tag, self.M, self.N, self.K, self.alpha, self.beta)
+
+        
+    def run(self, A, B, C, D):
+        bind_gemm.gemmLauncher(A, B, C, D, self.M, self.N, self.K, self.alpha, self.beta)
+
 
 
 class GEMM(Operations):
@@ -107,12 +132,14 @@ class GEMM(Operations):
             "B": WeightWrapper()
         }
         self.bias = bias
-        if bias:
-            self.beta = 1
+        self.alpha = 1.0
+        if self.bias:
+            self.beta = 1.0
         else:
-            self.beta = 0
-        self.alpha = 1
-        
+            self.beta = 0.0
+        self.impl_map = {}
+        self.init_impl_map()
+
     def setParameter(self, alpha = 1, beta = 0):
         self.alpha = alpha
         self.beta = beta
@@ -124,6 +151,7 @@ class GEMM(Operations):
     
     def init_impl_map(self):
         self.add_impl(GEMMTorchImpl)
+        self.add_impl(GEMMCudaImpl)
     
     def setShape(self, N, K):
         self.N = N
@@ -149,7 +177,7 @@ class GEMM(Operations):
                 D = torch.zeros((batch_size, self.N), dtype=torch.float16, device='cuda')
                 # record the time
                 start_time = time.time()
-                bind_gemm.gemmLauncher(A, B, C, D, batch_size, self.N, self.K, 1, 1)
+                bind_gemm.gemmLauncher(A, B, C, D, batch_size, self.N, self.K, self.alpha, self.beta)
                 if round > 0:
                     latency = time.time() - start_time
                     total_latency += latency
@@ -169,14 +197,25 @@ class GEMM(Operations):
             C = torch.empty((self.M, self.N), dtype=torch.float16, device=self.inputs["A"].tensor.device)
         
         B = self.weights["B"].weight_map[layer]
-        
-        bind_gemm.gemmLauncher(A, B, C, self.outputs["D"].tensor, self.M, self.N, self.K, self.alpha, self.beta)
 
-        # self.outputs["D"].tensor.copy_(A.matmul(B) + C)
+        self.impl.run(A, B, C, self.outputs["D"].tensor)
     
     def processWeight(self, global_weight_map, total_layers, cached = False):
         self.weights["B"].weight_map = {}
         if not isinstance(self.weight_name, list):
             self.weight_name = [self.weight_name]
-        for l in range(total_layers):
-            self.weights["B"].weight_map[l] = torch.cat([global_weight_map[name.format(layer=l)].t() for name in self.weight_name], dim=1).contiguous()
+        if any(['{layer}' in name for name in self.weight_name]):
+            for l in range(total_layers):
+                self.weights["B"].weight_map[l] = torch.cat([global_weight_map[name.format(layer=l)].t() for name in self.weight_name], dim=1).contiguous()
+        else:
+            weight_tensor = torch.cat([global_weight_map[name].t() for name in self.weight_name], dim=1).contiguous()
+            for l in range(total_layers):
+                self.weights["B"].weight_map[l] = weight_tensor
+        # for l in range(total_layers):
+        #     for name in self.weight_name:
+        #         if name.format(layer=l) in global_weight_map:
+        #             del global_weight_map[name.format(layer=l)]
+        # torch.cuda.empty_cache()
+        # device = torch.cuda.current_device()
+        # reserved_memory = torch.cuda.memory_reserved(device)
+        # print(f"Reserved memory: {reserved_memory / 1024 / 1024} MB")

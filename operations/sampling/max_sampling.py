@@ -5,6 +5,21 @@ from core.IOWrapper import IOWrapper, IOBufferType
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none, process_weight_layer
 import bind_sample
+from operations.impl_base import OperationImpl
+
+class SamplingTorchImpl(OperationImpl):
+    category_tag = "torch"
+    def run(self, logits, tokens):
+        print("using torch")
+        tokens.copy_(torch.argmax(logits, dim=1))
+
+class SamplingCudaImpl(OperationImpl):
+    category_tag = "cuda"
+    def run(self, logits, tokens):
+        print("using cuda")
+        maxvals = torch.zeros(logits.shape[0], dtype=logits.dtype, device=logits.device)
+        bind_sample.SampleMax(logits, maxvals, tokens)
+
 
 class Sampling(Operations):
     def __init__(self, name):
@@ -15,6 +30,12 @@ class Sampling(Operations):
         self.outputs = {
             "tokens": IOWrapper(self, 'tokens', IOBufferType.FULL, dtype=torch.int32)
         }
+        self.impl_map = {}
+        self.init_impl_map()
+    
+    def init_impl_map(self):
+        self.add_impl(SamplingTorchImpl)
+        self.add_impl(SamplingCudaImpl)
     
     def setShape(self, vocab_size):
         self.vocab_size = vocab_size
@@ -50,12 +71,5 @@ class Sampling(Operations):
     def run(self, layer):
         logits = self.inputs["logits"].tensor
         # print("logits: ", logits)
-        maxvals = torch.zeros(logits.shape[0], dtype=logits.dtype, device=logits.device)
-
-        bind_sample.SampleMax(logits, maxvals, self.outputs["tokens"].tensor)
-        # print("tokens: ", self.outputs["tokens"].tensor)
-        # self.outputs["tokens"].tensor.copy_(argmaxs)
-
-
-        # tokens = torch.argmax(logits, dim=1)
-        # self.outputs["tokens"].tensor.copy_(tokens)
+    
+        self.impl.run(logits, self.outputs["tokens"].tensor)
