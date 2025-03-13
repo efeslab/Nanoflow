@@ -48,18 +48,28 @@ get_filename_component(PARENT_DIR ${CMAKE_SOURCE_DIR} DIRECTORY)
 # Third-party library paths
 set(CUTLASS_DIR ${PARENT_DIR}/3rdparty/cutlass CACHE PATH "Path to modified cutlass src")
 set(SPDLOG_DIR  ${PARENT_DIR}/3rdparty/spdlog CACHE PATH "Path to spdlog src")
+set(FLASHINFER_DIR ${PARENT_DIR}/3rdparty/flashinfer CACHE PATH "Path to flashinfer src")
 set(MSCCLPP_DIR /usr/local/mscclpp CACHE PATH "Path to mscclpp install")
 
 # Include directories
 include_directories(${MSCCLPP_DIR}/include)
 include_directories(${CUTLASS_DIR}/include)
 include_directories(${CUTLASS_DIR}/tools/util/include)
+include_directories(${FLASHINFER_DIR}/include)
 
 # Find libraries
 set(Torch_KINETO_LIBRARIES "")
 find_package(Torch REQUIRED)
 find_library(TORCH_PYTHON_LIBRARY torch_python PATH "${TORCH_INSTALL_PREFIX}/lib")
 find_library(MSCCLPP_LIBRARY NAMES mscclpp PATHS ${MSCCLPP_DIR}/lib NO_DEFAULT_PATH)
+
+# ------------- Add FP8 Macro for compilation -----------------#
+if(CMAKE_CUDA_ARCHITECTURES GREATER_EQUAL 89)
+  add_compile_definitions(FLASHINFER_ENABLE_FP8)
+endif()
+
+add_compile_options(-Wall)
+add_compile_options(-Wunused-variable)
 
 # --------------- Build GEMM Libraries -----------------#
 

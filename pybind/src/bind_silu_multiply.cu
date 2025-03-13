@@ -51,8 +51,9 @@ void silu_and_multiply(torch::Tensor input, torch::Tensor output) {
     dim3 blockSize(16, 16);
     dim3 gridSize((N + blockSize.x - 1) / blockSize.x, (M + blockSize.y - 1) / blockSize.y);
 
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     // Launch the kernel
-    silu_and_multiply_kernel<<<gridSize, blockSize>>>(d_input, d_output, M, N);
+    silu_and_multiply_kernel<<<gridSize, blockSize, 0, stream>>>(d_input, d_output, M, N);
 }
 
 PYBIND11_MODULE(bind_silu_multiply, m) {

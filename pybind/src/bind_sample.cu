@@ -2,6 +2,7 @@
 // #include <pybind11/torch.h>  // PyTorch tensor support
 #include <torch/torch.h>     // LibTorch
 #include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
 #include <stdio.h>
 
 
@@ -74,12 +75,11 @@ void computeRowMax(torch::Tensor matrix, torch::Tensor maxVals, torch::Tensor ar
     dim3 blockSize(1024);
     dim3 gridSize(rows);
     size_t sharedMemSize = blockSize.x * (sizeof(half) + sizeof(int));
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
     // Launch the kernel
-
-
     if (gridSize.x > 0) {
-        rowMaxKernel<<<gridSize, blockSize, sharedMemSize>>>(d_matrix, d_maxVals, d_argMax, cols);
+        rowMaxKernel<<<gridSize, blockSize, sharedMemSize, stream>>>(d_matrix, d_maxVals, d_argMax, cols);
     }    
 }
 

@@ -53,29 +53,40 @@ class GenEmbedding(Operations):
         self.outputs["output"].shape = (self.batch_size, self.hidden_dim)
     
     def profile(self):
+        # check the similarity of the outputs
+        tokens = torch.randint(self.vocab_size, (2,), dtype=torch.int32, device='cuda')
+        embedding = torch.randn(self.vocab_size, self.hidden_dim, dtype=torch.float16, device='cuda')
+        output_list = []
+        for _, impl in self.impl_map.items():
+            out = torch.zeros((2, self.hidden_dim), dtype=torch.float16, device='cuda')
+            impl().run(tokens, embedding, out)
+            output_list.append(out)
+
+        self.checkConsistencyBetweenImpl(output_list)
+
         rounds = 100
         batch_sizes = [2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 640, 768, 896, 1024]
-        embedding = torch.randn(self.vocab_size, self.hidden_dim, dtype=torch.float16, device='cuda')
-        for batch_size in batch_sizes:
-            total_latency = 0
-            for round in range(rounds):
-                input = torch.randint(self.vocab_size, (batch_size,), dtype=torch.int32, device='cuda')
-                output = torch.zeros((batch_size, self.hidden_dim), dtype=torch.float16, device='cuda')
-                # record the time
-                start_time = time.perf_counter()
-            
-                self.impl.run(input, embedding, output)
 
-                if round > 0:
-                    latency = time.perf_counter() - start_time
-                    total_latency += latency
-            average_time = total_latency / rounds
-            print("name: {}, batch_size: {}, average_time: {}".format(self.name, batch_size, average_time))
-            self.cursor.execute('''
-                INSERT OR REPLACE INTO performance (id, keyword, batch_size, average_time)
-                VALUES ((SELECT id FROM performance WHERE keyword = ? AND batch_size = ?), ?, ?, ?)
-            ''', (self.name, batch_size, self.name, batch_size, average_time))
-            self.conn.commit()
+        for batch_size in batch_sizes:
+            output = torch.zeros((batch_size, self.hidden_dim), dtype=torch.float16, device='cuda')
+            for _, impl in self.impl_map.items():
+                impl_instance = impl()
+                category_tag = impl.category_tag
+                total_latency = 0
+                for round in range(rounds):
+                    tokens = torch.randint(self.vocab_size, (batch_size,), dtype=torch.int32, device='cuda')
+                    start = time.time()
+                    impl_instance.run(tokens, embedding, output)
+                    torch.cuda.synchronize()
+                    if round > 0:
+                        total_latency += time.time() - start
+                average_time = total_latency / rounds
+                print("name: {}, batch_size: {}, average_time: {}".format(self.name + f"_{category_tag}", batch_size, average_time))
+                self.cursor.execute('''
+                    INSERT INTO performance (keyword, batch_size, average_time)
+                    VALUES (?, ?, ?)
+                    ''', (self.name + f"_{category_tag}", batch_size, average_time))
+        self.conn.commit()
             
 
     def run(self, layer):

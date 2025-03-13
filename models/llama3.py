@@ -1,7 +1,9 @@
 import transformers
 import os, sys
 sys.path.append("../")
+sys.path.append('../pybind/build')
 os.environ["HF_HOME"] = "/code/hf"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 from transformers import AutoTokenizer
 from operations.operation_base import Operations
@@ -158,12 +160,15 @@ class Pipeline():
         weight_manager.set_weight(self.operation_list, self.layer)
         torch.cuda.empty_cache()
     
-    def config_batch_size(self):
+    def config_batch_size(self, decode_flag):
         self.gen_embedding.setBatchSize(self.batch_size)
         self.layerNormAttn.setBatchSize(self.batch_size)
         self.kqv.setBatchSize(self.batch_size)
         self.decAttn.setBatchSize(0)
         self.pfAttn.setBatchSize(self.batch_size)
+        if decode_flag:
+            self.decAttn.setBatchSize(self.batch_size)
+            self.pfAttn.setBatchSize(0)
         self.ropeAppend.setBatchSize(self.batch_size)
         self.layerNormFFN.setBatchSize(self.batch_size)
         self.ug.setBatchSize(self.batch_size)
@@ -178,12 +183,12 @@ class Pipeline():
     
     def config_algorithm(self):
         self.gen_embedding.config_tag("cuda")
-        self.layerNormAttn.config_tag("torch")
+        self.layerNormAttn.config_tag("cuda")
         self.activation.config_tag("torch")
         self.kqv.config_tag("cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", {"M" : self.batch_size, "N": self.kqv_heads * self.head_dim, "K": self.hidden_dim, "alpha": 1.0, "bias": False})
         self.ropeAppend.config_tag("torch")
-        # self.decAttn.config_tag("torch")
-        self.pfAttn.config_tag("torch")
+        self.decAttn.config_tag("cuda")
+        self.pfAttn.config_tag("cuda")
         self.layerNormFFN.config_tag("cuda")
 
         # self.ug.config_tag("cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", {"M" : self.batch_size, "N": self.intermediate_dim * 2, "K": self.hidden_dim, "alpha": 1.0, "bias": False})
@@ -197,18 +202,18 @@ class Pipeline():
         self.sample.config_tag("cuda")
         self.getLogits.config_tag("torch", {"alpha": 1.0, "bias" : False})
 
-    def config(self):
-        self.config_batch_size()
+    def config(self, decode_flag=False):
+        self.config_batch_size(decode_flag)
         self.config_algorithm()
     
-    def update(self, input_ids):
+    def update(self, input_ids, decode_flag=False):
         
         self.input_ids = input_ids
         # concatenate input_ids into a single tensor
         flattened = [item for sublist in input_ids for item in sublist]
         self.batch_size = len(flattened)
         # print(f"batch_size: {self.batch_size}")
-        self.config()
+        self.config(decode_flag)
         self.update_allocate_buffers()
         input_tensor = torch.tensor(flattened, dtype=torch.int32, device='cuda')
         # get cumulative sum of the number of tokens in each input
@@ -249,25 +254,34 @@ class Pipeline():
         # executor.draw_ordered_graph()
         print(executor.ordered_operations)
 
+        output_string = self.input_ids[0]
+
         new_token = torch.tensor([0], dtype=torch.int32, device='cuda')
         for i in range(output_length):
             executor.execute({}, new_token)
             # executor.print_debug("out.txt", new_token)
 
             # print("new_token: ", new_token)
-            self.input_ids[0].append(new_token.item())
+            output_string.append(new_token.item())
             # print("input_ids: ", self.input_ids)
-            self.update(self.input_ids)
+            self.update([[new_token.item()]], decode_flag=True)
 
         tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
-        output_text = tokenizer.decode(self.input_ids[0], skip_special_tokens=True)
+        output_text = tokenizer.decode(output_string, skip_special_tokens=True)
         print(output_text)
 
 
 
 if __name__ == "__main__":
+    # remove the file performance.db
+    try:
+        os.remove("performance.db")
+    except:
+        pass
     pipeline = Pipeline()
     pipeline.init_external_data()
     pipeline.init_operations()
     pipeline.init_set_shape()
+    pipeline.config_algorithm()
     pipeline.profile()
+    pipeline.activation.search_profile_data()

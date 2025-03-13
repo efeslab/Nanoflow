@@ -27,6 +27,7 @@ __global__ void genEmbedding(int* tokens, half* weights, half* out_embedding, in
 
 // write a launcher
 void genEmbeddingWorker(torch::Tensor tokens, torch::Tensor weights, torch::Tensor out_embedding){
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
     // Validate that tensors are on CUDA
     TORCH_CHECK(tokens.is_cuda(), "tokens must be a CUDA tensor");
@@ -58,7 +59,7 @@ void genEmbeddingWorker(torch::Tensor tokens, torch::Tensor weights, torch::Tens
     dim3 block(256); // 256 threads per block
     
     // Launch the CUDA kernel
-    genEmbedding<<<grid, block>>>(tokens_ptr, weights_ptr, out_embedding_ptr, Hdim);
+    genEmbedding<<<grid, block, 0, stream>>>(tokens_ptr, weights_ptr, out_embedding_ptr, Hdim);
 
     // Check for any kernel errors
     cudaError_t err = cudaGetLastError();

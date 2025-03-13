@@ -50,27 +50,39 @@ class LayerNorm(Operations):
         self.outputs["output"].shape = (self.batch_size, self.hidden_dim)
 
     def profile(self):
+        # check the similarity of the outputs
+        x = torch.randn(2, self.hidden_dim, dtype=torch.float16, device='cuda')
+        weight = torch.randn(self.hidden_dim, dtype=torch.float16, device='cuda')
+        output_list = []
+        for _, impl in self.impl_map.items():
+            out = torch.zeros((2, self.hidden_dim), dtype=torch.float16, device='cuda')
+            impl().run(x, weight, out, 1e-5)
+            output_list.append(out)
+        self.checkConsistencyBetweenImpl(output_list)
+
         rounds = 100
         batch_sizes = [2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 640, 768, 896, 1024]
         for batch_size in batch_sizes:
-            total_latency = 0
-            for round in range(rounds):
-                x = torch.randn((batch_size, self.hidden_dim), dtype=torch.float16, device='cuda')
-                weight = torch.randn((self.hidden_dim,), dtype=torch.float16, device='cuda')
-                out = torch.zeros((batch_size, self.hidden_dim), dtype=torch.float16, device='cuda')
-                # record the time
-                start_time = time.time()
-                bind_rms_norm.rms_norm(out, x, weight, 1e-5)
-                if round > 0:
-                    latency = time.time() - start_time
-                    total_latency += latency
-            average_time = total_latency / rounds
-            print("name: {}, batch_size: {}, average_time: {}".format(self.name, batch_size, average_time))
-            self.cursor.execute('''
-                INSERT OR REPLACE INTO performance (id, keyword, batch_size, average_time)
-                VALUES ((SELECT id FROM performance WHERE keyword = ? AND batch_size = ?), ?, ?, ?)
-            ''', (self.name, batch_size, self.name, batch_size, average_time))
-            self.conn.commit()
+            out = torch.zeros((batch_size, self.hidden_dim), dtype=torch.float16, device='cuda')
+            for _, impl in self.impl_map.items():
+                impl_instance = impl()
+                category_tag = impl_instance.category_tag
+                total_latency = 0
+                for round in range(rounds):
+                    x = torch.randn((batch_size, self.hidden_dim), dtype=torch.float16, device='cuda')
+                    weight = torch.randn(self.hidden_dim, dtype=torch.float16, device='cuda')
+                    # record the time
+                    start_time = time.time()
+                    impl_instance.run(x, weight, out, 1e-5)
+                    if round > 0:
+                        total_latency += time.time() - start_time
+                average_time = total_latency / rounds
+                print("name: {}, batch_size: {}, average_time: {}".format(self.name + f"_{category_tag}", batch_size, average_time))
+                self.cursor.execute('''
+                    INSERT INTO performance (keyword, batch_size, average_time)
+                    VALUES (?, ?, ?)
+                    ''', (self.name + f"_{category_tag}", batch_size, average_time))
+        self.conn.commit()
 
     def run(self, layer):
         x = self.inputs["input"].tensor

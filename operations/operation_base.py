@@ -56,7 +56,16 @@ class Operations:
                 dep.append((dep_wrapper.owner, prev_layer))
         
         return dep
-        
+    
+    def checkConsistencyBetweenImpl(self, outputs):
+        if self.impl_map.keys() == 0:
+            raise Exception("No implementation found")
+        for i in range(len(outputs)):
+            for j in range(i + 1, len(outputs)):
+                close_elements = torch.isclose(outputs[i], outputs[j], rtol=1e-01, atol=1e-03)
+                assert torch.all(close_elements), f"Outputs from different implementations are not close: {outputs[i]} and {outputs[j]}"
+
+
     def checkConnection(self):
         for name, IOwrapper in self.inputs.items():
             if IOwrapper.prev is None:
