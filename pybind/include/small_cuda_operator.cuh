@@ -6,6 +6,7 @@
 #include "flashinfer/pos_enc.cuh"
 #include "flashinfer/page.cuh"
 // #include "spdlog/spdlog.h"
+#include <stdio.h>
 
 
 __global__ void genEmbedding(int* tokens, half* weights, half* out_embedding, int Hdim);
@@ -24,11 +25,11 @@ void copySelectedRowsDirectIndices(int numKeepRows, int numCols, const int* d_sr
 void launchSiluMultiplyKernel(__half* input_u, __half* input_g, __half* output, int M, int N, cudaStream_t stream);
 namespace flashinfer {
 
-template <uint32_t head_dim, uint32_t bdx, uint32_t vec_size, flashinfer::PageStorage page_storage, flashinfer::QKVLayout layout,
+template <uint32_t head_dim, uint32_t bdx, uint32_t vec_size,
           typename DType, typename IdType> 
-__global__ void splitRopeAppendKernel(flashinfer::paged_kv_t<page_storage, layout, DType, IdType> paged_kv,
+__global__ void splitRopeAppendKernel(flashinfer::paged_kv_t<DType, IdType> paged_kv,
                                       DType* kqv_input, IdType* rev_input_indptr, IdType* per_token_offset, 
-                                      int32_t num_qo_heads, DType* q_out_global, int* device_KQV_ready,  float rope_rcp_scale, float rope_rcp_theta, float smooth_a, float smooth_b) {
+                                      int32_t num_qo_heads, DType* q_out_global, int* device_KQV_ready, float rope_rcp_scale, float rope_rcp_theta, float smooth_a, float smooth_b) {
     int token_index = blockIdx.x;
     int req_index = rev_input_indptr[token_index];
     int tx = threadIdx.x;
@@ -46,7 +47,7 @@ __global__ void splitRopeAppendKernel(flashinfer::paged_kv_t<page_storage, layou
             __powf(rope_rcp_theta, float(2 * ((tx * vec_size + i) % (head_dim / 2))) / float(head_dim));
         float smooth = freq[i] * smooth_a + smooth_b;
         smooth = max(0.0f, min(1.0f, smooth));  // clamp to [0, 1]
-        freq[i] = (1 - smooth) * (freq[i] * rope_rcp_scale) + smooth * freq[i];
+        freq[i] = (1.0f - smooth) * (freq[i] * rope_rcp_scale) + smooth * freq[i];
     }
     int iter = (num_kv_heads * 2 + num_qo_heads + blockDim.y - 1) / blockDim.y;
     for (int i = 0; i < iter; ++i) {
@@ -78,8 +79,7 @@ __global__ void splitRopeAppendKernel(flashinfer::paged_kv_t<page_storage, layou
             int page_in_indices_index = paged_kv.indptr[req_index] + token_in_request_index / paged_kv.page_size;
             int token_in_page_index = token_in_request_index % paged_kv.page_size;
 
-            DType* v_ptr = paged_kv.get_k_ptr(page_in_indices_index, head_idx, token_in_page_index, tx * vec_size)
-                            + paged_kv.kv_offset_delta();
+            DType* v_ptr = paged_kv.get_v_ptr(page_in_indices_index, head_idx, token_in_page_index, tx * vec_size);
             vec_t<DType, vec_size>::memcpy(v_ptr, v_ptr_input + tx * vec_size);
         }
         else
@@ -98,11 +98,11 @@ __global__ void splitRopeAppendKernel(flashinfer::paged_kv_t<page_storage, layou
     // }
 }
 
-template <flashinfer::PageStorage page_storage, flashinfer::QKVLayout layout, typename DType, typename IdType>
-cudaError_t splitRopeAppend(flashinfer::paged_kv_t<page_storage, layout, DType, IdType> paged_kv, DType* kqv_input,
+template <typename DType, typename IdType>
+cudaError_t splitRopeAppend(flashinfer::paged_kv_t<DType, IdType> paged_kv, DType* kqv_input,
                                 IdType* rev_input_indptr, IdType* per_token_offset, int32_t dense_batch_size, int32_t num_qo_heads,
                                 DType* q_out = nullptr, int* device_KQV_ready = nullptr,
-                                float rope_scale = 1.f, float rope_theta = 1e4, float smooth_a = 0, float smooth_b = 0, cudaStream_t stream = nullptr){
+                                float rope_scale = 1.f, float rope_theta = 1e4, float smooth_a = 0.f, float smooth_b = 0.f, cudaStream_t stream = nullptr){
     float rope_rcp_scale = 1.0f / rope_scale;
     float rope_rcp_theta = 1.0f / rope_theta;
     DISPATCH_HEAD_DIM(paged_kv.head_dim, HEAD_DIM, {
@@ -117,7 +117,7 @@ cudaError_t splitRopeAppend(flashinfer::paged_kv_t<page_storage, layout, DType, 
         dim3 nblocks(dense_batch_size);
         // spdlog::info("nthreads: ({}, {}), nblocks: {}", thread_num_x, thread_num_y, dense_batch_size);
         auto kernel =
-            splitRopeAppendKernel<HEAD_DIM, thread_num_x, vec_size, page_storage, layout, DType, IdType>;
+            splitRopeAppendKernel<HEAD_DIM, thread_num_x, vec_size, DType, IdType>;
         void* args[] = {
             (void*)&paged_kv,
             (void*)&kqv_input,

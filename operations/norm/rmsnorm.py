@@ -86,10 +86,9 @@ class LayerNorm(Operations):
 
     def run(self, layer):
         x = self.inputs["input"].tensor
-        epsilon = 1e-5
         weight_val = self.weights["weight"].weight_map[layer]
         
-        self.impl.run(x, weight_val, self.outputs["output"].tensor, epsilon)
+        self.impl.run(x, weight_val, self.outputs["output"].tensor, epsilon = 1e-5)
     
     def processWeight(self, global_weight_map, total_layers, cached = False):
         return process_weight_layer(global_weight_map, self.weight_name, self.weights["weight"], total_layers, cached)

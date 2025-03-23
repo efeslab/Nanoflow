@@ -11,43 +11,105 @@ from operations.impl_base import OperationImpl
 
 class DecAttnTorchImpl(OperationImpl):
     category_tag = "torch"
-    def run(self, scale, head_dim, num_qo_heads, group_size, q, k, v, output
+    def run(self, layer, head_dim, num_qo_heads, num_kv_heads, qo_indicies,  Q, KVCache, output
     ):
-        # print("Get into DecAttnTorchImpl")
-        # print("q: ", q.shape)
-        # print("q: ", q)
-        # print("k: ", k.shape)
-        # print("v: ", v.shape)
-        k = k.repeat_interleave(group_size, dim=1)
-        v = v.repeat_interleave(group_size, dim=1)
-        # print("using torch")
-        # Compute attention scores.
-        # Use Einstein summation notation: for each query (q) and head (h), compute dot product with each key (k)
-        # resulting in scores of shape: [n_q, num_qo_heads, n_k]
-        scores = torch.einsum("qhd,khd->qhk", q, k) * scale
-        
-        # Apply softmax over the key dimension.
-        attn_weights = torch.softmax(scores, dim=-1)
-        
-        # Compute attention output as the weighted sum over the value vectors.
-        # Resulting shape: [n_q, num_qo_heads, head_dim]
-        out = torch.einsum("qhk,khd->qhd", attn_weights, v)
-        # Flatten heads back to shape: [n_q, num_qo_heads * head_dim]
-        out = out.reshape(-1, num_qo_heads * head_dim)
-        # Write the computed output into the operator's output tensor.
-        output.copy_(out)
+        scale = 1.0 / (head_dim ** 0.5)
+        # Compute group size: how many query heads correspond to one key/value head.
+        group_size = num_qo_heads // num_kv_heads
+        for i in range(len(qo_indicies) - 1):
+            # Retrieve the query slice for this batch element.
+            start = qo_indicies[i]
+            end = qo_indicies[i + 1]
+
+            sub_q = Q[start:end, :]  # shape: [n_q, num_qo_heads * head_dim]
+            sub_q = sub_q.view(-1, num_qo_heads, head_dim)
+            
+            sub_k, sub_v = KVCache.get(layer, i) # [n_k, num_kv_heads * head_dim]
+            n_k = sub_k.shape[0]
+
+            sub_k = sub_k.view(n_k, num_kv_heads, head_dim)
+            sub_v = sub_v.view(n_k, num_kv_heads, head_dim)
+
+            sub_k = sub_k.repeat_interleave(group_size, dim=1)
+            sub_v = sub_v.repeat_interleave(group_size, dim=1)
+
+            scores = torch.einsum("qhd,khd->qhk", sub_q, sub_k) * scale
+
+            attn_weights = torch.softmax(scores, dim=-1)
+            
+            # Compute attention output as the weighted sum over the value vectors.
+            # Resulting shape: [n_q, num_qo_heads, head_dim]
+            out = torch.einsum("qhk,khd->qhd", attn_weights, sub_v)
+            # Flatten heads back to shape: [n_q, num_qo_heads * head_dim]
+            out = out.reshape(-1, num_qo_heads * head_dim)
+            # Write the computed output into the operator's output tensor.
+            output[start:end, :].copy_(out)
 
 class DecAttnCudaImpl(OperationImpl):
     category_tag = "cuda"
-    def run(self, scale, head_dim, num_qo_heads, group_size, q, k, v, output
+    def run(self, layer, head_dim, num_qo_heads, num_kv_heads, qo_indicies,  Q, KVCache, output
     ):
-        if q.shape[0] == 0:
+        if Q.shape[0] == 0:
             return
-        q = q.squeeze(0)
-        out = flashinfer.single_decode_with_kv_cache(q, k, v, use_tensor_cores=True)
+        scale = 1.0 / (head_dim ** 0.5)
+        # Compute group size: how many query heads correspond to one key/value head.
+        group_size = num_qo_heads // num_kv_heads
+        for i in range(len(qo_indicies) - 1):
+            # Retrieve the query slice for this batch element.
+            start = qo_indicies[i]
+            end = qo_indicies[i + 1]
 
-        out = out.reshape(-1, num_qo_heads * head_dim)
-        output.copy_(out)
+            sub_q = Q[start:end, :]  # shape: [n_q, num_qo_heads * head_dim]
+            sub_q = sub_q.view(-1, num_qo_heads, head_dim)
+            
+            sub_k, sub_v = KVCache[layer].get(i) # [n_k, num_kv_heads * head_dim]
+
+            n_k = sub_k.shape[0]
+
+            sub_k = sub_k.view(n_k, num_kv_heads, head_dim)
+            sub_v = sub_v.view(n_k, num_kv_heads, head_dim)
+            sub_q = sub_q.squeeze(0)
+            out = flashinfer.single_decode_with_kv_cache(sub_q, sub_k, sub_v, use_tensor_cores=True)
+
+            out = out.reshape(-1, num_qo_heads * head_dim)
+            output[start:end, :].copy_(out)
+
+class DecAttnBatchedCudaImpl(OperationImpl):
+    category_tag = "batched_cuda"
+    def run(self, layer, head_dim, num_qo_heads, num_kv_heads, qo_indicies,  Q, KVCache, output
+    ):
+        if Q.shape[0] == 0:
+            return
+        Q = Q.view(-1, num_qo_heads, head_dim)
+        kv_indptr, kv_indices, kv_last_page_len = KVCache[layer].update()
+        k_data, v_data = KVCache[layer].get_whole_kv_data()
+        kv_data = [k_data, v_data]
+        kv_data = tuple(kv_data)
+        workspace_buffer = torch.empty(32 * 1024 * 1024, dtype=torch.int8).to(0)
+        wrapper = flashinfer.decode.BatchDecodeWithPagedKVCacheWrapper(
+            workspace_buffer, "HND"
+        )
+        wrapper.plan(
+            torch.tensor(kv_indptr, dtype=torch.int32).cuda(),
+            torch.tensor(kv_indices, dtype=torch.int32).cuda(),
+            torch.tensor(kv_last_page_len, dtype=torch.int32).cuda(),
+            num_qo_heads,
+            num_kv_heads,
+            head_dim,
+            KVCache[layer].get_pool().page_size,
+            logits_soft_cap=0.0,
+            pos_encoding_mode="NONE",
+            data_type=torch.float16,
+            q_data_type=torch.float16
+        )
+
+        Q.contiguous()
+
+        o = wrapper.run(Q, kv_data)
+        output.copy_(o.reshape(-1, num_qo_heads * head_dim))
+
+
+    
 
 class DecAttn(Operations):
     def __init__(self, name):
@@ -67,6 +129,7 @@ class DecAttn(Operations):
     def init_impl_map(self):
         self.add_impl(DecAttnTorchImpl)
         self.add_impl(DecAttnCudaImpl)
+        self.add_impl(DecAttnBatchedCudaImpl)
     
     def setShape(self, num_kv_heads, num_qo_heads, head_dim):
         self.num_kv_heads = num_kv_heads
@@ -127,101 +190,98 @@ class DecAttn(Operations):
 
     def run(self, layer):
         Q = self.inputs["Q"].tensor
-        scale = 1.0 / (self.head_dim ** 0.5)
-        # Compute group size: how many query heads correspond to one key/value head.
-        group_size = self.num_qo_heads // self.num_kv_heads
-        for i in range(len(self.qo_indicies) - 1):
-            # Retrieve the query slice for this batch element.
-            start = self.qo_indicies[i]
-            end = self.qo_indicies[i + 1]
-
-            sub_q = Q[start:end, :]  # shape: [n_q, num_qo_heads * head_dim]
-            sub_q = sub_q.view(-1, self.num_qo_heads, self.head_dim)
-            
-            sub_k, sub_v = self.externals["KVCache"].get(layer, i) # [n_k, num_kv_heads * head_dim]
-            n_k = sub_k.shape[0]
-
-            sub_k = sub_k.view(n_k, self.num_kv_heads, self.head_dim)
-            sub_v = sub_v.view(n_k, self.num_kv_heads, self.head_dim)
-
-            # print('before DecAttn run')
-            # print(self.outputs["output"].tensor[start:end, :])
-            # print(self.batch_size)
-            self.impl.run(scale, self.head_dim, self.num_qo_heads, group_size, sub_q, sub_k, sub_v, self.outputs["output"].tensor[start:end, :])
-            # print('after DecAttn run')
-            # print(self.outputs["output"].tensor[start:end, :])
-        # print(torch.allclose(self.outputs["output"].tensor, Q, rtol=1e-03, atol=1e-05))
+        self.impl.run(layer, self.head_dim, self.num_qo_heads, self.num_kv_heads, self.qo_indicies, Q, self.externals["KVCache"], self.outputs["output"].tensor)
     
 class PFAttnTorchImpl(OperationImpl):
     category_tag = "torch"
 
-    def run(self, scale, head_dim, num_qo_heads, group_size, q, k, v, output
+    def run(self, layer, head_dim, num_qo_heads, num_kv_heads, qo_indicies, Q, KVCache, output
     ):
-                    
-        # Expand (repeat) the keys and values so that they align with the query heads.
-        k = k.repeat_interleave(group_size, dim=1)
-        v = v.repeat_interleave(group_size, dim=1)
-        # print("using torch")
-        
-        # Compute attention scores.
-        # Use Einstein summation notation: for each query (q) and head (h), compute dot product with each key (k)
-        # resulting in scores of shape: [n_q, num_qo_heads, n_k]
-        scores = torch.einsum("qhd,khd->qhk", q, k) * scale
-        
-        # -------------------------------
-        # Add Causal Mask to Attention
-        # -------------------------------
-        # Determine the number of query tokens.
-        n_q = q.shape[0]
-        n_k = k.shape[0]
-        # Assume that the KV cache has 'past' tokens (from previous timesteps) and new tokens,
-        # so that n_k = past_length + n_q.
-        past_length = max(n_k - n_q, 0)
-        
-        if past_length > 0:
-            # For the new tokens (the last n_q keys), build a lower-triangular mask.
-            # For each query position i (0-indexed among the new tokens), allow attending only
-            # to new keys with positions <= i.
-            new_mask = torch.tril(torch.ones(n_q, n_q, dtype=torch.bool, device=scores.device))
-            # For the past tokens (first past_length keys), we allow full attention.
-            past_mask = torch.ones(n_q, past_length, dtype=torch.bool, device=scores.device)
-            # Concatenate the masks along the key dimension.
-            causal_mask = torch.cat([past_mask, new_mask], dim=1)  # shape: [n_q, n_k]
-        else:
-            # If there is no past context (i.e. n_k == n_q), use a standard lower-triangular mask.
-            causal_mask = torch.tril(torch.ones(n_q, n_k, dtype=torch.bool, device=scores.device))
-        
-        # Expand the causal mask to match the scores' shape: [n_q, num_qo_heads, n_k].
-        # Then mask out disallowed (future) positions by setting them to -inf.
-        scores = scores.masked_fill(~causal_mask.unsqueeze(1), float("-inf"))
-        
-        # Apply softmax over the key dimension.
-        attn_weights = torch.softmax(scores, dim=-1)
-        
-        # Compute attention output as the weighted sum over the value vectors.
-        # Resulting shape: [n_q, num_qo_heads, head_dim]
-        out = torch.einsum("qhk,khd->qhd", attn_weights, v)
-        # Flatten heads back to shape: [n_q, num_qo_heads * head_dim]
-        out = out.reshape(-1, num_qo_heads * head_dim)
-        # Write the computed output into the operator's output tensor.
-        output.copy_(out)
+        scale = 1.0 / (head_dim ** 0.5)
+        # Compute group size: how many query heads correspond to one key/value head.
+        group_size = num_qo_heads // num_kv_heads
+
+        for i in range(len(qo_indicies) - 1):
+            # Retrieve the query slice for this batch element.
+            start = qo_indicies[i]
+            end = qo_indicies[i + 1]
+            # Q is expected to be flattened as [n_total, num_qo_heads * head_dim];
+            # extract the sub-tensor corresponding to this batch element.
+            sub_q = Q[start:end, :]  # shape: [n_q, num_qo_heads * head_dim]
+            sub_q = sub_q.view(-1, num_qo_heads, head_dim)
+
+            sub_k, sub_v = KVCache.get(layer, i)
+            n_k = sub_k.shape[0]
+
+            sub_k = sub_k.view(n_k, num_kv_heads, head_dim)
+            sub_v = sub_v.view(n_k, num_kv_heads, head_dim)
+            # Expand (repeat) the keys and values so that they align with the query heads.
+            sub_k = sub_k.repeat_interleave(group_size, dim=1)
+            sub_v = sub_v.repeat_interleave(group_size, dim=1)
+
+            scores = torch.einsum("qhd,khd->qhk", sub_q, sub_k) * scale
+
+            n_q = sub_q.shape[0]
+            n_k = sub_k.shape[0]
+            past_length = max(n_k - n_q, 0)
+            
+            if past_length > 0:
+                new_mask = torch.tril(torch.ones(n_q, n_q, dtype=torch.bool, device=scores.device))
+                # For the past tokens (first past_length keys), we allow full attention.
+                past_mask = torch.ones(n_q, past_length, dtype=torch.bool, device=scores.device)
+                # Concatenate the masks along the key dimension.
+                causal_mask = torch.cat([past_mask, new_mask], dim=1)  # shape: [n_q, n_k]
+            else:
+                # If there is no past context (i.e. n_k == n_q), use a standard lower-triangular mask.
+                causal_mask = torch.tril(torch.ones(n_q, n_k, dtype=torch.bool, device=scores.device))
+
+            scores = scores.masked_fill(~causal_mask.unsqueeze(1), float("-inf"))
+            
+            # Apply softmax over the key dimension.
+            attn_weights = torch.softmax(scores, dim=-1)
+            
+            out = torch.einsum("qhk,khd->qhd", attn_weights, sub_v)
+
+            out = out.reshape(-1, num_qo_heads * head_dim)
+            # Write the computed output into th e operator's output tensor.
+            output[start:end, :].copy_(out)
 
 class PFAttnCudaImpl(OperationImpl):
     category_tag = "cuda"
-    def run(self, scale, head_dim, num_qo_heads, group_size, q, k, v, output
+    def run(self, layer, head_dim, num_qo_heads, num_kv_heads, qo_indicies, Q, KVCache, output
     ):
-        if q.shape[0] == 0:
+        if Q.shape[0] == 0:
             return
-        q = q.contiguous()
-        k = k.contiguous()
-        v = v.contiguous()
-        
-        # out = flash_attn_func(q, k, v, causal=True, softmax_scale=scale)
-        out = flashinfer.single_prefill_with_kv_cache(q, k, v, causal=True)
-        out = out.reshape(-1, num_qo_heads * head_dim)
+        # print("Q shape: ", Q.shape)
+        # print("Q: ", Q)
+        scale = 1.0 / (head_dim ** 0.5)
+        # Compute group size: how many query heads correspond to one key/value head.
+        group_size = num_qo_heads // num_kv_heads
 
-        # print(f"output shape: {output.shape}")
-        output.copy_(out)
+        for i in range(len(qo_indicies) - 1):
+            # Retrieve the query slice for this batch element.
+            start = qo_indicies[i]
+            end = qo_indicies[i + 1]
+            # Q is expected to be flattened as [n_total, num_qo_heads * head_dim];
+            # extract the sub-tensor corresponding to this batch element.
+            sub_q = Q[start:end, :]  # shape: [n_q, num_qo_heads * head_dim]
+            sub_q = sub_q.view(-1, num_qo_heads, head_dim)
+
+            sub_k, sub_v = KVCache[layer].get(i)
+            n_k = sub_k.shape[0]
+
+            # Reshape keys and values so that the head dimension is explicit.
+            # New shapes: [n_k, num_kv_heads, head_dim]
+            sub_k = sub_k.view(n_k, num_kv_heads, head_dim)
+            sub_v = sub_v.view(n_k, num_kv_heads, head_dim)
+            sub_q = sub_q.contiguous()
+            sub_k = sub_k.contiguous()
+            sub_v = sub_v.contiguous()
+            
+            out = flashinfer.single_prefill_with_kv_cache(sub_q, sub_k, sub_v, causal=True)
+            out = out.reshape(-1, num_qo_heads * head_dim)
+
+            output[start:end, :].copy_(out)
 
 class PFAttn(Operations):
     def __init__(self, name):
@@ -307,31 +367,4 @@ class PFAttn(Operations):
     
     def run(self, layer):
         Q = self.inputs["Q"].tensor
-        scale = 1.0 / (self.head_dim ** 0.5)
-        # Compute group size: how many query heads correspond to one key/value head.
-        group_size = self.num_qo_heads // self.num_kv_heads
-
-        for i in range(len(self.qo_indicies) - 1):
-            # Retrieve the query slice for this batch element.
-            start = self.qo_indicies[i]
-            end = self.qo_indicies[i + 1]
-            # Q is expected to be flattened as [n_total, num_qo_heads * head_dim];
-            # extract the sub-tensor corresponding to this batch element.
-            sub_q = Q[start:end, :]  # shape: [n_q, num_qo_heads * head_dim]
-            sub_q = sub_q.view(-1, self.num_qo_heads, self.head_dim)
-
-            sub_k, sub_v = self.externals["KVCache"].get(layer, i)
-            n_k = sub_k.shape[0]
-
-            # Reshape keys and values so that the head dimension is explicit.
-            # New shapes: [n_k, num_kv_heads, head_dim]
-            sub_k = sub_k.view(n_k, self.num_kv_heads, self.head_dim)
-            sub_v = sub_v.view(n_k, self.num_kv_heads, self.head_dim)
-
-            # print('before PFAttn run')
-            # print(self.outputs["output"].tensor[start:end, :])
-            # print(self.batch_size)
-            self.impl.run(scale, self.head_dim, self.num_qo_heads, group_size, sub_q, sub_k, sub_v, self.outputs["output"].tensor[start:end, :])
-            # print('after PFAttn run')
-            # print(self.outputs["output"].tensor[start:end, :])
-        # print(torch.allclose(self.outputs["output"].tensor, Q, rtol=1e-03, atol=1e-05))
+        self.impl.run(layer, self.head_dim, self.num_qo_heads, self.num_kv_heads, self.qo_indicies, Q, self.externals["KVCache"], self.outputs["output"].tensor)

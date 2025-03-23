@@ -5,7 +5,6 @@ sys.path.append('../pybind/build')
 os.environ["HF_HOME"] = "/code/hf"
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
-from transformers import AutoTokenizer
 from operations.operation_base import Operations
 from operations.activation.silu import Activation
 from operations.embedding.embedding import GenEmbedding
@@ -15,7 +14,7 @@ from operations.norm.rmsnorm import LayerNorm
 from operations.sampling.max_sampling import Sampling
 from operations.rope.rope import RopeAppend
 from operations.attention.llamaAttention import DecAttn, PFAttn
-from kvcache.kvnone import KVCacheNone
+from kvcache.kv import KVCacheTorch
 from core.weightManager import WeightManager
 from core.bufferAllocate import BufferAllocator
 from core.executor import Executor
@@ -43,7 +42,7 @@ class Pipeline():
         self.init_set_weight(weight_path)
 
     def init_external_data(self):
-        self.kv_cache = KVCacheNone()
+        self.kv_cache = [KVCacheTorch() for _ in range(self.layer)]
 
     def init_operations(self):
         self.global_input    = GlobalInput("GlobalInput").first_only()
@@ -53,9 +52,9 @@ class Pipeline():
         self.layerNormAttn   = LayerNorm("LayerNormAttn").setWeightName("model.layers.{layer}.input_layernorm.weight")
 
         self.kqv             = GEMM("KQV").setWeightName([
-            "model.layers.{layer}.self_attn.q_proj.weight",
             "model.layers.{layer}.self_attn.k_proj.weight",
-            "model.layers.{layer}.self_attn.v_proj.weight"
+            "model.layers.{layer}.self_attn.v_proj.weight",
+            "model.layers.{layer}.self_attn.q_proj.weight"
         ])
 
         self.ropeAppend      = RopeAppend("RopeAppend")
@@ -218,14 +217,14 @@ class Pipeline():
         input_tensor = torch.tensor(flattened, dtype=torch.int32, device='cuda')
         # get cumulative sum of the number of tokens in each input
         request_length = torch.tensor([len(x) for x in input_ids], dtype=torch.int32)
-        cumsum_input = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(request_length, dim=0)])
-        # print(f"cumsum_input: {cumsum_input}")
+        self.cumsum_input = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(request_length, dim=0)])
+        # print(f"cumsum_input: {self.cumsum_input}")
         # print(f"input_tensor: {input_tensor}")
         
         self.global_input.outputs["tokens"].tensor[:input_tensor.shape[0]].copy_(input_tensor)
-        self.ropeAppend.update(cumsum_input)
-        self.decAttn.update(cumsum_input)
-        self.pfAttn.update(cumsum_input)
+        self.ropeAppend.update(self.cumsum_input, decode_flag)
+        self.decAttn.update(self.cumsum_input)
+        self.pfAttn.update(self.cumsum_input)
         
     def update_allocate_buffers(self):
         # Build list of buffers.
@@ -248,29 +247,18 @@ class Pipeline():
         operation_base = Operations()
         operation_base.search_profile_data()
 
-    def run(self, output_length = 1):
+    def run(self):
         executor = Executor(self.operation_list, self.layer)
         executor.plan_layer_ordering()
         # executor.draw_ordered_graph()
-        print(executor.ordered_operations)
+        # print(executor.ordered_operations)
 
-        output_string = self.input_ids[0]
-
-        new_token = torch.tensor([0], dtype=torch.int32, device='cuda')
-        for i in range(output_length):
-            executor.execute({}, new_token)
-            # executor.print_debug("out.txt", new_token)
-
-            # print("new_token: ", new_token)
-            output_string.append(new_token.item())
-            # print("input_ids: ", self.input_ids)
-            self.update([[new_token.item()]], decode_flag=True)
-
-        tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
-        output_text = tokenizer.decode(output_string, skip_special_tokens=True)
-        print(output_text)
-
-
+        temp_out = torch.zeros(self.batch_size, dtype=torch.int32, device='cuda')
+        os.makedirs("./llama3-kv-out", exist_ok=True)
+        executor.execute({}, temp_out)
+        # executor.print_debug("out", filefolder_name="llama3-kv-out", output=temp_out)
+        new_tokens = [ [temp_out[idx-1].item()] for idx in self.cumsum_input[1:] ]
+        return new_tokens
 
 if __name__ == "__main__":
     # remove the file performance.db

@@ -37,14 +37,14 @@ class Executor():
     def draw_ordered_graph(self):
         plot_graph_topological(self.ordered_graph)
     
-    def execute(self, weight_map, new_token):
+    def execute(self, weight_map, output):
         for op_name in self.ordered_operations:
             op, layer = self.ordered_graph.nodes[op_name]['op'], self.ordered_graph.nodes[op_name]['layer']          
             op.run(layer)
             if op.name == "GlobalOutput":
-                new_token.copy_(op.inputs["tokens"].tensor[-1])
+                output.copy_(op.inputs["tokens"].tensor)
     
-    def print_debug(self, filename="out.txt", new_token=None):
+    def print_debug(self, filename="out.txt", filefolder_name = None, output=None):
         file = f"{filename}"
 
         with open(file, "w") as f:
@@ -59,7 +59,7 @@ class Executor():
                     f.write("\n")
                     f.write(str(inputs.tensor.shape))
                     f.write("\n")
-                    # torch.save(inputs.tensor.cpu(), f"./out/{op.name}_{layer}_{inputs.name}")
+                    torch.save(inputs.tensor.cpu(), f"./{filefolder_name}/{op.name}_{layer}_{inputs.name}")
                     
 
                 for weights in op.weights.values():
@@ -68,21 +68,21 @@ class Executor():
                     f.write("\n")
                     f.write(str(weights.weight_map[layer].shape))
                     f.write("\n")
-                    # torch.save(weights.weight_map[layer].cpu(), f"./out/{op.name}_{layer}_{weights.name}")
+                    torch.save(weights.weight_map[layer].cpu(), f"./{filefolder_name}/{op.name}_{layer}_{weights.name}")
 
                 f.flush()
 
                 op.run(layer)  # Execute the operation
 
                 if op.name == "GlobalOutput":
-                    new_token.copy_(op.inputs["tokens"].tensor[-1])
+                    output.copy_(op.inputs["tokens"].tensor)
                 for outputs in op.outputs.values():
                     f.write(f"[{op.name}_{layer}_{outputs.name}]\n")
                     f.write(str(outputs.tensor))
                     f.write("\n")
                     f.write(str(outputs.tensor.shape))
                     f.write("\n")
-                    # torch.save(outputs.tensor.cpu(), f"./out/{op.name}_{layer}_{outputs.name}")
+                    torch.save(outputs.tensor.cpu(), f"./{filefolder_name}/{op.name}_{layer}_{outputs.name}")
 
                 f.flush()
             f.close()

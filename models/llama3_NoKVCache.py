@@ -1,15 +1,19 @@
 import transformers
-import os
+import os, sys
+sys.path.append("../")
+sys.path.append('../pybind/build')
 os.environ["HF_HOME"] = "/code/hf"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+
+from operations.operation_base import Operations
 from operations.activation.silu import Activation
 from operations.embedding.embedding import GenEmbedding
 from operations.globalOp.globalOp import GlobalInput, GlobalOutput
-from operations.gemm.gemm import GEMM, NPartitionGEMM, KPartitionGEMM
+from operations.gemm.gemm import GEMM
 from operations.norm.rmsnorm import LayerNorm
 from operations.sampling.max_sampling import Sampling
 from operations.rope.rope import RopeAppend
 from operations.attention.llamaAttention import DecAttn, PFAttn
-from operations.operation_base import Operations
 from kvcache.kv import KVCacheNone
 from core.weightManager import WeightManager
 from core.bufferAllocate import BufferAllocator
@@ -21,15 +25,14 @@ class Pipeline():
     def __init__(self):
         # Set parameters as instance variables.
         self.num_kv_heads = 8
-        self.num_qo_heads = 64
+        self.num_qo_heads = 32
         self.kqv_heads = self.num_qo_heads + 2 * self.num_kv_heads
         self.head_dim = 128
         self.vocab_size = 128256
-        self.hidden_dim = 8192
-        self.intermediate_dim = 28 * 1024
+        self.hidden_dim = 4096
+        self.intermediate_dim = 14 * 1024
         self.batch_size = 7
-        self.layer = 3
-        self.nranks = 8
+        self.layer = 32
 
     def init(self, weight_path):
         self.init_external_data()
@@ -39,7 +42,7 @@ class Pipeline():
         self.init_set_weight(weight_path)
 
     def init_external_data(self):
-        self.kv_cache = KVCacheNone()
+        self.kv_cache = [KVCacheNone() for _ in range(self.layer)]
 
     def init_operations(self):
         self.global_input    = GlobalInput("GlobalInput").first_only()
@@ -48,7 +51,7 @@ class Pipeline():
 
         self.layerNormAttn   = LayerNorm("LayerNormAttn").setWeightName("model.layers.{layer}.input_layernorm.weight")
 
-        self.kqv             = NPartitionGEMM("KQV", False).setWeightName([
+        self.kqv             = GEMM("KQV").setWeightName([
             "model.layers.{layer}.self_attn.k_proj.weight",
             "model.layers.{layer}.self_attn.v_proj.weight",
             "model.layers.{layer}.self_attn.q_proj.weight"
@@ -63,20 +66,20 @@ class Pipeline():
         self.pfAttn          = PFAttn("PFAttn")
         self.pfAttn.externals["KVCache"] = self.kv_cache
 
-        self.o               = NPartitionGEMM("O").setWeightName("model.layers.{layer}.self_attn.o_proj.weight")
+        self.o               = GEMM("O", True).setWeightName("model.layers.{layer}.self_attn.o_proj.weight")
 
         self.layerNormFFN    = LayerNorm("LayerNormFFN").setWeightName("model.layers.{layer}.post_attention_layernorm.weight")
 
-        self.ug              = NPartitionGEMM("UG", False).setWeightName([
+        self.ug              = GEMM("UG").setWeightName([
             "model.layers.{layer}.mlp.up_proj.weight",
             "model.layers.{layer}.mlp.gate_proj.weight"
         ])
 
         self.activation      = Activation("Activation")
 
-        self.d               = KPartitionGEMM("D").setWeightName("model.layers.{layer}.mlp.down_proj.weight")
+        self.d               = GEMM("D", True).setWeightName("model.layers.{layer}.mlp.down_proj.weight")
 
-        self.getLogits       = GEMM("GetLogits", False).setWeightName("lm_head.weight")
+        self.getLogits       = GEMM("GetLogits").setWeightName("lm_head.weight")
         self.getLogits.last_layer_only = True
 
         self.modelLayerNorm  = LayerNorm("ModelLayerNorm").setWeightName("model.norm.weight")
@@ -89,14 +92,11 @@ class Pipeline():
         self.global_output.last_layer_only = True
 
         # Save operations in an instance variable.
-        self.operation_list:list[Operations] = [
+        self.operation_list = [
             self.global_input, self.gen_embedding, self.layerNormAttn, self.kqv, self.ropeAppend,
             self.decAttn, self.pfAttn, self.o, self.layerNormFFN, self.ug, self.activation, self.d,
             self.modelLayerNorm, self.getLogits, self.sample, self.global_output
         ]
-        
-        for op in self.operation_list:
-            op.set_nranks(self.nranks)
     
     def init_dependency(self):
         self.global_input.outputs["tokens"] >> self.gen_embedding.inputs["token"]
@@ -142,8 +142,8 @@ class Pipeline():
         self.layerNormAttn.setShape(self.hidden_dim)
         self.kqv.setShape(self.kqv_heads * self.head_dim, self.hidden_dim)
         self.decAttn.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim)
-        self.pfAttn.setShape(self.num_kv_heads // self.nranks, self.num_qo_heads // self.nranks, self.head_dim)
-        self.ropeAppend.setShape(self.num_kv_heads // self.nranks, self.num_qo_heads // self.nranks, self.head_dim)
+        self.pfAttn.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim)
+        self.ropeAppend.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim)
         self.o.setShape(self.hidden_dim, self.hidden_dim)
         self.layerNormFFN.setShape(self.hidden_dim)
         self.ug.setShape(self.intermediate_dim * 2, self.hidden_dim)
@@ -157,13 +157,17 @@ class Pipeline():
         weight_manager = WeightManager()
         weight_manager.load_from_safe_tensor(weight_path)
         weight_manager.set_weight(self.operation_list, self.layer)
+        torch.cuda.empty_cache()
     
-    def config_batch_size(self):
+    def config_batch_size(self, decode_flag):
         self.gen_embedding.setBatchSize(self.batch_size)
         self.layerNormAttn.setBatchSize(self.batch_size)
         self.kqv.setBatchSize(self.batch_size)
         self.decAttn.setBatchSize(0)
         self.pfAttn.setBatchSize(self.batch_size)
+        if decode_flag:
+            self.decAttn.setBatchSize(self.batch_size)
+            self.pfAttn.setBatchSize(0)
         self.ropeAppend.setBatchSize(self.batch_size)
         self.layerNormFFN.setBatchSize(self.batch_size)
         self.ug.setBatchSize(self.batch_size)
@@ -177,31 +181,51 @@ class Pipeline():
         self.global_output.setBatchSize(self.batch_size)
     
     def config_algorithm(self):
-        pass
+        self.gen_embedding.config_tag("cuda")
+        self.layerNormAttn.config_tag("cuda")
+        self.activation.config_tag("torch")
+        self.kqv.config_tag("cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", {"M" : self.batch_size, "N": self.kqv_heads * self.head_dim, "K": self.hidden_dim, "alpha": 1.0, "bias": False})
+        self.ropeAppend.config_tag("torch")
+        self.decAttn.config_tag("cuda")
+        self.pfAttn.config_tag("cuda")
+        self.layerNormFFN.config_tag("cuda")
 
-    def config(self):
-        self.config_batch_size()
+        # self.ug.config_tag("cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", {"M" : self.batch_size, "N": self.intermediate_dim * 2, "K": self.hidden_dim, "alpha": 1.0, "bias": False})
+        # self.d.config_tag("cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", {"M" : self.batch_size, "N": self.hidden_dim, "K": self.intermediate_dim, "alpha": 1.0, "bias": True, "beta": 1.0})
+        # self.getLogits.config_tag("cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", {"M" : self.batch_size, "N": self.vocab_size, "K": self.hidden_dim, "alpha": 1.0, "bias": False})
+        # self.kqv.config_tag("torch", {"alpha": 1.0, "bias" : False})
+        self.o.config_tag("torch", {"alpha": 1.0, "bias" : True, "beta": 1.0})
+        self.ug.config_tag("torch", {"alpha": 1.0, "bias" : False})
+        self.d.config_tag("torch", {"alpha": 1.0, "bias" : True, "beta": 1.0})
+        self.modelLayerNorm.config_tag("torch")
+        self.sample.config_tag("cuda")
+        self.getLogits.config_tag("torch", {"alpha": 1.0, "bias" : False})
+
+    def config(self, decode_flag=False):
+        self.config_batch_size(decode_flag)
         self.config_algorithm()
     
-    def update(self, input_ids):
+    def update(self, input_ids, decode_flag=False):
         
-        self.update_allocate_buffers()
+        self.input_ids = input_ids
         # concatenate input_ids into a single tensor
         flattened = [item for sublist in input_ids for item in sublist]
+        self.batch_size = len(flattened)
+        # print(f"batch_size: {self.batch_size}")
+        self.config(False)
+        self.update_allocate_buffers()
         input_tensor = torch.tensor(flattened, dtype=torch.int32, device='cuda')
         # get cumulative sum of the number of tokens in each input
         request_length = torch.tensor([len(x) for x in input_ids], dtype=torch.int32)
-        cumsum_input = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(request_length, dim=0)])
-        print(f"cumsum_input: {cumsum_input}")
-        print(f"input_tensor: {input_tensor}")
+        self.cumsum_input = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(request_length, dim=0)])
+        # print(f"cumsum_input: {self.cumsum_input}")
+        # print(f"input_tensor: {input_tensor}")
         
         self.global_input.outputs["tokens"].tensor[:input_tensor.shape[0]].copy_(input_tensor)
-        self.ropeAppend.update(cumsum_input)
-        self.decAttn.update(cumsum_input)
-        self.pfAttn.update(cumsum_input)
+        self.ropeAppend.update(self.cumsum_input)
+        self.decAttn.update(self.cumsum_input)
+        self.pfAttn.update(self.cumsum_input)
         
-
-    
     def update_allocate_buffers(self):
         # Build list of buffers.
         buffers_list = []
@@ -215,10 +239,40 @@ class Pipeline():
         bufferAllocator.allocate_buffer()
         print(f"Total allocated: {bufferAllocator.total_allocated / 1024 / 1024} MB")
 
+    def profile(self):
+        for operation in self.operation_list:
+            operation.profile()
+
+    def search_profile_data(self):
+        operation_base = Operations()
+        operation_base.search_profile_data()
+
     def run(self):
         executor = Executor(self.operation_list, self.layer)
         executor.plan_layer_ordering()
         # executor.draw_ordered_graph()
-        print(executor.ordered_operations)
-        # executor.execute({})
-        executor.print_debug("out.txt")
+        # print(executor.ordered_operations)
+
+        temp_out = torch.zeros(self.batch_size, dtype=torch.int32, device='cuda')
+        os.makedirs("./llama3-nokvcache-out", exist_ok=True)
+        executor.execute({}, temp_out)
+        # executor.print_debug("out_nokv", filefolder_name="llama3-nokvcache-out", output=temp_out)
+        new_tokens = [ [temp_out[idx-1].item()] for idx in self.cumsum_input[1:] ]
+        
+        return new_tokens
+
+
+
+if __name__ == "__main__":
+    # remove the file performance.db
+    try:
+        os.remove("performance.db")
+    except:
+        pass
+    pipeline = Pipeline()
+    pipeline.init_external_data()
+    pipeline.init_operations()
+    pipeline.init_set_shape()
+    pipeline.config_algorithm()
+    pipeline.profile()
+    pipeline.activation.search_profile_data()
