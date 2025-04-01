@@ -1,24 +1,26 @@
 import transformers
+import torch
+import nvtx
 import os, sys
 sys.path.append("../")
 sys.path.append('../pybind/build')
 os.environ["HF_HOME"] = "/code/hf"
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 from operations.operation_base import Operations
-from operations.activation.silu import Activation
-from operations.embedding.embedding import GenEmbedding
-from operations.globalOp.globalOp import GlobalInput, GlobalOutput
-from operations.gemm.gemm import GEMM
-from operations.norm.rmsnorm import LayerNorm
-from operations.sampling.max_sampling import Sampling
-from operations.rope.rope import RopeAppend
-from operations.attention.llamaAttention import DecAttn, PFAttn
+from operations.activation.silu import Activation, Activation_Layer
+from operations.embedding.embedding import GenEmbedding, GenEmbedding_Layer
+from operations.globalOp.globalOp import GlobalInput, GlobalInput_Layer, GlobalOutput, GlobalOutput_Layer
+from operations.gemm.gemm import GEMM, GEMM_Layer
+from operations.norm.rmsnorm import LayerNorm, LayerNorm_Layer
+from operations.sampling.max_sampling import Sampling, Sampling_Layer
+from operations.rope.rope import RopeAppend, RopeAppend_Layer
+from operations.attention.llamaAttention import DecAttn, DecAttn_Layer, PFAttn, PFAttn_Layer
 from kvcache.kv import DistKVPool, BatchedDistKVCache
 from core.weightManager import WeightManager
 from core.bufferAllocate import BufferAllocator
 from core.executor import Executor
-import torch
+
 
 
 class Pipeline():
@@ -33,65 +35,85 @@ class Pipeline():
         self.intermediate_dim = 14 * 1024
         self.batch_size = 7
         self.layer = 32
+        self.actual_layer_range = [i for i in range(self.layer)]
+        self.page_size = 64
 
     def init(self, weight_path):
         self.init_external_data()
         self.init_operations()
         self.init_dependency()
+        self.init_executor()
         self.init_set_shape()
         self.init_set_weight(weight_path)
 
     def init_external_data(self):
-        self.kv_pool = DistKVPool(self.layer, self.num_kv_heads, self.head_dim, 2048, 7, 1)
-        self.batched_kv_cache = [BatchedDistKVCache(self.kv_pool, i) for i in range(self.layer)]
-        # self.kv_cache = KVCacheTorch()
+        self.kv_pool = DistKVPool(self.layer, self.num_kv_heads, self.head_dim, 4096, self.page_size, 1)
+
+        self.batched_kv_cache = BatchedDistKVCache(self.kv_pool)
 
     def init_operations(self):
         self.global_input    = GlobalInput("GlobalInput").first_only()
+        self.global_input_layers = [GlobalInput_Layer(0, self.global_input)]
 
         self.gen_embedding   = GenEmbedding("GenEmbedding").setWeightName("model.embed_tokens.weight").first_only()
+        self.gen_embedding_layers = [GenEmbedding_Layer(0, self.gen_embedding)]
 
         self.layerNormAttn   = LayerNorm("LayerNormAttn").setWeightName("model.layers.{layer}.input_layernorm.weight")
+        self.layerNormAttn_layers = [LayerNorm_Layer(i, self.layerNormAttn) for i in self.actual_layer_range]
 
         self.kqv             = GEMM("KQV").setWeightName([
             "model.layers.{layer}.self_attn.k_proj.weight",
             "model.layers.{layer}.self_attn.v_proj.weight",
             "model.layers.{layer}.self_attn.q_proj.weight"
         ])
+        self.kqv_layers = [GEMM_Layer(i, self.kqv) for i in self.actual_layer_range]
 
         self.ropeAppend      = RopeAppend("RopeAppend")
         self.ropeAppend.externals["KVCache"] = self.batched_kv_cache
+        self.ropeAppend.externals["k_data"], self.ropeAppend.externals["v_data"] = self.batched_kv_cache.get_whole_kv_data_all_layers()
+        self.ropeAppend_layers = [RopeAppend_Layer(i, self.ropeAppend) for i in self.actual_layer_range]
 
         self.decAttn         = DecAttn("DecAttn")
         self.decAttn.externals["KVCache"] = self.batched_kv_cache
+        self.decAttn_layers = [DecAttn_Layer(i, self.decAttn) for i in self.actual_layer_range]
 
         self.pfAttn          = PFAttn("PFAttn")
         self.pfAttn.externals["KVCache"] = self.batched_kv_cache
+        self.pfAttn_layers = [PFAttn_Layer(i, self.pfAttn) for i in self.actual_layer_range]
 
         self.o               = GEMM("O", True).setWeightName("model.layers.{layer}.self_attn.o_proj.weight")
+        self.o_layers = [GEMM_Layer(i, self.o) for i in self.actual_layer_range]
 
         self.layerNormFFN    = LayerNorm("LayerNormFFN").setWeightName("model.layers.{layer}.post_attention_layernorm.weight")
+        self.layerNormFFN_layers = [LayerNorm_Layer(i, self.layerNormFFN) for i in self.actual_layer_range]
 
         self.ug              = GEMM("UG").setWeightName([
             "model.layers.{layer}.mlp.up_proj.weight",
             "model.layers.{layer}.mlp.gate_proj.weight"
         ])
+        self.ug_layers = [GEMM_Layer(i, self.ug) for i in self.actual_layer_range]
 
         self.activation      = Activation("Activation")
+        self.activation_layers = [Activation_Layer(i, self.activation) for i in self.actual_layer_range]
 
         self.d               = GEMM("D", True).setWeightName("model.layers.{layer}.mlp.down_proj.weight")
+        self.d_layers = [GEMM_Layer(i, self.d) for i in self.actual_layer_range]
 
         self.getLogits       = GEMM("GetLogits").setWeightName("lm_head.weight")
         self.getLogits.last_layer_only = True
+        self.getLogits_layers = [GEMM_Layer(self.actual_layer_range[-1], self.getLogits)]
 
         self.modelLayerNorm  = LayerNorm("ModelLayerNorm").setWeightName("model.norm.weight")
         self.modelLayerNorm.last_layer_only = True
+        self.modelLayerNorm_layers = [LayerNorm_Layer(self.actual_layer_range[-1], self.modelLayerNorm)]
 
         self.sample          = Sampling("Sampling")
         self.sample.last_layer_only = True
+        self.sample_layers = [Sampling_Layer(self.actual_layer_range[-1], self.sample)]
 
         self.global_output   = GlobalOutput("GlobalOutput")
         self.global_output.last_layer_only = True
+        self.global_output_layers = [GlobalOutput_Layer(self.actual_layer_range[-1], self.global_output)]
 
         # Save operations in an instance variable.
         self.operation_list = [
@@ -99,6 +121,14 @@ class Pipeline():
             self.decAttn, self.pfAttn, self.o, self.layerNormFFN, self.ug, self.activation, self.d,
             self.modelLayerNorm, self.getLogits, self.sample, self.global_output
         ]
+
+        self.operation_layers_list = [
+            self.global_input_layers, self.gen_embedding_layers, self.layerNormAttn_layers, self.kqv_layers, self.ropeAppend_layers,
+            self.decAttn_layers, self.pfAttn_layers, self.o_layers, self.layerNormFFN_layers, self.ug_layers, self.activation_layers, self.d_layers,
+            self.modelLayerNorm_layers, self.getLogits_layers, self.sample_layers, self.global_output_layers
+        ]
+
+        self.all_operations_layers = [item for operation_layers in self.operation_layers_list for item in operation_layers]
     
     def init_dependency(self):
         self.global_input.outputs["tokens"] >> self.gen_embedding.inputs["token"]
@@ -139,6 +169,11 @@ class Pipeline():
         for operation in self.operation_list:
             operation.checkConnection()
     
+    def init_executor(self):
+        self.executor = Executor(self.operation_list, self.operation_layers_list, self.layer)
+        # self.executor.plan_layer_ordering()
+        self.executor.plan_layer_ordering_using_operator_layers()
+
     def init_set_shape(self):
         self.gen_embedding.setShape(self.hidden_dim, self.vocab_size)
         self.layerNormAttn.setShape(self.hidden_dim)
@@ -185,23 +220,21 @@ class Pipeline():
     def config_algorithm(self):
         self.gen_embedding.config_tag("cuda")
         self.layerNormAttn.config_tag("cuda")
-        self.activation.config_tag("torch")
-        self.kqv.config_tag("cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", {"M" : self.batch_size, "N": self.kqv_heads * self.head_dim, "K": self.hidden_dim, "alpha": 1.0, "bias": False})
+        self.activation.config_tag("cuda")
+        self.kqv.config_tag("cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", {"name": f"{self.kqv.name}", "M" : self.batch_size, "N": self.kqv_heads * self.head_dim, "K": self.hidden_dim, "alpha": 1.0, "bias": False})
         self.ropeAppend.config_tag("cuda")
-        self.decAttn.config_tag("cuda")
-        self.pfAttn.config_tag("cuda")
+        self.decAttn.config_tag("batched_cuda")
+        self.pfAttn.config_tag("batched_cuda")
         self.layerNormFFN.config_tag("cuda")
 
-        # self.ug.config_tag("cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", {"M" : self.batch_size, "N": self.intermediate_dim * 2, "K": self.hidden_dim, "alpha": 1.0, "bias": False})
-        # self.d.config_tag("cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", {"M" : self.batch_size, "N": self.hidden_dim, "K": self.intermediate_dim, "alpha": 1.0, "bias": True, "beta": 1.0})
-        # self.getLogits.config_tag("cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", {"M" : self.batch_size, "N": self.vocab_size, "K": self.hidden_dim, "alpha": 1.0, "bias": False})
-        # self.kqv.config_tag("torch", {"alpha": 1.0, "bias" : False})
-        self.o.config_tag("torch", {"alpha": 1.0, "bias" : True, "beta": 1.0})
-        self.ug.config_tag("torch", {"alpha": 1.0, "bias" : False})
-        self.d.config_tag("torch", {"alpha": 1.0, "bias" : True, "beta": 1.0})
-        self.modelLayerNorm.config_tag("torch")
+        self.o.config_tag("cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", {"name": f"{self.o.name}", "M" : self.batch_size, "N": self.hidden_dim, "K": self.hidden_dim, "alpha": 1.0, "bias": True, "beta": 1.0})
+        self.ug.config_tag("cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", {"name": f"{self.ug.name}", "M" : self.batch_size, "N": self.intermediate_dim * 2, "K": self.hidden_dim, "alpha": 1.0, "bias": False})
+        self.d.config_tag("cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", {"name": f"{self.d.name}", "M" : self.batch_size, "N": self.hidden_dim, "K": self.intermediate_dim, "alpha": 1.0, "bias": True, "beta": 1.0})
+        
+        self.modelLayerNorm.config_tag("cuda")
         self.sample.config_tag("cuda")
-        self.getLogits.config_tag("torch", {"alpha": 1.0, "bias" : False})
+        self.getLogits.config_tag("cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", {"name": f"{self.getLogits.name}", "M" : self.batch_size, "N": self.vocab_size, "K": self.hidden_dim, "alpha": 1.0, "bias": False})
+
 
     def config(self, decode_flag=False):
         self.config_batch_size(decode_flag)
@@ -214,19 +247,39 @@ class Pipeline():
         flattened = [item for sublist in input_ids for item in sublist]
         self.batch_size = len(flattened)
         # print(f"batch_size: {self.batch_size}")
-        self.config(decode_flag)
+        # self.config(decode_flag)
+        self.config_batch_size(decode_flag)
         self.update_allocate_buffers()
+        self.config_algorithm()
         input_tensor = torch.tensor(flattened, dtype=torch.int32, device='cuda')
         # get cumulative sum of the number of tokens in each input
         request_length = torch.tensor([len(x) for x in input_ids], dtype=torch.int32)
-        self.cumsum_input = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(request_length, dim=0)])
+        self.cumsum_input = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(request_length, dim=0, dtype=torch.int32)])
+        # update rev_input_indptr and per_token_offset
+        rev_input_indptr_list = []
+        per_token_offset_list = []
+        for i in range(len(self.cumsum_input) - 1):
+            start = self.cumsum_input[i]
+            end = self.cumsum_input[i + 1]
+            self.batched_kv_cache.pre_allocate(i, int(end - start))
+            seq_len = self.batched_kv_cache.get_seqlen(i)
+            # append i to the rev_input_indptr for end-start times
+            rev_input_indptr_list.extend([i] * (end - start))
+            # extend the per_token_offset with a list from last_offest to last_offest + (end - start)
+            per_token_offset_list.extend(list(range(seq_len - (end - start), seq_len)))
+
+        self.rev_input_indptr = torch.tensor(rev_input_indptr_list, dtype=torch.int32, device='cuda')
+        self.per_token_offset = torch.tensor(per_token_offset_list, dtype=torch.int32, device='cuda')
+        kv_indptr, kv_indices, kv_last_page_len = self.batched_kv_cache.update()
+
         # print(f"cumsum_input: {self.cumsum_input}")
         # print(f"input_tensor: {input_tensor}")
         
         self.global_input.outputs["tokens"].tensor[:input_tensor.shape[0]].copy_(input_tensor)
-        self.ropeAppend.update(self.cumsum_input, decode_flag)
-        self.decAttn.update(self.cumsum_input)
-        self.pfAttn.update(self.cumsum_input)
+        self.ropeAppend.update(self.page_size, self.cumsum_input, kv_indptr, kv_indices, kv_last_page_len, self.rev_input_indptr, self.per_token_offset, decode_flag)
+        self.decAttn.update(self.cumsum_input, kv_indptr, kv_indices, kv_last_page_len,
+                self.num_qo_heads, self.num_kv_heads, self.head_dim, self.page_size)
+        self.pfAttn.update(self.cumsum_input, kv_indptr, kv_indices, kv_last_page_len, self.num_qo_heads, self.num_kv_heads, self.head_dim, self.page_size)
         
     def update_allocate_buffers(self):
         # Build list of buffers.
@@ -250,16 +303,22 @@ class Pipeline():
         operation_base.search_profile_data()
 
     def run(self):
-        executor = Executor(self.operation_list, self.layer)
-        executor.plan_layer_ordering()
-        # executor.draw_ordered_graph()
-        # print(executor.ordered_operations)
+        with nvtx.annotate("initialize_executor"):
+            # executor = Executor(self.operation_list, self.layer)
+            # executor.plan_layer_ordering()
+            # executor.draw_ordered_graph()
+            # print(executor.ordered_operations)
 
-        temp_out = torch.zeros(self.batch_size, dtype=torch.int32, device='cuda')
-        os.makedirs("./llama3-kv-out", exist_ok=True)
-        executor.execute({}, temp_out)
-        # executor.print_debug("out-rope_test", filefolder_name="llama3-kv-out-rope_test", output=temp_out)
-        new_tokens = [ [temp_out[idx-1].item()] for idx in self.cumsum_input[1:] ]
+            temp_out = torch.zeros(self.batch_size, dtype=torch.int32, device='cuda')
+            os.makedirs("./llama3-kv-out", exist_ok=True)
+
+        # self.executor.execute({}, temp_out)
+        self.executor.execute_using_operator_layers({}, temp_out)
+        # self.executor.print_debug("out-rope_test", filefolder_name="llama3-kv-out-rope_test", output=temp_out)
+        # self.executor.print_debug_using_operator_layers("out-operator_layer_test", filefolder_name="llama3-kv-out-rope_test", output=temp_out)
+
+        with nvtx.annotate("after_execute_before_return"):
+            new_tokens = [ [temp_out[idx-1].item()] for idx in self.cumsum_input[1:] ]
         return new_tokens
 
 if __name__ == "__main__":

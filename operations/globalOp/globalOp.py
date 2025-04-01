@@ -25,7 +25,16 @@ class GlobalInput(Operations):
 
     def run(self, layer):
         pass
+
+class GlobalInput_Layer(Operations):
+    def __init__(self, layer, operator_device):
+        self.name = f"{operator_device.name}_{layer}"
+        self.layer = layer
+        self.inputs = operator_device.inputs
+        self.outputs = operator_device.outputs
     
+    def run(self):
+        pass
     
 
 class GlobalOutput(Operations):
@@ -50,3 +59,14 @@ class GlobalOutput(Operations):
     def run(self, layer):
         # self.outputs["new_token"].tensor.copy_(self.inputs["tokens"].tensor[-1])
         pass
+
+class GlobalOutput_Layer(Operations):
+    def __init__(self, layer, operator_device):
+        self.name = f"{operator_device.name}_{layer}"
+        self.layer = layer
+        self.inputs = operator_device.inputs
+        self.outputs = operator_device.outputs
+
+    def run(self):
+        pass
+    

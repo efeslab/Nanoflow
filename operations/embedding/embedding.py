@@ -87,8 +87,7 @@ class GenEmbedding(Operations):
                     VALUES (?, ?, ?)
                     ''', (self.name + f"_{category_tag}", batch_size, average_time))
         self.conn.commit()
-            
-
+        
     def run(self, layer):
         # Retrieve token indices from input and the embedding matrix from weight_map.
         tokens = self.inputs["token"].tensor  # expected shape: (1, batch_size)
@@ -98,3 +97,15 @@ class GenEmbedding(Operations):
     def processWeight(self, global_weight_map, total_layers, cached = False):
         return process_weight_no_transpose(global_weight_map, self.weight_name, self.weights["embedding"], total_layers, cached)
     
+class GenEmbedding_Layer(Operations):
+    def __init__(self, layer, operator_device):
+        self.operator_device = operator_device
+        self.name = f"{operator_device.name}_{layer}"
+        self.layer = layer
+        self.inputs = operator_device.inputs
+        self.outputs = operator_device.outputs
+        self.weights = operator_device.weights
+        self.impl = operator_device.impl
+    
+    def run(self):
+        self.operator_device.impl.run(self.inputs["token"].tensor, self.weights["embedding"].weight_map[self.layer], self.outputs["output"].tensor)

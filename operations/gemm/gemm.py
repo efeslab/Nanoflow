@@ -2,6 +2,7 @@ from numpy import isin
 import torch
 import sys
 import time
+import nvtx
 sys.path.append('../../pybind/build')
 from operations.operation_base import Operations
 from core.IOWrapper import IOWrapper, IOBufferType
@@ -30,6 +31,7 @@ class GEMMCudaImpl(OperationImpl):
     category_tag = "cuda"
     impl_tag_profile = "SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto"
     def config(self, impl_tag, parameter_map):
+        self.name = parameter_map["name"]
         self.M = parameter_map["M"]
         self.N = parameter_map["N"]
         self.K = parameter_map["K"]
@@ -38,15 +40,14 @@ class GEMMCudaImpl(OperationImpl):
         self.beta = 0.0
         if self.bias:
             self.beta = parameter_map["beta"]
-
-        bind_gemm.configGEMM(impl_tag, self.M, self.N, self.K, self.alpha, self.beta)
+            bind_gemm.configGEMM(impl_tag, self.name, self.inputs["A"].tensor, self.inputs["C"].tensor, self.outputs["D"].tensor, self.M, self.N, self.K, self.alpha, self.beta)
+        else:
+            bind_gemm.configGEMM(impl_tag, self.name, self.inputs["A"].tensor, torch.empty((self.M, self.N), dtype=torch.float16, device=self.inputs["A"].tensor.device), self.outputs["D"].tensor, self.M, self.N, self.K, self.alpha, self.beta)
 
     # def profile(self, impl_tag):
 
-    def run(self, A, B, C, D):
-        bind_gemm.gemmLauncher(A, B, C, D, self.M, self.N, self.K, self.alpha, self.beta)
-
-
+    def run(self, B):
+        bind_gemm.gemmLauncher(self.name, B)
 
 class GEMM(Operations):
     def __init__(self, name, bias = False):
@@ -83,7 +84,7 @@ class GEMM(Operations):
         if self.bias == True and self.beta == 0:
             raise ValueError("beta should not be 0 when bias is used")
         return self
-    
+
     def init_impl_map(self):
         self.add_impl(GEMMTorchImpl)
         self.add_impl(GEMMCudaImpl)
@@ -95,7 +96,10 @@ class GEMM(Operations):
     
     def setBatchSize(self, M):
         self.M = M
-        self.inputs["A"].shape = (self.M, self.K)
+        if self.name == "O":
+            self.inputs["A"].shape = (self.M, 32, 128)
+        else:
+            self.inputs["A"].shape = (self.M, self.K)
         if self.bias:
             self.inputs["C"].shape = (self.M, self.N)
         self.outputs["D"].shape = (self.M, self.N)
@@ -157,15 +161,16 @@ class GEMM(Operations):
         self.conn.commit()
     
     def run(self, layer):
-        A = self.inputs["A"].tensor
-        if self.bias:
-            C = self.inputs["C"].tensor
-        else:
-            C = torch.empty((self.M, self.N), dtype=torch.float16, device=self.inputs["A"].tensor.device)
+        with nvtx.annotate("GEMM_prepare"):
+            A = self.inputs["A"].tensor
+            if self.bias:
+                C = self.inputs["C"].tensor
+            else:
+                C = torch.empty((self.M, self.N), dtype=torch.float16, device=self.inputs["A"].tensor.device)
         
-        B = self.weights["B"].weight_map[layer]
-
-        self.impl.run(A, B, C, self.outputs["D"].tensor)
+            B = self.weights["B"].weight_map[layer]
+        with nvtx.annotate("GEMM_run"):
+            self.impl.run(A, B, C, self.outputs["D"].tensor)
     
     def processWeight(self, global_weight_map, total_layers, cached = False):
         self.weights["B"].weight_map = {}
@@ -186,3 +191,17 @@ class GEMM(Operations):
         # device = torch.cuda.current_device()
         # reserved_memory = torch.cuda.memory_reserved(device)
         # print(f"Reserved memory: {reserved_memory / 1024 / 1024} MB")
+
+class GEMM_Layer(Operations):
+    def __init__(self, layer, operator_device):
+        self.operator_device = operator_device
+        self.name = f"{operator_device.name}_{layer}"
+        self.layer = layer
+        self.inputs = operator_device.inputs
+        self.outputs = operator_device.outputs
+        self.weights = operator_device.weights
+        self.impl = operator_device.impl
+
+    def run(self):
+        with nvtx.annotate("GEMM_run"):
+            self.operator_device.impl.run(self.weights["B"].weight_map[self.layer])

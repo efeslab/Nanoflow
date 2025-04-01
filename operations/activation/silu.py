@@ -92,3 +92,15 @@ class Activation(Operations):
     def run(self, layer):
         x = self.inputs["input"].tensor
         self.impl.run(x, self.outputs["output"].tensor)
+
+class Activation_Layer(Operations):
+    def __init__(self, layer, operation_device):
+        self.operator_device = operation_device
+        self.name = f"{operation_device.name}_{layer}"
+        self.layer = layer
+        self.inputs = operation_device.inputs
+        self.outputs = operation_device.outputs
+        self.impl = operation_device.impl
+    
+    def run(self):
+        self.operator_device.impl.run(self.inputs["input"].tensor, self.outputs["output"].tensor)

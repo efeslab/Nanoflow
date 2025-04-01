@@ -2,8 +2,11 @@ from typing import List
 
 class OperationImpl:
     category_tag = None
-    def __init__(self):
+    def __init__(self, inputs, outputs, weights):
         self.impl_tag = None
+        self.inputs = inputs
+        self.outputs = outputs
+        self.weights = weights
     
     @staticmethod
     def list_tags(self) -> List[str]:

@@ -143,8 +143,8 @@ struct CutlassH100GEMMWrapper : public BaseGEMMWrapperTemplate<LayoutInputA_, La
 
 	void work() {
 		if (M !=0) {
-			// gemm_op(stream);
-			gemm_op();
+			gemm_op(stream);
+			// gemm_op();
 		}
 	}
 

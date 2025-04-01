@@ -9,15 +9,15 @@ from operations.impl_base import OperationImpl
 
 class SamplingTorchImpl(OperationImpl):
     category_tag = "torch"
-    def run(self, logits, maxvals, tokens):
+    def run(self, logits, tokens):
         # print("using torch")
         tokens.copy_(torch.argmax(logits, dim=1))
 
 class SamplingCudaImpl(OperationImpl):
     category_tag = "cuda"
-    def run(self, logits, maxvals, tokens):
+    def run(self, logits, tokens):
         # print("using cuda")
-        bind_sample.SampleMax(logits, maxvals, tokens)
+        bind_sample.SampleMax(logits, tokens)
 
 
 class Sampling(Operations):
@@ -81,6 +81,17 @@ class Sampling(Operations):
     def run(self, layer):
         logits = self.inputs["logits"].tensor
         # print("logits: ", logits)
-        maxvals = torch.zeros(logits.shape[0], dtype=logits.dtype, device=logits.device)
 
-        self.impl.run(logits, maxvals, self.outputs["tokens"].tensor)
+        self.impl.run(logits, self.outputs["tokens"].tensor)
+
+class Sampling_Layer(Operations):
+    def __init__(self, layer, operator_device):
+        self.operator_device = operator_device
+        self.name = f"{operator_device.name}_{layer}"
+        self.layer = layer
+        self.inputs = operator_device.inputs
+        self.outputs = operator_device.outputs
+        self.impl = operator_device.impl
+    
+    def run(self):
+        self.operator_device.impl.run(self.inputs["logits"].tensor, self.outputs["tokens"].tensor)

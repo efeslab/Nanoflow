@@ -9,7 +9,7 @@
 namespace py = pybind11;
 
 // Kernel to compute the maximum of each row and the corresponding index (argmax)
-__global__ void rowMaxKernel(half *d_matrix, half *d_maxVals, int *d_argMax, int cols) {
+__global__ void rowMaxKernel(half *d_matrix, int *d_argMax, int cols) {
     extern __shared__ half sdata[];
     int * index_data = (int *)(sdata + blockDim.x);
 
@@ -46,28 +46,23 @@ __global__ void rowMaxKernel(half *d_matrix, half *d_maxVals, int *d_argMax, int
 
     // Write the result for this block to global memory
     if (tid == 0) {
-        d_maxVals[row] = sdata[0];
         d_argMax[row] = index_data[0];
     }
 }
 
 // Wrapper function to launch the kernel
-void computeRowMax(torch::Tensor matrix, torch::Tensor maxVals, torch::Tensor argMax) {
+void computeRowMax(torch::Tensor matrix, torch::Tensor argMax) {
     // Validate input tensors
-    TORCH_CHECK(matrix.is_cuda(), "Input matrix must be a CUDA tensor");
-    TORCH_CHECK(maxVals.is_cuda(), "Output max values must be a CUDA tensor");
-    TORCH_CHECK(argMax.is_cuda(), "Output argmax must be a CUDA tensor");
+    // TORCH_CHECK(matrix.is_cuda(), "Input matrix must be a CUDA tensor");
+    // TORCH_CHECK(argMax.is_cuda(), "Output argmax must be a CUDA tensor");
 
-    TORCH_CHECK(matrix.dtype() == torch::kHalf, "Input matrix must be of type half");
-    TORCH_CHECK(maxVals.dtype() == torch::kHalf, "Output max values must be of type half");
-    TORCH_CHECK(argMax.dtype() == torch::kInt, "Output argmax must be of type int");
+    // TORCH_CHECK(matrix.dtype() == torch::kHalf, "Input matrix must be of type half");
+    // TORCH_CHECK(argMax.dtype() == torch::kInt, "Output argmax must be of type int");
 
-    matrix = matrix.contiguous();
-    maxVals = maxVals.contiguous();
-    argMax = argMax.contiguous();
+    // matrix = matrix.contiguous();
+    // argMax = argMax.contiguous();
 
     half *d_matrix = reinterpret_cast<half*>(matrix.data_ptr());
-    half *d_maxVals = reinterpret_cast<half*>(maxVals.data_ptr());
     int *d_argMax = reinterpret_cast<int*>(argMax.data_ptr());
     int rows = matrix.size(0);
     int cols = matrix.size(1);
@@ -79,7 +74,7 @@ void computeRowMax(torch::Tensor matrix, torch::Tensor maxVals, torch::Tensor ar
 
     // Launch the kernel
     if (gridSize.x > 0) {
-        rowMaxKernel<<<gridSize, blockSize, sharedMemSize, stream>>>(d_matrix, d_maxVals, d_argMax, cols);
+        rowMaxKernel<<<gridSize, blockSize, sharedMemSize, stream>>>(d_matrix, d_argMax, cols);
     }    
 }
 

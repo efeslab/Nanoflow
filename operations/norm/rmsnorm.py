@@ -93,3 +93,15 @@ class LayerNorm(Operations):
     def processWeight(self, global_weight_map, total_layers, cached = False):
         return process_weight_layer(global_weight_map, self.weight_name, self.weights["weight"], total_layers, cached)
         
+class LayerNorm_Layer(Operations):
+    def __init__(self, layer, operator_device):
+        self.operator_device = operator_device
+        self.name = f"{operator_device.name}_{layer}"
+        self.layer = layer
+        self.inputs = operator_device.inputs
+        self.outputs = operator_device.outputs
+        self.weights = operator_device.weights
+        self.impl = operator_device.impl
+
+    def run(self):
+        self.operator_device.impl.run(self.inputs["input"].tensor, self.weights["weight"].weight_map[self.layer], self.outputs["output"].tensor, epsilon = 1e-5)
