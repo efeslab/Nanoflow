@@ -9,16 +9,20 @@ from core.processWeight import process_weight_none
 
 class Operations:
     def __init__(self, name):
+        # should be initialized in the device class
         self.inputs = {}
         self.outputs = {}
         self.weights = {}
         self.externals = {}
+        self.impl:OperationImpl = None
+
+        # remain in this class
         self.name = name
         self.first_layer_only = False
         self.last_layer_only = False
         self.weight_name = None
         self.tag = "torch"
-        self.impl:OperationImpl = None
+        self.children = []
 
         # Connect to the database
         self.conn = sqlite3.connect('performance.db')
@@ -122,5 +126,51 @@ class Operations:
                     tag_list.append(category_tag)
         return tag_list
     
+    def expand_gpu(self, gpu_list):
+        for i in gpu_list:
+            print(f"Expanding {self.name} to GPU {i}")
+            i_str = str(i)
+            op_device = Operation_Device(self, self.name + "_" + i_str, i)
+            op_device
+            self.children.append(Operation_Device(self.name + "_" + i_str, i))
+            print("name: ", self.name + "_" + i_str)
+        
+        return self.children
+
     def __str__(self):
         return self.name   
+    
+class Operation_Device(Operations):
+    def __init__(self, op_general, name, device):
+        super().__init__(name)
+        self.parent = op_general
+        self.device = device
+        self.inputs = op_general.inputs
+        self.outputs = op_general.outputs
+        self.weights = op_general.weights
+        self.externals = {}
+        self.impl = self.parent.impl
+        self.children = []
+    
+    def expand_layer(self, layer_list):
+        for i in layer_list:
+            print(f"Expanding {self.name} to Layer {i}")
+            op_layer = Operation_Layer(self, self.name + "_" + str(i), i, self.device)
+            self.children.append(op_layer)
+            print("name: ", self.name + "_" + str(i))
+        
+        return self.children
+
+class Operation_Layer(Operation_Device):
+    def __init__(self, op_general, name, layer, device):
+        super().__init__(name)
+        self.layer = layer
+        self.inputs = {}
+        self.outputs = {}
+        self.weights = {}
+        self.externals = {}
+        self.impl:OperationImpl = None
+        self.device = device
+        self.parent = op_general
+
+    

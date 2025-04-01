@@ -6,7 +6,7 @@ from transformers import AutoTokenizer
 sys.path.append("../")
 sys.path.append('../pybind/build')
 
-os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+# os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 # from models.llama3_NoKVCache import Pipeline

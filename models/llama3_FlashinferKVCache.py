@@ -56,7 +56,8 @@ class Pipeline():
         self.global_input_layers = [GlobalInput_Layer(0, self.global_input)]
 
         self.gen_embedding   = GenEmbedding("GenEmbedding").setWeightName("model.embed_tokens.weight").first_only()
-        self.gen_embedding_layers = [GenEmbedding_Layer(0, self.gen_embedding)]
+        self.gen_embedding_devices = self.gen_embedding.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
+        self.gen_embedding_layers = self.gen_embedding_devices[0].expand_layer(self.actual_layer_range)
 
         self.layerNormAttn   = LayerNorm("LayerNormAttn").setWeightName("model.layers.{layer}.input_layernorm.weight")
         self.layerNormAttn_layers = [LayerNorm_Layer(i, self.layerNormAttn) for i in self.actual_layer_range]
@@ -245,12 +246,13 @@ class Pipeline():
         self.input_ids = input_ids
         # concatenate input_ids into a single tensor
         flattened = [item for sublist in input_ids for item in sublist]
-        self.batch_size = len(flattened)
-        # print(f"batch_size: {self.batch_size}")
-        # self.config(decode_flag)
-        self.config_batch_size(decode_flag)
-        self.update_allocate_buffers()
-        self.config_algorithm()
+        if len(flattened) != self.batch_size:
+            self.batch_size = len(flattened)
+            # print(f"batch_size: {self.batch_size}")
+            # self.config(decode_flag)
+            self.config_batch_size(decode_flag)
+            self.update_allocate_buffers()
+            self.config_algorithm()
         input_tensor = torch.tensor(flattened, dtype=torch.int32, device='cuda')
         # get cumulative sum of the number of tokens in each input
         request_length = torch.tensor([len(x) for x in input_ids], dtype=torch.int32)
@@ -318,6 +320,7 @@ class Pipeline():
         # self.executor.print_debug_using_operator_layers("out-operator_layer_test", filefolder_name="llama3-kv-out-rope_test", output=temp_out)
 
         with nvtx.annotate("after_execute_before_return"):
+            temp_out = temp_out.cpu()
             new_tokens = [ [temp_out[idx-1].item()] for idx in self.cumsum_input[1:] ]
         return new_tokens
 
