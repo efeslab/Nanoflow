@@ -23,19 +23,20 @@ class Operations:
         self.weight_name = None
         self.tag = "torch"
         self.children = []
+        self.isVirtual = False
 
         # Connect to the database
         self.conn = sqlite3.connect('performance.db')
         self.cursor = self.conn.cursor()
         # Create a table to store performance data if it doesn't exist
-        self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS performance (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                keyword TEXT,
-                batch_size INTEGER,
-                average_time REAL
-            )
-        ''')
+        # self.cursor.execute('''
+        #     CREATE TABLE IF NOT EXISTS performance (
+        #         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        #         keyword TEXT,
+        #         batch_size INTEGER,
+        #         average_time REAL
+        #     )
+        # ''')
         self.conn.commit()
         self.impl_map = {}
         
@@ -57,7 +58,11 @@ class Operations:
         dep = []
         for _, input_wrapper in self.inputs.items():
             for dep_wrapper, prev_layer in zip(input_wrapper.prev, input_wrapper.prev_depend_on_prev_layer):
-                dep.append((dep_wrapper.owner, prev_layer))
+                # Skip the virtual operations to find the real dependency
+                if dep_wrapper.owner.isVirtual == True:
+                    dep.extend(dep_wrapper.real_deps[input_wrapper])
+                else:
+                    dep.append((dep_wrapper.owner, prev_layer))
         
         return dep
     

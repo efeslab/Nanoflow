@@ -16,6 +16,8 @@ from operations.norm.rmsnorm import LayerNorm, LayerNorm_Layer
 from operations.sampling.max_sampling import Sampling, Sampling_Layer
 from operations.rope.rope import RopeAppend, RopeAppend_Layer
 from operations.attention.llamaAttention import DecAttn, DecAttn_Layer, PFAttn, PFAttn_Layer
+from operations.virtualOp.copy import Copy
+from operations.virtualOp.redist import Redist
 from kvcache.kv import DistKVPool, BatchedDistKVCache
 from core.weightManager import WeightManager
 from core.bufferAllocate import BufferAllocator
@@ -116,6 +118,13 @@ class Pipeline():
         self.global_output.last_layer_only = True
         self.global_output_layers = [GlobalOutput_Layer(self.actual_layer_range[-1], self.global_output)]
 
+        self.copy_o = Copy("CopyO")
+        self.copy_d = Copy("CopyD")
+        self.redist_p = Redist("RedistPartition", "partition")
+        self.redist_a = Redist("RedistAggregation", "aggregate")
+
+        self.virtual_operation_list = [self.copy_o, self.copy_d, self.redist_p, self.redist_a]
+
         # Save operations in an instance variable.
         self.operation_list = [
             self.global_input, self.gen_embedding, self.layerNormAttn, self.kqv, self.ropeAppend,
@@ -134,20 +143,32 @@ class Pipeline():
     def init_dependency(self):
         self.global_input.outputs["tokens"] >> self.gen_embedding.inputs["token"]
 
-        self.gen_embedding.outputs["output"] >> self.layerNormAttn.inputs["input"]
+        self.gen_embedding.outputs["output"] >> self.copy_d.inputs["input"]
+        self.copy_d.outputs["output"]  >> self.layerNormAttn.inputs["input"]
+        self.copy_d.outputs["output"].real_deps[self.layerNormAttn.inputs["input"]].append((self.gen_embedding, False))
 
         self.layerNormAttn.outputs["output"] >> self.kqv.inputs["A"]
 
         self.kqv.outputs["D"] >> self.ropeAppend.inputs["kqv"]
 
-        self.ropeAppend.outputs["q"] >> self.decAttn.inputs["Q"]
-        self.ropeAppend.outputs["q"] >> self.pfAttn.inputs["Q"]
+        self.ropeAppend.outputs["q"] >>  self.redist_p.inputs["input"]
+        self.redist_p.outputs["output"] >>  self.decAttn.inputs["Q"]
+        self.redist_p.outputs["output"] >> self.pfAttn.inputs["Q"]
+        self.redist_p.outputs["output"].real_deps[self.decAttn.inputs["Q"]].append((self.ropeAppend, False))
+        self.redist_p.outputs["output"].real_deps[self.pfAttn.inputs["Q"]].append((self.ropeAppend, False))
+ 
+        self.decAttn.outputs["output"] >> self.redist_a.inputs["input"]
+        self.pfAttn.outputs["output"] >> self.redist_a.inputs["input"]
+        self.redist_a.outputs["output"] >> self.o.inputs["A"]
+        self.redist_a.outputs["output"].real_deps[self.o.inputs["A"]].append((self.pfAttn, False))
+        self.redist_a.outputs["output"].real_deps[self.o.inputs["A"]].append((self.decAttn, False))
+        
+        self.copy_d.outputs["output"] >> self.o.inputs["C"]
+        self.copy_d.outputs["output"].real_deps[self.o.inputs["C"]].append((self.gen_embedding, False))
 
-        self.decAttn.outputs["output"] >> self.o.inputs["A"]
-        self.pfAttn.outputs["output"] >> self.o.inputs["A"]
-        self.gen_embedding.outputs["output"] >> self.o.inputs["C"]
-
-        self.o.outputs["D"] >> self.layerNormFFN.inputs["input"]
+        self.o.outputs["D"] >> self.copy_o.inputs["input"]
+        self.copy_o.outputs["output"] >> self.layerNormFFN.inputs["input"]
+        self.copy_o.outputs["output"].real_deps[self.layerNormFFN.inputs["input"]].append((self.o, False))
 
         self.layerNormFFN.outputs["output"] >> self.ug.inputs["A"]
 
@@ -155,11 +176,17 @@ class Pipeline():
 
         self.activation.outputs["output"] >> self.d.inputs["A"]
 
-        self.o.outputs["D"] >> self.d.inputs["C"]
-        # Additional dependency: d feeds back to layerNormAttn and o.inputs["C"]
-        self.d.outputs["D"].chain(self.layerNormAttn.inputs["input"], True)
-        self.d.outputs["D"].chain(self.o.inputs["C"], True)
-        self.d.outputs["D"] >> self.modelLayerNorm.inputs["input"]
+        self.copy_o.outputs["output"] >> self.d.inputs["C"]
+        self.copy_o.outputs["output"].real_deps[self.d.inputs["C"]].append((self.o, False))
+
+        self.d.outputs["D"] >> self.copy_d.inputs["input"]
+        self.copy_d.outputs["output"].chain(self.layerNormAttn.inputs["input"], True)
+        self.copy_d.outputs["output"].real_deps[self.layerNormAttn.inputs["input"]].append((self.d, True))
+        self.copy_d.outputs["output"].chain(self.o.inputs["C"], True)
+        self.copy_d.outputs["output"].real_deps[self.o.inputs["C"]].append((self.d, True))
+        self.copy_d.outputs["output"] >> self.modelLayerNorm.inputs["input"]
+        self.copy_d.outputs["output"].real_deps[self.modelLayerNorm.inputs["input"]].append((self.d, False))
+
 
         self.modelLayerNorm.outputs["output"] >> self.getLogits.inputs["A"]
 
@@ -167,8 +194,9 @@ class Pipeline():
 
         self.sample.outputs["tokens"] >> self.global_output.inputs["tokens"]
         
-        for operation in self.operation_list:
+        for operation in self.operation_list + self.virtual_operation_list:
             operation.checkConnection()
+    
     
     def init_executor(self):
         self.executor = Executor(self.operation_list, self.operation_layers_list, self.layer)
@@ -217,6 +245,10 @@ class Pipeline():
         self.sample.setBatchSize(self.batch_size)
         self.global_input.setBatchSize(self.batch_size)
         self.global_output.setBatchSize(self.batch_size)
+        self.copy_o.setBatchSize()
+        self.copy_d.setBatchSize()
+        self.redist_p.setBatchSize()
+        self.redist_a.setBatchSize()
     
     def config_algorithm(self):
         self.gen_embedding.config_tag("cuda")
@@ -286,7 +318,7 @@ class Pipeline():
     def update_allocate_buffers(self):
         # Build list of buffers.
         buffers_list = []
-        for operation in self.operation_list:
+        for operation in self.operation_list + self.virtual_operation_list:
             for _, wrapper in operation.inputs.items():
                 buffers_list.append(wrapper)
             for _, wrapper in operation.outputs.items():
