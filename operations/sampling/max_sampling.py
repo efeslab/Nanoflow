@@ -39,10 +39,6 @@ class Sampling(Operations):
     def setShape(self, vocab_size):
         self.vocab_size = vocab_size
         
-    def setBatchSize(self, batch_size):
-        self.batch_size = batch_size
-        self.inputs["logits"].shape = (self.batch_size, self.vocab_size)
-        self.outputs["tokens"].shape = (self.batch_size,)
     
     def profile(self):
         maxvals = torch.zeros(2, dtype=torch.float16, device='cuda')
@@ -96,6 +92,11 @@ class Sampling(Operations):
 class Sampling_Device(Operation_Device):
     def __init__(self, op_general, name, device):
         super().__init__(op_general, name, device)     
+
+    def setBatchSize(self, batch_size):
+        self.batch_size = batch_size
+        self.inputs["logits"].shape = (self.batch_size, self.parent.vocab_size)
+        self.outputs["tokens"].shape = (self.batch_size,)
 
 
 class Sampling_Layer(Operation_Layer):

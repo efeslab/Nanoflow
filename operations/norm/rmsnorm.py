@@ -43,11 +43,6 @@ class LayerNorm(Operations):
     def setShape(self, hidden_dim):
         self.hidden_dim = hidden_dim
         self.weights["weight"].shape = (self.hidden_dim,)
-    
-    def setBatchSize(self, batch_size):
-        self.batch_size = batch_size
-        self.inputs["input"].shape = (self.batch_size, self.hidden_dim)
-        self.outputs["output"].shape = (self.batch_size, self.hidden_dim)
 
     def profile(self):
         # check the similarity of the outputs
@@ -105,6 +100,11 @@ class LayerNorm(Operations):
 class LayerNorm_Device(Operation_Device):
     def __init__(self, op_general, name, device):
         super().__init__(op_general, name, device)
+
+    def setBatchSize(self, batch_size):
+        self.batch_size = batch_size
+        self.inputs["input"].shape = (self.batch_size, self.parent.hidden_dim)
+        self.outputs["output"].shape = (self.batch_size, self.parent.hidden_dim)
 
     def expand_layer(self, layer_list):
         for i in layer_list:

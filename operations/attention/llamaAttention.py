@@ -140,11 +140,6 @@ class DecAttn(Operations):
         self.num_qo_heads = num_qo_heads
         self.head_dim = head_dim
         self.q_dim = num_qo_heads * head_dim
-        
-    def setBatchSize(self, batch_size):
-        self.batch_size = batch_size
-        self.inputs["Q"].shape = (self.batch_size, self.num_qo_heads, self.head_dim)
-        self.outputs["output"].shape = (self.batch_size, self.num_qo_heads, self.head_dim)
     
     def update(self, qo_indicies, kv_indptr, kv_indices, kv_last_page_len,
                 num_qo_heads, num_kv_heads, head_dim, page_size):
@@ -172,6 +167,11 @@ class DecAttn(Operations):
 class DecAttn_Device(Operation_Device):
     def __init__(self, op_general, name, device):
         super().__init__(op_general, name, device)    
+
+    def setBatchSize(self, batch_size):
+        self.batch_size = batch_size
+        self.inputs["Q"].shape = (self.batch_size, self.parent.num_qo_heads, self.parent.head_dim)
+        self.outputs["output"].shape = (self.batch_size, self.parent.num_qo_heads, self.parent.head_dim)
 
     def expand_layer(self, layer_list):
         for i in layer_list:
@@ -349,11 +349,6 @@ class PFAttn(Operations):
         self.head_dim = head_dim
         self.q_dim = num_qo_heads * head_dim
     
-    def setBatchSize(self, batch_size):
-        self.batch_size = batch_size
-        self.inputs["Q"].shape = (self.batch_size, self.num_qo_heads, self.head_dim)
-        self.outputs["output"].shape = (self.batch_size, self.num_qo_heads, self.head_dim)
-    
     def update(self, qo_indicies, kv_indptr, kv_indices, kv_last_page_len, num_qo_heads, num_kv_heads, head_dim, page_size,
              causal=True, logits_soft_cap=0.0, pos_encoding_mode="NONE"):
         """Stores the query offset indices for each batch element.  
@@ -428,6 +423,11 @@ class PFAttn_Device(Operation_Device):
     def __init__(self, op_general, name, device):
         super().__init__(op_general, name, device)    
     
+    def setBatchSize(self, batch_size):
+        self.batch_size = batch_size
+        self.inputs["Q"].shape = (self.batch_size, self.parent.num_qo_heads, self.parent.head_dim)
+        self.outputs["output"].shape = (self.batch_size, self.parent.num_qo_heads, self.parent.head_dim)
+
     def expand_layer(self, layer_list):
         for i in layer_list:
             op_layer = PFAttn_Layer(i, self)

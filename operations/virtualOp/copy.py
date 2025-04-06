@@ -11,7 +11,7 @@ class Copy(Operations):
         self.isVirtual = True
         self.io = IOWrapper(self, name, IOBufferType.FULL)
         
-    def setBatchSize(self):
+    def check(self):
         if len(self.io.prev) == 0:
             raise Exception(f"Copy operation '{self.name}' has no prev connections!\n")
         if len(self.io.next) < 2:
@@ -33,6 +33,9 @@ class Copy(Operations):
 class Copy_Device(Copy):
     def __init__(self, op_general, name, device):
         super().__init__(name)
-        base_io = op_general.io
-        dev_io = IOWrapper_Device(owner=self,name=base_io.name, IOtype=base_io.IOtype, dtype=base_io.dtype)
-        base_io.children.append(dev_io)
+        self.base_io = op_general.io
+        self.io = IOWrapper_Device(owner=self,name=self.base_io.name, IOtype=self.base_io.IOtype, dtype=self.base_io.dtype)
+        self.base_io.children.append(self.io)
+
+    def setBatchSize(self, wrapper):
+        self.io.shape = wrapper.shape

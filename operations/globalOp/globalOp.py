@@ -15,11 +15,6 @@ class GlobalInput(Operations):
             "tokens": IOWrapper(self, 'tokens', IOBufferType.FULL, dtype=torch.int32)
         }
     
-    def setBatchSize(self, batch_size):
-        self.batch_size = batch_size
-        self.outputs["tokens"].shape = (self.batch_size,)
-        # self.outputs["tokens"].tensor[:self.batch_size].copy_(torch.tensor([0] * self.batch_size, dtype=torch.int32))
-    
     def profile(self):
         pass
 
@@ -39,6 +34,10 @@ class GlobalInput_Device(Operation_Device):
     def __init__(self, op_general, name, device):
         super().__init__(op_general, name, device)      
 
+    def setBatchSize(self, batch_size):
+        self.batch_size = batch_size
+        self.outputs["tokens"].shape = (self.batch_size,)
+        # self.outputs["tokens"].tensor[:self.batch_size].copy_(torch.tensor([0] * self.batch_size, dtype=torch.int32))
 
 class GlobalInput_Layer(Operations):
     def __init__(self, layer, operator_device):
@@ -64,11 +63,6 @@ class GlobalOutput(Operations):
             "new_token": IOWrapper(self, 'new_token', IOBufferType.FULL, dtype=torch.int32)
         }
         self.model_name = "meta-llama/Meta-Llama-3-8B-Instruct"
-    
-    def setBatchSize(self, batch_size):
-        self.batch_size = batch_size
-        self.inputs["tokens"].shape = (self.batch_size,)
-        self.outputs["new_token"].shape = (1,)
 
     def profile(self):
         pass
@@ -89,6 +83,12 @@ class GlobalOutput(Operations):
 class GlobalOutput_Device(Operation_Device):
     def __init__(self, op_general, name, device):
         super().__init__(op_general, name, device)      
+
+      
+    def setBatchSize(self, batch_size):
+        self.batch_size = batch_size
+        self.inputs["tokens"].shape = (self.batch_size,)
+        self.outputs["new_token"].shape = (1,)
 
 class GlobalOutput_Layer(Operation_Layer):
     def __init__(self, layer, operator_device):

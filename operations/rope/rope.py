@@ -232,17 +232,6 @@ class RopeAppend(Operations):
         self.num_qo_heads = num_qo_heads
         self.head_dim = head_dim
 
-    def setBatchSize(self, batch_size):
-        self.batch_size = batch_size
-        # The input tensor "kqv" is assumed to have a flattened layout:
-        # [batch_size, (num_qo_heads + 2 * num_kv_heads) * head_dim]
-        self.inputs["kqv"].shape = (
-            self.batch_size,
-            (self.num_qo_heads + 2 * self.num_kv_heads) * self.head_dim,
-        )
-        # The output "q" has shape [batch_size, num_qo_heads * head_dim]
-        self.outputs["q"].shape = (self.batch_size, self.num_qo_heads, self.head_dim)
-
     def update(self, page_size, qo_indicies, kv_indptr, kv_indices, kv_last_page_len, rev_input_indptr, per_token_offset, decode_flag=False):
         """Stores the starting indices for the query/key segments."""
         self.page_size = page_size
@@ -338,6 +327,17 @@ class RopeAppend(Operations):
 class RopeAppend_Device(Operation_Device):
     def __init__(self, op_general, name, device):
         super().__init__(op_general, name, device)
+
+    def setBatchSize(self, batch_size):
+        self.batch_size = batch_size
+        # The input tensor "kqv" is assumed to have a flattened layout:
+        # [batch_size, (num_qo_heads + 2 * num_kv_heads) * head_dim]
+        self.inputs["kqv"].shape = (
+            self.batch_size,
+            (self.parent.num_qo_heads + 2 * self.parent.num_kv_heads) * self.parent.head_dim,
+        )
+        # The output "q" has shape [batch_size, num_qo_heads * head_dim]
+        self.outputs["q"].shape = (self.batch_size, self.parent.num_qo_heads, self.parent.head_dim)
 
     def expand_layer(self, layer_list):
         for i in layer_list:

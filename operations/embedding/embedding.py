@@ -47,10 +47,6 @@ class GenEmbedding(Operations):
         self.vocab_size = vocab_size
         self.weights["embedding"].shape = (vocab_size, hidden_dim)
     
-    def setBatchSize(self, batch_size):
-        self.batch_size = batch_size
-        self.inputs["token"].shape = (self.batch_size,)
-        self.outputs["output"].shape = (self.batch_size, self.hidden_dim)
     
     def profile(self):
         # check the similarity of the outputs
@@ -109,6 +105,11 @@ class GenEmbedding(Operations):
 class GenEmbedding_Device(Operation_Device):
     def __init__(self, op_general, name, device):
         super().__init__(op_general, name, device)
+
+    def setBatchSize(self, batch_size):
+        self.batch_size = batch_size
+        self.inputs["token"].shape = (self.batch_size,)
+        self.outputs["output"].shape = (self.batch_size, self.parent.hidden_dim)
         
     def expand_layer(self, layer_list):
         for i in layer_list:

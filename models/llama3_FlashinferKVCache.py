@@ -55,10 +55,10 @@ class Pipeline():
 
     def init_operations(self):
         self.global_input    = GlobalInput("GlobalInput").first_only()
-        self.global_input_device = self.global_input.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
+        self.global_input_devices = self.global_input.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
         self.global_input_layers_per_device = []
         for i in range(torch.cuda.device_count()):
-            self.global_input_layers_per_device.append([GlobalInput_Layer(0, self.global_input_device[i])])
+            self.global_input_layers_per_device.append([GlobalInput_Layer(0, self.global_input_devices[i])])
 
         self.gen_embedding   = GenEmbedding("GenEmbedding").setWeightName("model.embed_tokens.weight").first_only()
         self.gen_embedding_devices = self.gen_embedding.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
@@ -296,30 +296,31 @@ class Pipeline():
         weight_manager.set_weight(self.operation_list, self.layer)
         torch.cuda.empty_cache()
     
-    def config_batch_size(self, decode_flag):
-        self.gen_embedding.setBatchSize(self.batch_size)
-        self.layerNormAttn.setBatchSize(self.batch_size)
-        self.kqv.setBatchSize(self.batch_size)
-        self.decAttn.setBatchSize(0)
-        self.pfAttn.setBatchSize(self.batch_size)
+
+    def config_batch_size_devices(self, decode_flag, i):
+        self.gen_embedding_devices[i].setBatchSize(self.batch_size)
+        self.layerNormAttn_devices[i].setBatchSize(self.batch_size)
+        self.kqv_devices[i].setBatchSize(self.batch_size)
+        self.decAttn_devices[i].setBatchSize(0)
+        self.pfAttn_devices[i].setBatchSize(self.batch_size)
         if decode_flag:
-            self.decAttn.setBatchSize(self.batch_size)
-            self.pfAttn.setBatchSize(0)
-        self.ropeAppend.setBatchSize(self.batch_size)
-        self.layerNormFFN.setBatchSize(self.batch_size)
-        self.ug.setBatchSize(self.batch_size)
-        self.activation.setBatchSize(self.batch_size)
-        self.o.setBatchSize(self.batch_size)
-        self.d.setBatchSize(self.batch_size)
-        self.modelLayerNorm.setBatchSize(self.batch_size)
-        self.getLogits.setBatchSize(self.batch_size)
-        self.sample.setBatchSize(self.batch_size)
-        self.global_input.setBatchSize(self.batch_size)
-        self.global_output.setBatchSize(self.batch_size)
-        self.copy_o.setBatchSize()
-        self.copy_d.setBatchSize()
-        self.redist_p.setBatchSize()
-        self.redist_a.setBatchSize()
+            self.decAttn_devices[i].setBatchSize(self.batch_size)
+            self.pfAttn_devices[i].setBatchSize(0)
+        self.ropeAppend_devices[i].setBatchSize(self.batch_size)
+        self.layerNormFFN_devices[i].setBatchSize(self.batch_size)
+        self.ug_devices[i].setBatchSize(self.batch_size)
+        self.activation_devices[i].setBatchSize(self.batch_size)
+        self.o_devices[i].setBatchSize(self.batch_size)
+        self.d_devices[i].setBatchSize(self.batch_size)
+        self.modelLayerNorm_devices[i].setBatchSize(self.batch_size)
+        self.getLogits_devices[i].setBatchSize(self.batch_size)
+        self.sample_devices[i].setBatchSize(self.batch_size)
+        self.global_input_devices[i].setBatchSize(self.batch_size)
+        self.global_output_devices[i].setBatchSize(self.batch_size)
+        self.copy_o_devices[i].setBatchSize(self.o_devices[i].outputs["D"])
+        self.copy_d_devices[i].setBatchSize(self.d_devices[i].outputs["D"])
+        self.redist_p_devices[i].setBatchSize(self.ropeAppend_devices[i].outputs["q"])
+        self.redist_a_devices[i].setBatchSize(self.o_devices[i].inputs["A"])
     
     def config_algorithm(self):
         self.gen_embedding.config_tag("cuda")
@@ -353,7 +354,7 @@ class Pipeline():
             self.batch_size = len(flattened)
             # print(f"batch_size: {self.batch_size}")
             # self.config(decode_flag)
-            self.config_batch_size(decode_flag)
+            self.config_batch_size_devices(decode_flag, 0)
             self.update_allocate_buffers()
             self.config_algorithm()
         input_tensor = torch.tensor(flattened, dtype=torch.int32, device='cuda')

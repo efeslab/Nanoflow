@@ -94,16 +94,6 @@ class GEMM(Operations):
         self.K = K
         self.weights["B"].shape = (self.K, self.N)
     
-    def setBatchSize(self, M):
-        self.M = M
-        if self.name == "O":
-            self.inputs["A"].shape = (self.M, 32, 128)
-        else:
-            self.inputs["A"].shape = (self.M, self.K)
-        if self.bias:
-            self.inputs["C"].shape = (self.M, self.N)
-        self.outputs["D"].shape = (self.M, self.N)
-        
     def profile(self):
         # print("Get into profile", self.name)
         parameters_map = {
@@ -204,6 +194,17 @@ class GEMM(Operations):
 class GEMM_Device(Operation_Device):
     def __init__(self, op_general, name, device):
         super().__init__(op_general, name, device)
+
+    def setBatchSize(self, M):
+        self.M = M
+        if self.parent.name == "O":
+            self.inputs["A"].shape = (self.M, 32, 128)
+        else:
+            self.inputs["A"].shape = (self.M, self.parent.K)
+        if self.parent.bias:
+            self.inputs["C"].shape = (self.M, self.parent.N)
+        self.outputs["D"].shape = (self.M, self.parent.N)
+        
         
     def expand_layer(self, layer_list):
         for i in layer_list:

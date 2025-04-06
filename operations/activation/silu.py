@@ -41,11 +41,6 @@ class Activation(Operations):
     def setShape(self, N):
         self.N = N
     
-    def setBatchSize(self, batch_size):
-        self.batch_size = batch_size
-        self.inputs["input"].shape = (self.batch_size, self.N * 2)
-        self.outputs["output"].shape = (self.batch_size, self.N)
-
     def profile(self):
         # check the similarity of the outputs
         x = torch.randn(2, self.N * 2, dtype=torch.float16, device='cuda')
@@ -105,6 +100,11 @@ class Activation(Operations):
 class Activation_Device(Operation_Device):
     def __init__(self, op_general, name, device):
         super().__init__(op_general, name, device)    
+
+    def setBatchSize(self, batch_size):
+        self.batch_size = batch_size
+        self.inputs["input"].shape = (self.batch_size, self.parent.N * 2)
+        self.outputs["output"].shape = (self.batch_size, self.parent.N)
 
     def expand_layer(self, layer_list):
         for i in layer_list:
