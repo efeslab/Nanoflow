@@ -4,7 +4,7 @@ import sys
 import time
 import nvtx
 sys.path.append('../../pybind/build')
-from operations.operation_base import Operations
+from operations.operation_base import Operations, Operation_Device, Operation_Layer
 from core.IOWrapper import IOWrapper, IOBufferType
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none, process_weight_layer
@@ -40,9 +40,9 @@ class GEMMCudaImpl(OperationImpl):
         self.beta = 0.0
         if self.bias:
             self.beta = parameter_map["beta"]
-            bind_gemm.configGEMM(impl_tag, self.name, self.inputs["A"].tensor, self.inputs["C"].tensor, self.outputs["D"].tensor, self.M, self.N, self.K, self.alpha, self.beta)
+            bind_gemm.configGEMM(impl_tag, self.name, self.inputs["A"].children[0].tensor, self.inputs["C"].children[0].tensor, self.outputs["D"].children[0].tensor, self.M, self.N, self.K, self.alpha, self.beta)
         else:
-            bind_gemm.configGEMM(impl_tag, self.name, self.inputs["A"].tensor, torch.empty((self.M, self.N), dtype=torch.float16, device=self.inputs["A"].tensor.device), self.outputs["D"].tensor, self.M, self.N, self.K, self.alpha, self.beta)
+            bind_gemm.configGEMM(impl_tag, self.name, self.inputs["A"].children[0].tensor, torch.empty((self.M, self.N), dtype=torch.float16, device=self.inputs["A"].children[0].tensor.device), self.outputs["D"].children[0].tensor, self.M, self.N, self.K, self.alpha, self.beta)
 
     # def profile(self, impl_tag):
 
@@ -94,16 +94,6 @@ class GEMM(Operations):
         self.K = K
         self.weights["B"].shape = (self.K, self.N)
     
-    def setBatchSize(self, M):
-        self.M = M
-        if self.name == "O":
-            self.inputs["A"].shape = (self.M, 32, 128)
-        else:
-            self.inputs["A"].shape = (self.M, self.K)
-        if self.bias:
-            self.inputs["C"].shape = (self.M, self.N)
-        self.outputs["D"].shape = (self.M, self.N)
-        
     def profile(self):
         # print("Get into profile", self.name)
         parameters_map = {
@@ -192,7 +182,38 @@ class GEMM(Operations):
         # reserved_memory = torch.cuda.memory_reserved(device)
         # print(f"Reserved memory: {reserved_memory / 1024 / 1024} MB")
 
-class GEMM_Layer(Operations):
+    def expand_gpu(self, gpu_list):
+        for i in gpu_list:
+            i_str = str(i)
+            name = self.name + "_" + i_str
+            op_device = GEMM_Device(self, self.name, i)
+            self.children.append(op_device)
+        
+        return self.children
+    
+class GEMM_Device(Operation_Device):
+    def __init__(self, op_general, name, device):
+        super().__init__(op_general, name, device)
+
+    def setBatchSize(self, M):
+        self.M = M
+        if self.parent.name == "O":
+            self.inputs["A"].shape = (self.M, 32, 128)
+        else:
+            self.inputs["A"].shape = (self.M, self.parent.K)
+        if self.parent.bias:
+            self.inputs["C"].shape = (self.M, self.parent.N)
+        self.outputs["D"].shape = (self.M, self.parent.N)
+        
+        
+    def expand_layer(self, layer_list):
+        for i in layer_list:
+            op_layer = GEMM_Layer(i, self)
+            self.children.append(op_layer)
+        
+        return self.children
+
+class GEMM_Layer(Operation_Layer):
     def __init__(self, layer, operator_device):
         self.operator_device = operator_device
         self.name = f"{operator_device.name}_{layer}"
@@ -204,4 +225,4 @@ class GEMM_Layer(Operations):
 
     def run(self):
         with nvtx.annotate("GEMM_run"):
-            self.operator_device.impl.run(self.weights["B"].weight_map[self.layer])
+            self.operator_device.parent.impl.run(self.weights["B"].weight_map[self.layer])

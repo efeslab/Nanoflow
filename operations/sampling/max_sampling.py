@@ -1,6 +1,6 @@
 import torch
 import time
-from operations.operation_base import Operations
+from operations.operation_base import Operations, Operation_Device, Operation_Layer
 from core.IOWrapper import IOWrapper, IOBufferType
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none, process_weight_layer
@@ -39,10 +39,6 @@ class Sampling(Operations):
     def setShape(self, vocab_size):
         self.vocab_size = vocab_size
         
-    def setBatchSize(self, batch_size):
-        self.batch_size = batch_size
-        self.inputs["logits"].shape = (self.batch_size, self.vocab_size)
-        self.outputs["tokens"].shape = (self.batch_size,)
     
     def profile(self):
         maxvals = torch.zeros(2, dtype=torch.float16, device='cuda')
@@ -84,7 +80,26 @@ class Sampling(Operations):
 
         self.impl.run(logits, self.outputs["tokens"].tensor)
 
-class Sampling_Layer(Operations):
+    def expand_gpu(self, gpu_list):
+        for i in gpu_list:
+            i_str = str(i)
+            name = self.name + "_" + i_str
+            op_device = Sampling_Device(self, self.name, i)
+            self.children.append(op_device)
+        
+        return self.children
+
+class Sampling_Device(Operation_Device):
+    def __init__(self, op_general, name, device):
+        super().__init__(op_general, name, device)     
+
+    def setBatchSize(self, batch_size):
+        self.batch_size = batch_size
+        self.inputs["logits"].shape = (self.batch_size, self.parent.vocab_size)
+        self.outputs["tokens"].shape = (self.batch_size,)
+
+
+class Sampling_Layer(Operation_Layer):
     def __init__(self, layer, operator_device):
         self.operator_device = operator_device
         self.name = f"{operator_device.name}_{layer}"
@@ -94,4 +109,4 @@ class Sampling_Layer(Operations):
         self.impl = operator_device.impl
     
     def run(self):
-        self.operator_device.impl.run(self.inputs["logits"].tensor, self.outputs["tokens"].tensor)
+        self.operator_device.parent.impl.run(self.inputs["logits"].tensor, self.outputs["tokens"].tensor)

@@ -3,7 +3,7 @@ import time
 import flashinfer
 import nvtx
 
-from operations.operation_base import Operations
+from operations.operation_base import Operations, Operation_Device, Operation_Layer
 from core.IOWrapper import IOWrapper, IOBufferType
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none, process_weight_layer
@@ -140,11 +140,6 @@ class DecAttn(Operations):
         self.num_qo_heads = num_qo_heads
         self.head_dim = head_dim
         self.q_dim = num_qo_heads * head_dim
-        
-    def setBatchSize(self, batch_size):
-        self.batch_size = batch_size
-        self.inputs["Q"].shape = (self.batch_size, self.num_qo_heads, self.head_dim)
-        self.outputs["output"].shape = (self.batch_size, self.num_qo_heads, self.head_dim)
     
     def update(self, qo_indicies, kv_indptr, kv_indices, kv_last_page_len,
                 num_qo_heads, num_kv_heads, head_dim, page_size):
@@ -160,7 +155,32 @@ class DecAttn(Operations):
         Q = self.inputs["Q"].tensor
         self.impl.run(layer, self.head_dim, self.num_qo_heads, self.num_kv_heads, self.qo_indicies, Q, self.externals["KVCache"], self.outputs["output"].tensor)
 
-class DecAttn_Layer(Operations):
+    def expand_gpu(self, gpu_list):
+        for i in gpu_list:
+            i_str = str(i)
+            name = self.name + "_" + i_str
+            op_device = DecAttn_Device(self, self.name, i)
+            self.children.append(op_device)
+        
+        return self.children
+    
+class DecAttn_Device(Operation_Device):
+    def __init__(self, op_general, name, device):
+        super().__init__(op_general, name, device)    
+
+    def setBatchSize(self, batch_size):
+        self.batch_size = batch_size
+        self.inputs["Q"].shape = (self.batch_size, self.parent.num_qo_heads, self.parent.head_dim)
+        self.outputs["output"].shape = (self.batch_size, self.parent.num_qo_heads, self.parent.head_dim)
+
+    def expand_layer(self, layer_list):
+        for i in layer_list:
+            op_layer = DecAttn_Layer(i, self)
+            self.children.append(op_layer)
+        
+        return self.children
+
+class DecAttn_Layer(Operation_Layer):
     def __init__(self, layer, operator_device):
         self.operator_device = operator_device
         self.name = f"{operator_device.name}_{layer}"
@@ -174,7 +194,7 @@ class DecAttn_Layer(Operations):
     
     def run(self):
         Q = self.inputs["Q"].tensor
-        self.operator_device.impl.run(Q, self.kv_tuple, self.outputs["output"].tensor)
+        self.operator_device.parent.impl.run(Q, self.kv_tuple, self.outputs["output"].tensor)
     
 class PFAttnTorchImpl(OperationImpl):
     category_tag = "torch"
@@ -329,11 +349,6 @@ class PFAttn(Operations):
         self.head_dim = head_dim
         self.q_dim = num_qo_heads * head_dim
     
-    def setBatchSize(self, batch_size):
-        self.batch_size = batch_size
-        self.inputs["Q"].shape = (self.batch_size, self.num_qo_heads, self.head_dim)
-        self.outputs["output"].shape = (self.batch_size, self.num_qo_heads, self.head_dim)
-    
     def update(self, qo_indicies, kv_indptr, kv_indices, kv_last_page_len, num_qo_heads, num_kv_heads, head_dim, page_size,
              causal=True, logits_soft_cap=0.0, pos_encoding_mode="NONE"):
         """Stores the query offset indices for each batch element.  
@@ -394,8 +409,33 @@ class PFAttn(Operations):
     def run(self, layer):
         Q = self.inputs["Q"].tensor
         self.impl.run(layer, self.head_dim, self.num_qo_heads, self.num_kv_heads, self.qo_indicies, Q, self.externals["KVCache"], self.outputs["output"].tensor)
+    
+    def expand_gpu(self, gpu_list):
+        for i in gpu_list:
+            i_str = str(i)
+            name = self.name + "_" + i_str
+            op_device = PFAttn_Device(self, self.name, i)
+            self.children.append(op_device)
+        
+        return self.children
+    
+class PFAttn_Device(Operation_Device):
+    def __init__(self, op_general, name, device):
+        super().__init__(op_general, name, device)    
+    
+    def setBatchSize(self, batch_size):
+        self.batch_size = batch_size
+        self.inputs["Q"].shape = (self.batch_size, self.parent.num_qo_heads, self.parent.head_dim)
+        self.outputs["output"].shape = (self.batch_size, self.parent.num_qo_heads, self.parent.head_dim)
 
-class PFAttn_Layer(Operations):
+    def expand_layer(self, layer_list):
+        for i in layer_list:
+            op_layer = PFAttn_Layer(i, self)
+            self.children.append(op_layer)
+        
+        return self.children
+
+class PFAttn_Layer(Operation_Layer):
     def __init__(self, layer, operator_device):
         self.operator_device = operator_device
         self.name = f"{operator_device.name}_{layer}"
@@ -409,4 +449,4 @@ class PFAttn_Layer(Operations):
     
     def run(self):
         Q = self.inputs["Q"].tensor
-        self.operator_device.impl.run(Q, self.kv_tuple, self.outputs["output"].tensor)
+        self.operator_device.parent.impl.run(Q, self.kv_tuple, self.outputs["output"].tensor)

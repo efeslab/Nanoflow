@@ -47,10 +47,6 @@ class GenEmbedding(Operations):
         self.vocab_size = vocab_size
         self.weights["embedding"].shape = (vocab_size, hidden_dim)
     
-    def setBatchSize(self, batch_size):
-        self.batch_size = batch_size
-        self.inputs["token"].shape = (self.batch_size,)
-        self.outputs["output"].shape = (self.batch_size, self.hidden_dim)
     
     def profile(self):
         # check the similarity of the outputs
@@ -99,31 +95,32 @@ class GenEmbedding(Operations):
 
     def expand_gpu(self, gpu_list):
         for i in gpu_list:
-            print(f"Expanding {self.name} to GPU {i}")
             i_str = str(i)
             name = self.name + "_" + i_str
             op_device = GenEmbedding_Device(self, self.name, i)
             self.children.append(op_device)
-            print("name: ", self.name + "_" + i_str)
         
         return self.children
     
 class GenEmbedding_Device(Operation_Device):
     def __init__(self, op_general, name, device):
         super().__init__(op_general, name, device)
+
+    def setBatchSize(self, batch_size):
+        self.batch_size = batch_size
+        self.inputs["token"].shape = (self.batch_size,)
+        self.outputs["output"].shape = (self.batch_size, self.parent.hidden_dim)
         
     def expand_layer(self, layer_list):
         for i in layer_list:
-            print(f"Expanding {self.name} to Layer {i}")
             op_layer = GenEmbedding_Layer(i, self)
             self.children.append(op_layer)
-            print("name: ", self.name + "_" + str(i))
         
         return self.children
 
 class GenEmbedding_Layer(Operation_Layer):
     def __init__(self, layer, operator_device):
-        self.parent = operator_device
+        self.operator_device = operator_device
         self.name = f"{operator_device.name}_{layer}"
         self.layer = layer
         self.inputs = operator_device.inputs
@@ -132,4 +129,4 @@ class GenEmbedding_Layer(Operation_Layer):
         self.impl = operator_device.impl
     
     def run(self):
-        self.parent.parent.impl.run(self.inputs["token"].tensor, self.weights["embedding"].weight_map[self.layer], self.outputs["output"].tensor)
+        self.operator_device.parent.impl.run(self.inputs["token"].tensor, self.weights["embedding"].weight_map[self.layer], self.outputs["output"].tensor)

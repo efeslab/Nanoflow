@@ -6,6 +6,7 @@ import sqlite3
 from abc import ABC, abstractmethod
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none
+from core.IOWrapper import IOWrapper_Device
 
 class Operations:
     def __init__(self, name):
@@ -56,7 +57,7 @@ class Operations:
     @property
     def prerequisites(self):
         dep = []
-        for _, input_wrapper in self.inputs.items():
+        for _, input_wrapper in self.operator_device.parent.inputs.items():
             for dep_wrapper, prev_layer in zip(input_wrapper.prev, input_wrapper.prev_depend_on_prev_layer):
                 # Skip the virtual operations to find the real dependency
                 if dep_wrapper.owner.isVirtual == True:
@@ -131,38 +132,54 @@ class Operations:
                     tag_list.append(category_tag)
         return tag_list
     
-    def expand_gpu(self, gpu_list):
-        for i in gpu_list:
-            print(f"Expanding {self.name} to GPU {i}")
-            i_str = str(i)
-            op_device = Operation_Device(self, self.name + "_" + i_str, i)
-            op_device
-            self.children.append(Operation_Device(self.name + "_" + i_str, i))
-            print("name: ", self.name + "_" + i_str)
-        
-        return self.children
 
     def __str__(self):
         return self.name   
+    
+    def expand_gpu(self, gpu_list):
+        for i in gpu_list:
+            i_str = str(i)
+            name = self.name + "_" + i_str
+            op_device = Operation_Device(self, name, i)
+            self.children.append(op_device)
+        
+        return self.children
     
 class Operation_Device(Operations):
     def __init__(self, op_general, name, device):
         super().__init__(name)
         self.parent = op_general
         self.device = device
-        self.inputs = op_general.inputs
-        self.outputs = op_general.outputs
         self.weights = op_general.weights
-        self.externals = {}
+        self.externals = self.parent.externals
         self.impl = self.parent.impl
         self.children = []
+        self.inputs = {}
+        for key, base_wrapper in op_general.inputs.items():
+            dev_wrapper = IOWrapper_Device(
+                owner=self,
+                name=base_wrapper.name,
+                IOtype=base_wrapper.IOtype,
+                dtype=base_wrapper.dtype
+            )
+            base_wrapper.children.append(dev_wrapper)
+            self.inputs[key] = dev_wrapper
+
+        self.outputs = {}
+        for key, base_wrapper in op_general.outputs.items():
+            dev_wrapper = IOWrapper_Device(
+                owner=self,
+                name=base_wrapper.name,
+                IOtype=base_wrapper.IOtype,
+                dtype=base_wrapper.dtype
+            )
+            base_wrapper.children.append(dev_wrapper)
+            self.outputs[key] = dev_wrapper
     
     def expand_layer(self, layer_list):
         for i in layer_list:
-            print(f"Expanding {self.name} to Layer {i}")
             op_layer = Operation_Layer(self, self.name + "_" + str(i), i, self.device)
             self.children.append(op_layer)
-            print("name: ", self.name + "_" + str(i))
         
         return self.children
 

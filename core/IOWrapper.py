@@ -9,7 +9,7 @@ class IOBufferType(Enum):
     ContinousPartition = 3
     PartialSum = 4
 
-
+# To Do: delete the attributes that related to tensor that should not belong to a base IOWrapper anymore
 class IOWrapper:
     def __init__(self, owner, name, IOtype, dtype=torch.float16):
         self.owner = owner  # owner is now an Operations object or similar
@@ -21,12 +21,11 @@ class IOWrapper:
         self.ptr = 0
         self.IOtype = IOtype
         self.tensor: torch.Tensor = None
-        self.child = []
         self.transform = None
         self.tensor_offset = 0
         self.dtype = dtype
         self.real_deps = defaultdict(list)  # {curr_wrapper: [(real_prev_operation, prev_depend_on_prev_layer)]}
-        
+        self.children = []  # [IOWrapper_Device]
     
     @property
     def tensor_range(self):
@@ -55,3 +54,25 @@ class IOWrapper:
     def toStr(self):
         # name, prev = [], next = []
         return f"{self.fullName}, prev = {[p.fullName for p in self.prev]}, next = {[n.fullName for n in self.next]}"
+    
+
+class IOWrapper_Device:
+    def __init__(self, owner, name, IOtype, dtype=torch.float16):
+        self.owner = owner  # owner is now an Operations object or similar
+        self.name = name
+        self.IOtype = IOtype
+        self.dtype = dtype
+        self.shape = None # shape [0] is non-contiguous dimension, shape [1] is contiguous dimension
+        self.tensor: torch.Tensor = None     
+        self.tensor_offset = 0
+    
+    @property
+    def tensor_range(self):
+        if self.shape is None:
+            return None
+        return (self.tensor_offset, self.tensor_offset + self.shape[0])
+    
+    @property
+    def fullName(self):
+        owner_name = self.owner.name if hasattr(self.owner, "name") else str(self.owner)
+        return f"{owner_name}_{self.name}"
