@@ -53,13 +53,21 @@ class BufferAllocator():
     
 
     def handle_virtual_ops(self, component, device_id):
-        wrappers = [self.full_graph.nodes[name]['wrapper'] for name in component]
+        wrappers = []
+        for name in component:
+            try:
+                self.full_graph.nodes[name]['wrapper']
+            except KeyError:
+                raise Exception(f"Node {name} not found in full graph")
         virtual_ops = []
         alloc_nodes = []
 
         # Find all virtual operations in component
         for wrapper in wrappers:
             if wrapper.owner.isVirtual:
+                print("=== Component Debug Info ===")
+                print(f"  isVirtual: {w.prev[0].owner.isVirtual}")
+
                 if not wrapper.prev[0].owner.isVirtual:
                     alloc_nodes.append(wrapper)
                 else:
@@ -256,6 +264,7 @@ class BufferAllocator():
             for semi_root in semi_root_nodes:
                 semi_root.children[device_id].tensor = tensor
                 allocate_info.append([semi_root.children[device_id].owner.name, semi_root.children[device_id].tensor_offset])
+                print("testing allocation deviceid = ",device_id,  semi_root.children[device_id].owner.name, semi_root.children[device_id])
                 assert semi_root.children[device_id].shape == alloc_node.children[device_id].shape, \
                     f"Shape mismatch: {semi_root.fullName} {semi_root.shape} vs {alloc_node.shape}"
             

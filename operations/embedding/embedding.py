@@ -3,11 +3,12 @@ import sys
 import time
 sys.path.append('../../pybind/build')
 
+import platform_config
 from operations.operation_base import Operations, Operation_Device, Operation_Layer
 from core.IOWrapper import IOWrapper, IOBufferType
 from core.weightWrapper import WeightWrapper
 from core.processWeight import process_weight_no_transpose
-import bind_genEmbedding
+
 from operations.impl_base import OperationImpl
 
 class GenEmbeddingTorchImpl(OperationImpl):
@@ -15,13 +16,15 @@ class GenEmbeddingTorchImpl(OperationImpl):
     def run(self, tokens, embedding, output):
         # print("using torch")
         output.copy_(embedding[tokens])
-        
-class GenEmbeddingCudaImpl(OperationImpl):
-    category_tag = "cuda"
-    def run(self, tokens, embedding, output):
-        # print("using cuda")
-        bind_genEmbedding.genEmbedding(tokens, embedding, output)
-        
+
+if platform_config.PLATFORM_CUDA:
+    import bind_genEmbedding
+    class GenEmbeddingCudaImpl(OperationImpl):
+        category_tag = "cuda"
+        def run(self, tokens, embedding, output):
+            # print("using cuda")
+            bind_genEmbedding.genEmbedding(tokens, embedding, output)
+            
 class GenEmbedding(Operations):
     
     def __init__(self, name):
@@ -40,7 +43,8 @@ class GenEmbedding(Operations):
     
     def init_impl_map(self):
         self.add_impl(GenEmbeddingTorchImpl)
-        self.add_impl(GenEmbeddingCudaImpl)
+        if platform_config.PLATFORM_CUDA:
+            self.add_impl(GenEmbeddingCudaImpl)
         
     def setShape(self, hidden_dim, vocab_size):
         self.hidden_dim = hidden_dim

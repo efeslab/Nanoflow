@@ -22,6 +22,11 @@ class KVCacheNone():
 
     def get(self, idx):
         return self.cache.get(idx, None)
+    
+    def get_whole_kv_data(self, layer: int):
+        return None, None
+    def get_whole_kv_data_all_layers(self):
+        return None, None
 
 class KVCacheTorch():
     def __init__(self):

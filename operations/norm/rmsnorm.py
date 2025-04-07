@@ -1,10 +1,11 @@
 import torch
 import time
+import platform_config
 from operations.operation_base import Operations, Operation_Device, Operation_Layer
 from core.IOWrapper import IOWrapper, IOBufferType
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none, process_weight_layer
-import bind_rms_norm
+
 from operations.impl_base import OperationImpl
 
 class LayerNormTorchImpl(OperationImpl):
@@ -15,11 +16,13 @@ class LayerNormTorchImpl(OperationImpl):
         normalized_x = x / rms
         output.copy_(normalized_x.to(torch.float16) * weight)
 
-class LayerNormCudaImpl(OperationImpl):
-    category_tag = "cuda"
-    def run(self, x, weight, output, epsilon):
-        # print("using cuda")
-        bind_rms_norm.rms_norm(output, x, weight, epsilon)
+if platform_config.PLATFORM_CUDA:
+    import bind_rms_norm
+    class LayerNormCudaImpl(OperationImpl):
+        category_tag = "cuda"
+        def run(self, x, weight, output, epsilon):
+            # print("using cuda")
+            bind_rms_norm.rms_norm(output, x, weight, epsilon)
 
 class LayerNorm(Operations):
     def __init__(self, name):
@@ -38,7 +41,8 @@ class LayerNorm(Operations):
 
     def init_impl_map(self):
         self.add_impl(LayerNormTorchImpl)
-        self.add_impl(LayerNormCudaImpl)
+        if platform_config.PLATFORM_CUDA:
+            self.add_impl(LayerNormCudaImpl)
     
     def setShape(self, hidden_dim):
         self.hidden_dim = hidden_dim

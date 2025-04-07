@@ -1,7 +1,7 @@
 import torch
 import matplotlib.pyplot as plt
 import networkx as nx
-import nvtx
+from utils.prof_marker import prof_marker
 from utils.graph_plot import plot_graph_topological, draw_graphs_subplots
 
 class Executor():
@@ -66,7 +66,7 @@ class Executor():
         for op_name in self.ordered_operations:
             print("op_name", op_name)
             op, layer = self.ordered_graph.nodes[op_name]['op'], self.ordered_graph.nodes[op_name]['layer']          
-            with nvtx.annotate(f"{op.name}_{layer}"):
+            with prof_marker(f"{op.name}_{layer}"):
                 op.run(layer)
             if op.name == "GlobalOutput":
                 output.copy_(op.inputs["tokens"].tensor)
@@ -74,7 +74,7 @@ class Executor():
     def execute_using_operator_layers(self, weight_map, output):
         for op_name in self.ordered_operations:
             op = self.ordered_graph.nodes[op_name]['op']
-            with nvtx.annotate(f"{op.name}"):
+            with prof_marker(f"{op.name}"):
                 op.run()
             if op.name == "GlobalOutput_31":
                 output.copy_(op.inputs["tokens"].tensor)

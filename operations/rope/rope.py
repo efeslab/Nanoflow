@@ -1,14 +1,16 @@
+import platform
 import torch
 import math
 import time
-import nvtx
-import bind_ropeappend
+
+import platform_config
 from operations.operation_base import Operations, Operation_Device, Operation_Layer
 from core.IOWrapper import IOWrapper, IOBufferType
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none, process_weight_layer
 from operations.impl_base import OperationImpl
 from kvcache.kv import KVCacheNone, KVCacheTorch, DistKVPool, BatchedDistKVCache
+from utils.prof_marker import prof_marker 
 
 def rotate_half(x):
     """Rotates the last half of the last dimension."""
@@ -157,34 +159,35 @@ class RopeAppendTorchImpl(OperationImpl):
 
         output.copy_(q)
         
+if platform_config.PLATFORM_CUDA:
+    import bind_ropeappend
+    class RopeAppendCudaImpl(OperationImpl):
+        category_tag = "cuda"
+        def run(self, layer, page_size, head_dim, num_qo_heads, num_kv_heads, qo_indicies, rev_input_indptr, per_token_offset, kqv, k_data, v_data, rope_type, theta, original_max_position_embeddings, low_freq_factor, high_freq_factor, factor, output, decode_flag, offset=0):
+            
+            # with prof_marker("RopeAppendCuda: GetKVCache"):
+                # k_data, v_data = KVCache.get_whole_kv_data(layer)\
+                # k_data = k_data_all[layer]
+                # v_data = v_data_all[layer]
 
-class RopeAppendCudaImpl(OperationImpl):
-    category_tag = "cuda"
-    def run(self, layer, page_size, head_dim, num_qo_heads, num_kv_heads, qo_indicies, rev_input_indptr, per_token_offset, kqv, k_data, v_data, rope_type, theta, original_max_position_embeddings, low_freq_factor, high_freq_factor, factor, output, decode_flag, offset=0):
-        
-        # with nvtx.annotate("RopeAppendCuda: GetKVCache"):
-            # k_data, v_data = KVCache.get_whole_kv_data(layer)\
-            # k_data = k_data_all[layer]
-            # v_data = v_data_all[layer]
-
-        with nvtx.annotate("RopeAppendCuda: SplitRopeAppend"):
-            bind_ropeappend.splitRopeAppend(
-                k_data,
-                v_data,
-                kqv,
-                output,
-                rev_input_indptr,
-                per_token_offset,
-                len(qo_indicies) - 1,
-                page_size,
-                num_kv_heads,
-                num_qo_heads,
-                head_dim,
-                1.0,
-                500000.0,
-                0.0,
-                0.0
-            )
+            with prof_marker("RopeAppendCuda: SplitRopeAppend"):
+                bind_ropeappend.splitRopeAppend(
+                    k_data,
+                    v_data,
+                    kqv,
+                    output,
+                    rev_input_indptr,
+                    per_token_offset,
+                    len(qo_indicies) - 1,
+                    page_size,
+                    num_kv_heads,
+                    num_qo_heads,
+                    head_dim,
+                    1.0,
+                    500000.0,
+                    0.0,
+                    0.0
+                )
 
 class RopeAppend(Operations):
     def __init__(
@@ -225,7 +228,8 @@ class RopeAppend(Operations):
 
     def init_impl_map(self):
         self.add_impl(RopeAppendTorchImpl)
-        self.add_impl(RopeAppendCudaImpl)
+        if platform_config.PLATFORM_CUDA:
+            self.add_impl(RopeAppendCudaImpl)
 
     def setShape(self, num_kv_heads, num_qo_heads, head_dim):
         self.num_kv_heads = num_kv_heads
@@ -338,6 +342,7 @@ class RopeAppend_Device(Operation_Device):
         )
         # The output "q" has shape [batch_size, num_qo_heads * head_dim]
         self.outputs["q"].shape = (self.batch_size, self.parent.num_qo_heads, self.parent.head_dim)
+        print("RopeAppend_Device setBatchSize:", self.inputs["kqv"].shape, self.outputs["q"].shape)
 
     def expand_layer(self, layer_list):
         for i in layer_list:
@@ -353,7 +358,7 @@ class RopeAppend_Layer(Operations):
         self.layer = layer
         self.inputs = operator_device.inputs
         self.outputs = operator_device.outputs
-        self.k_data_ptr, self.v_data_ptr = operator_device.externals["KVCache"].get_whole_kv_data(self.layer)
+        # self.k_data_ptr, self.v_data_ptr = operator_device.externals["KVCache"].get_whole_kv_data(self.layer)
         self.impl = operator_device.impl
 
     def run(self):

@@ -1,6 +1,5 @@
 from unicodedata import category
 from operations.impl_base import OperationImpl
-from param import String
 import torch
 import sqlite3
 from abc import ABC, abstractmethod

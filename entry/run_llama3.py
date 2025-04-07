@@ -1,17 +1,18 @@
 import sys, os
 import torch
-import nvtx
-from transformers import AutoTokenizer
-
 sys.path.append("../")
 sys.path.append('../pybind/build')
+from utils.prof_marker import prof_marker
+from transformers import AutoTokenizer
+
+
 
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
-# from models.llama3_NoKVCache import Pipeline
+from models.llama3_NoKVCacheTorch import Pipeline
 # from models.llama3 import Pipeline
-from models.llama3_FlashinferKVCache import Pipeline
+# from models.llama3_FlashinferKVCache import Pipeline
 
 tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
 # input_strings = ["Hi, who are you?"]
@@ -22,7 +23,7 @@ print(input_ids)
 
 
 pipeline = Pipeline()
-pipeline.init("/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a")
+pipeline.init("/work1/kasikci/kanzhu/models/llama3-8b")
 
 # torch.cuda.empty_cache()
 # device = torch.cuda.current_device()
@@ -40,11 +41,11 @@ output_length=64
 
 for i in range(output_length):
     new_tokens = pipeline.run()
-    with nvtx.annotate("post_run_stage"):
+    with prof_marker("post_run_stage"):
         for i, item in enumerate(new_tokens):
             output_strings[i].append(item[0])
         # pipeline.update(output_strings)
-    with nvtx.annotate("update_stage"):
+    with prof_marker("update_stage"):
         pipeline.update(new_tokens, decode_flag=True)
     
 

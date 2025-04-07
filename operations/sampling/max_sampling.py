@@ -1,10 +1,11 @@
 import torch
 import time
+import platform_config
 from operations.operation_base import Operations, Operation_Device, Operation_Layer
 from core.IOWrapper import IOWrapper, IOBufferType
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none, process_weight_layer
-import bind_sample
+
 from operations.impl_base import OperationImpl
 
 class SamplingTorchImpl(OperationImpl):
@@ -13,11 +14,13 @@ class SamplingTorchImpl(OperationImpl):
         # print("using torch")
         tokens.copy_(torch.argmax(logits, dim=1))
 
-class SamplingCudaImpl(OperationImpl):
-    category_tag = "cuda"
-    def run(self, logits, tokens):
-        # print("using cuda")
-        bind_sample.SampleMax(logits, tokens)
+if platform_config.PLATFORM_CUDA:
+    import bind_sample
+    class SamplingCudaImpl(OperationImpl):
+        category_tag = "cuda"
+        def run(self, logits, tokens):
+            # print("using cuda")
+            bind_sample.SampleMax(logits, tokens)
 
 
 class Sampling(Operations):
@@ -34,7 +37,8 @@ class Sampling(Operations):
     
     def init_impl_map(self):
         self.add_impl(SamplingTorchImpl)
-        self.add_impl(SamplingCudaImpl)
+        if platform_config.PLATFORM_CUDA:
+            self.add_impl(SamplingCudaImpl)
     
     def setShape(self, vocab_size):
         self.vocab_size = vocab_size

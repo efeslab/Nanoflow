@@ -2,13 +2,12 @@ from numpy import isin
 import torch
 import sys
 import time
-import nvtx
-sys.path.append('../../pybind/build')
+from utils.prof_marker import prof_marker
+import platform_config
 from operations.operation_base import Operations, Operation_Device, Operation_Layer
 from core.IOWrapper import IOWrapper, IOBufferType
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none, process_weight_layer
-import bind_gemm
 from operations.impl_base import OperationImpl
 
 class GEMMTorchImpl(OperationImpl):
@@ -26,28 +25,29 @@ class GEMMTorchImpl(OperationImpl):
             D.copy_(A.matmul(B) * self.alpha + C * self.beta)
         else:
             D.copy_(A.matmul(B) * self.alpha)
+if platform_config.PLATFORM_CUDA:
+    import pybind.build.bind_gemm as bind_gemm
+    class GEMMCudaImpl(OperationImpl):
+        category_tag = "cuda"
+        impl_tag_profile = "SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto"
+        def config(self, impl_tag, parameter_map):
+            self.name = parameter_map["name"]
+            self.M = parameter_map["M"]
+            self.N = parameter_map["N"]
+            self.K = parameter_map["K"]
+            self.alpha = parameter_map["alpha"]
+            self.bias = parameter_map["bias"]
+            self.beta = 0.0
+            if self.bias:
+                self.beta = parameter_map["beta"]
+                bind_gemm.configGEMM(impl_tag, self.name, self.inputs["A"].children[0].tensor, self.inputs["C"].children[0].tensor, self.outputs["D"].children[0].tensor, self.M, self.N, self.K, self.alpha, self.beta)
+            else:
+                bind_gemm.configGEMM(impl_tag, self.name, self.inputs["A"].children[0].tensor, torch.empty((self.M, self.N), dtype=torch.float16, device=self.inputs["A"].children[0].tensor.device), self.outputs["D"].children[0].tensor, self.M, self.N, self.K, self.alpha, self.beta)
 
-class GEMMCudaImpl(OperationImpl):
-    category_tag = "cuda"
-    impl_tag_profile = "SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto"
-    def config(self, impl_tag, parameter_map):
-        self.name = parameter_map["name"]
-        self.M = parameter_map["M"]
-        self.N = parameter_map["N"]
-        self.K = parameter_map["K"]
-        self.alpha = parameter_map["alpha"]
-        self.bias = parameter_map["bias"]
-        self.beta = 0.0
-        if self.bias:
-            self.beta = parameter_map["beta"]
-            bind_gemm.configGEMM(impl_tag, self.name, self.inputs["A"].children[0].tensor, self.inputs["C"].children[0].tensor, self.outputs["D"].children[0].tensor, self.M, self.N, self.K, self.alpha, self.beta)
-        else:
-            bind_gemm.configGEMM(impl_tag, self.name, self.inputs["A"].children[0].tensor, torch.empty((self.M, self.N), dtype=torch.float16, device=self.inputs["A"].children[0].tensor.device), self.outputs["D"].children[0].tensor, self.M, self.N, self.K, self.alpha, self.beta)
+            # def profile(self, impl_tag):
 
-    # def profile(self, impl_tag):
-
-    def run(self, B):
-        bind_gemm.gemmLauncher(self.name, B)
+            def run(self, B):
+                bind_gemm.gemmLauncher(self.name, B)
 
 class GEMM(Operations):
     def __init__(self, name, bias = False):
@@ -87,7 +87,8 @@ class GEMM(Operations):
 
     def init_impl_map(self):
         self.add_impl(GEMMTorchImpl)
-        self.add_impl(GEMMCudaImpl)
+        if platform_config.PLATFORM_CUDA:
+            self.add_impl(GEMMCudaImpl)
     
     def setShape(self, N, K):
         self.N = N
@@ -151,7 +152,7 @@ class GEMM(Operations):
         self.conn.commit()
     
     def run(self, layer):
-        with nvtx.annotate("GEMM_prepare"):
+        with prof_marker("GEMM_prepare"):
             A = self.inputs["A"].tensor
             if self.bias:
                 C = self.inputs["C"].tensor
@@ -159,7 +160,7 @@ class GEMM(Operations):
                 C = torch.empty((self.M, self.N), dtype=torch.float16, device=self.inputs["A"].tensor.device)
         
             B = self.weights["B"].weight_map[layer]
-        with nvtx.annotate("GEMM_run"):
+        with prof_marker("GEMM_run"):
             self.impl.run(A, B, C, self.outputs["D"].tensor)
     
     def processWeight(self, global_weight_map, total_layers, cached = False):
@@ -224,5 +225,5 @@ class GEMM_Layer(Operation_Layer):
         self.impl = operator_device.impl
 
     def run(self):
-        with nvtx.annotate("GEMM_run"):
+        with prof_marker("GEMM_run"):
             self.operator_device.parent.impl.run(self.weights["B"].weight_map[self.layer])

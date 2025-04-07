@@ -7,7 +7,7 @@ from operations.operation_base import Operations, Operation_Device, Operation_La
 from core.IOWrapper import IOWrapper, IOBufferType
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none, process_weight_layer
-import bind_silu_multiply
+import platform_config as config
 from operations.impl_base import OperationImpl
 
 class SiluMultiplyTorchImpl(OperationImpl):
@@ -15,11 +15,13 @@ class SiluMultiplyTorchImpl(OperationImpl):
     def run(self, x, output):
         A, B = torch.split(x, x.shape[-1] // 2, dim=-1)
         output.copy_(A * torch.nn.functional.silu(B))
-        
-class SiluMultiplyCudaImpl(OperationImpl):
-    category_tag = "cuda"
-    def run(self, x, output):
-        bind_silu_multiply.silu_multiply(x, output)
+
+if config.PLATFORM_CUDA:
+    import bind_silu_multiply
+    class SiluMultiplyCudaImpl(OperationImpl):
+        category_tag = "cuda"
+        def run(self, x, output):
+            bind_silu_multiply.silu_multiply(x, output)
 
 class Activation(Operations):
     def __init__(self, name):
@@ -36,7 +38,8 @@ class Activation(Operations):
     
     def init_impl_map(self):
         self.add_impl(SiluMultiplyTorchImpl)
-        self.add_impl(SiluMultiplyCudaImpl)
+        if config.PLATFORM_CUDA:
+            self.add_impl(SiluMultiplyCudaImpl)
         
     def setShape(self, N):
         self.N = N
