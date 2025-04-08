@@ -48,10 +48,10 @@ if platform_config.PLATFORM_CUDA:
             else:
                 bind_gemm.configGEMM(impl_tag, self.name, self.inputs["A"].children[0].tensor, torch.empty((self.M, self.N), dtype=torch.float16, device=self.inputs["A"].children[0].tensor.device), self.outputs["D"].children[0].tensor, self.M, self.N, self.K, self.alpha, self.beta)
 
-            # def profile(self, impl_tag):
+        # def profile(self, impl_tag):
 
-            def run(self, B):
-                bind_gemm.gemmLauncher(self.name, B)
+        def run(self, B):
+            bind_gemm.gemmLauncher(self.name, B)
 
 class GEMM(Operations):
     def __init__(self, name, bias = False):

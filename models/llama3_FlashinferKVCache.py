@@ -60,11 +60,11 @@ class Pipeline():
         for i in range(torch.cuda.device_count()):
             self.global_input_layers_per_device.append([GlobalInput_Layer(0, self.global_input_devices[i])])
 
-        self.gen_embedding   = GenEmbedding("GenEmbedding").setWeightName("model.embed_tokens.weight").first_only()
+        self.gen_embedding  = GenEmbedding("GenEmbedding").setWeightName("model.embed_tokens.weight").first_only()
         self.gen_embedding_devices = self.gen_embedding.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
         self.gen_embedding_layers_per_device = []
         for i in range(torch.cuda.device_count()):
-            self.gen_embedding_layers_per_device.append(self.gen_embedding_devices[i].expand_layer(self.actual_layer_range))
+            self.gen_embedding_layers_per_device.append(self.gen_embedding_devices[i].expand_layer([0]))
 
         self.layerNormAttn   = LayerNorm("LayerNormAttn").setWeightName("model.layers.{layer}.input_layernorm.weight")
         self.layerNormAttn_devices = self.layerNormAttn.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
@@ -323,22 +323,23 @@ class Pipeline():
         self.redist_a_devices[i].setBatchSize(self.o_devices[i].inputs["A"])
     
     def config_algorithm(self):
+        gemm_tag = "cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto"
         self.gen_embedding.config_tag("cuda")
         self.layerNormAttn.config_tag("cuda")
         self.activation.config_tag("cuda")
-        self.kqv.config_tag("cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", {"name": f"{self.kqv.name}", "M" : self.batch_size, "N": self.kqv_heads * self.head_dim, "K": self.hidden_dim, "alpha": 1.0, "bias": False})
+        self.kqv.config_tag(gemm_tag, {"name": f"{self.kqv.name}", "M" : self.batch_size, "N": self.kqv_heads * self.head_dim, "K": self.hidden_dim, "alpha": 1.0, "bias": False})
         self.ropeAppend.config_tag("cuda")
         self.decAttn.config_tag("batched_cuda")
         self.pfAttn.config_tag("batched_cuda")
         self.layerNormFFN.config_tag("cuda")
 
-        self.o.config_tag("cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", {"name": f"{self.o.name}", "M" : self.batch_size, "N": self.hidden_dim, "K": self.hidden_dim, "alpha": 1.0, "bias": True, "beta": 1.0})
-        self.ug.config_tag("cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", {"name": f"{self.ug.name}", "M" : self.batch_size, "N": self.intermediate_dim * 2, "K": self.hidden_dim, "alpha": 1.0, "bias": False})
-        self.d.config_tag("cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", {"name": f"{self.d.name}", "M" : self.batch_size, "N": self.hidden_dim, "K": self.intermediate_dim, "alpha": 1.0, "bias": True, "beta": 1.0})
+        self.o.config_tag(gemm_tag, {"name": f"{self.o.name}", "M" : self.batch_size, "N": self.hidden_dim, "K": self.hidden_dim, "alpha": 1.0, "bias": True, "beta": 1.0})
+        self.ug.config_tag(gemm_tag, {"name": f"{self.ug.name}", "M" : self.batch_size, "N": self.intermediate_dim * 2, "K": self.hidden_dim, "alpha": 1.0, "bias": False})
+        self.d.config_tag(gemm_tag, {"name": f"{self.d.name}", "M" : self.batch_size, "N": self.hidden_dim, "K": self.intermediate_dim, "alpha": 1.0, "bias": True, "beta": 1.0})
         
         self.modelLayerNorm.config_tag("cuda")
         self.sample.config_tag("cuda")
-        self.getLogits.config_tag("cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", {"name": f"{self.getLogits.name}", "M" : self.batch_size, "N": self.vocab_size, "K": self.hidden_dim, "alpha": 1.0, "bias": False})
+        self.getLogits.config_tag(gemm_tag, {"name": f"{self.getLogits.name}", "M" : self.batch_size, "N": self.vocab_size, "K": self.hidden_dim, "alpha": 1.0, "bias": False})
 
 
     def config(self, decode_flag=False):
@@ -402,6 +403,7 @@ class Pipeline():
         bufferAllocator = BufferAllocator(buffers_list)
         bufferAllocator.create_dependency_graph()
         bufferAllocator.allocate_buffer(0)
+        print(f"bufferAllocator.allocation_infos: {bufferAllocator.allocate_infos}")
         print(f"Total allocated: {bufferAllocator.total_allocated / 1024 / 1024} MB")
 
     def profile(self):
@@ -413,18 +415,17 @@ class Pipeline():
         operation_base.search_profile_data()
 
     def run(self):
-        with nvtx.annotate("initialize_executor"):
+        # with nvtx.annotate("initialize_executor"):
             # executor = Executor(self.operation_list, self.layer)
             # executor.plan_layer_ordering()
             # executor.draw_ordered_graph()
             # print(executor.ordered_operations)
 
-            temp_out = torch.zeros(self.batch_size, dtype=torch.int32, device='cuda')
-            os.makedirs("./llama3-kv-out", exist_ok=True)
+        temp_out = torch.zeros(self.batch_size, dtype=torch.int32, device='cuda')
 
-        # self.executor.execute({}, temp_out)
+        os.makedirs("./llama3-kv-out-rope_test", exist_ok=True)
+
         self.executor.execute_using_operator_layers({}, temp_out)
-        # self.executor.print_debug("out-rope_test", filefolder_name="llama3-kv-out-rope_test", output=temp_out)
         # self.executor.print_debug_using_operator_layers("out-operator_layer_test", filefolder_name="llama3-kv-out-rope_test", output=temp_out)
 
         with nvtx.annotate("after_execute_before_return"):

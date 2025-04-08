@@ -110,6 +110,7 @@ if platform_config.PLATFORM_CUDA:
             if Q.shape[0] == 0:
                 return
 
+            output = output.view(-1, num_qo_heads, head_dim)
             with prof_marker("DecAttnBatchedCudaImpl.run"):
                 # print("output shape: ", output.shape)
                 self.wrapper.run(Q, kv_tuple, out=output)
@@ -117,6 +118,7 @@ if platform_config.PLATFORM_CUDA:
                 # print("o is_contiguous: ", o.is_contiguous())
                 # print("o device: ", o.device)
                 # print("output device: ", output.device)
+            output = output.view(-1, num_qo_heads * head_dim)
 
 class DecAttn(Operations):
     def __init__(self, name):
@@ -325,9 +327,12 @@ if platform_config.PLATFORM_CUDA:
         def run(self, layer, head_dim, num_qo_heads, num_kv_heads, qo_indicies, Q, kv_tuple, KVCache, output):
             if Q.shape[0] == 0:
                 return
+            output = output.view(-1, num_qo_heads, head_dim)
             # print("PFAttnBatchedCudaImpl")
             # print("qo_indicies: ", qo_indicies)
             self.wrapper.run(Q, kv_tuple, out=output)
+
+            output = output.view(-1, num_qo_heads * head_dim)
 
 
 class PFAttn(Operations):

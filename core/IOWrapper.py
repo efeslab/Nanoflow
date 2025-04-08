@@ -39,8 +39,8 @@ class IOWrapper:
         return f"{owner_name}_{self.name}"
     
     def chain(self, next_wrapper, depend_on_prev=False):
-        self.next.append(next_wrapper)
-        next_wrapper.prev.append(self)
+        self.next.append(next_wrapper) if next_wrapper not in self.next else None # self.next prepared for memory allocation
+        next_wrapper.prev.append(self) # self.prev prepared for executor graph
         next_wrapper.prev_depend_on_prev_layer.append(depend_on_prev)
         # check dtype must be the same
         if self.dtype != next_wrapper.dtype:
@@ -48,6 +48,9 @@ class IOWrapper:
         
         return next_wrapper
     
+    def append_child(self, child_wrapper):
+        self.children.append(child_wrapper)
+
     def __rshift__(self, next_wrapper):
         return self.chain(next_wrapper)
     

@@ -161,7 +161,7 @@ class Operation_Device(Operations):
                 IOtype=base_wrapper.IOtype,
                 dtype=base_wrapper.dtype
             )
-            base_wrapper.children.append(dev_wrapper)
+            base_wrapper.append_child(dev_wrapper)
             self.inputs[key] = dev_wrapper
 
         self.outputs = {}
@@ -172,7 +172,7 @@ class Operation_Device(Operations):
                 IOtype=base_wrapper.IOtype,
                 dtype=base_wrapper.dtype
             )
-            base_wrapper.children.append(dev_wrapper)
+            base_wrapper.append_child(dev_wrapper)
             self.outputs[key] = dev_wrapper
     
     def expand_layer(self, layer_list):
