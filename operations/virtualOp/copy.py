@@ -9,7 +9,7 @@ class Copy(Operations):
         super().__init__(name)
         self.name = name
         self.isVirtual = True
-        self.io = IOWrapper(self, name, IOBufferType.FULL)
+        self.io = IOWrapper(self, "io", IOBufferType.FULL)
         
     def check(self):
         if len(self.io.prev) == 0:
@@ -35,7 +35,7 @@ class Copy_Device(Copy):
         super().__init__(name)
         self.base_io = op_general.io
         self.io = IOWrapper_Device(owner=self,name=self.base_io.name, IOtype=self.base_io.IOtype, dtype=self.base_io.dtype)
-        self.base_io.children.append(self.io)
+        self.base_io.append_child(self.io)
 
     def setBatchSize(self, wrapper):
         self.io.shape = wrapper.shape

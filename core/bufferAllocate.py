@@ -53,21 +53,13 @@ class BufferAllocator():
     
 
     def handle_virtual_ops(self, component, device_id):
-        wrappers = []
-        for name in component:
-            try:
-                wrappers.append(self.full_graph.nodes[name]['wrapper'])
-            except KeyError:
-                raise Exception(f"Node {name} not found in full graph")
+        wrappers = [self.full_graph.nodes[name]['wrapper'] for name in component]
         virtual_ops = []
         alloc_nodes = []
 
         # Find all virtual operations in component
         for wrapper in wrappers:
             if wrapper.owner.isVirtual:
-                # print("=== Component Debug Info ===")
-                # print(f"  isVirtual: {w.prev[0].owner.isVirtual}")
-
                 if not wrapper.prev[0].owner.isVirtual:
                     alloc_nodes.append(wrapper)
                 else:
@@ -86,64 +78,47 @@ class BufferAllocator():
         allocate_info = []    
 
         alloc_node = alloc_nodes[0] 
-        if isinstance(alloc_node.owner, Copy):
-            shape = alloc_node.children[device_id].shape
-            tensor = torch.empty(shape, dtype=alloc_node.dtype, device=f"cuda:{device_id}")
-            self.total_allocated += tensor.numel() * tensor.element_size()
-            alloc_node.children[device_id].tensor = tensor
-                
-            allocate_info.append(shape)
-            allocate_info.append([alloc_node.children[device_id].owner.name, alloc_node.children[device_id].tensor_offset])
+        shape = alloc_node.children[device_id].shape
+        tensor = torch.empty(shape, dtype=alloc_node.dtype, device=f"cuda:{device_id}")
+        self.total_allocated += tensor.numel() * tensor.element_size()
+        alloc_node.children[device_id].tensor = tensor
 
+        allocate_info.append(shape)
+        allocate_info.append([alloc_node.children[device_id].fullName, alloc_node.children[device_id].tensor_offset])
+
+        if isinstance(alloc_node.owner, Copy):
             # Share tensor with prev real nodes 
             for p in alloc_node.prev:
+                print(f"prev: {p.fullName}") if alloc_node.owner.name == "CopyD" else None
                 p.children[device_id].tensor = tensor
-                allocate_info.append([p.children[device_id].owner.name, p.children[device_id].tensor_offset])
+                allocate_info.append([p.children[device_id].fullName, p.children[device_id].tensor_offset])
            
             for n in alloc_node.next:
                 # if n is virtual operations, it will be processed later
                 if not n.owner.isVirtual:
-                    n.children[device_id].tensor = alloc_node.children[device_id].tensor
-                    allocate_info.append([n.children[device_id].owner.name, n.children[device_id].tensor_offset])
+                    print(f"next: {n.fullName}") if alloc_node.owner.name == "CopyD" else None
+                    n.children[device_id].tensor = tensor
+                    allocate_info.append([n.children[device_id].fullName, n.children[device_id].tensor_offset])
 
             
         elif isinstance(alloc_node.owner, Redist):
             if alloc_node.owner.mode == RedistMode.PARTITION:
-                shape = alloc_node.children[device_id].shape
-                tensor = torch.empty(shape, dtype=alloc_node.dtype, device=f"cuda:{device_id}")
-                self.total_allocated += tensor.numel() * tensor.element_size()
-                alloc_node.children[device_id].tensor = tensor
-
-                allocate_info.append(shape)
-                allocate_info.append([alloc_node.children[device_id].owner.name, alloc_node.children[device_id].tensor_offset])
-
-
                 # Share tensor with prev real nodes 
                 for p in alloc_node.prev:
                     p.children[device_id].tensor = tensor
-                    allocate_info.append([p.children[device_id].owner.name, p.children[device_id].tensor_offset])
+                    allocate_info.append([p.children[device_id].fullName, p.children[device_id].tensor_offset])
 
- 
                 # Split the tensor to its child    
-                tensor = alloc_node.children[device_id].tensor
                 size_for_child = [child.children[device_id].shape[0] for child in alloc_node.next]
                 assert sum(size_for_child) == shape[0], f"shape mismatch: {alloc_node.fullName} {size_for_child} vs {shape}"
                 tensor_split_list = tensor.split(size_for_child, dim=0)
                 for idx, child, tensor_split in zip(range(len(alloc_node.next)), alloc_node.next, tensor_split_list):
                     child.children[device_id].tensor = tensor_split
                     child.children[device_id].tensor_offset = sum(size_for_child[:idx])
-                    allocate_info.append([child.children[device_id].owner.name, child.children[device_id].tensor_offset])
+                    allocate_info.append([child.children[device_id].fullName, child.children[device_id].tensor_offset])
                     assert child.children[device_id].shape == tensor_split.shape, f"shape mismatch: {child.fullName} {child.shape} vs {tensor_split.shape}"
                                 
             elif alloc_node.owner.mode ==  RedistMode.AGGREGATE:
-                shape = alloc_node.children[device_id].shape
-                tensor = torch.empty(shape, dtype=alloc_node.dtype, device=f"cuda:{device_id}")
-                self.total_allocated += tensor.numel() * tensor.element_size()
-                alloc_node.children[device_id].tensor = tensor
-                    
-                allocate_info.append(shape)
-                allocate_info.append([alloc_node.children[device_id].owner.name, alloc_node.children[device_id].tensor_offset])
-
                 # Split to real prev nodes
                 split_sizes = [p.children[device_id].shape[0] for p in alloc_node.prev]
                 assert sum(split_sizes) == shape[0], f"shape mismatch: {alloc_node.fullName} {split_sizes} vs {shape}"
@@ -151,14 +126,14 @@ class BufferAllocator():
                 for idx, p, t in zip(range(len(alloc_node.prev)), alloc_node.prev, tensors):
                     p.children[device_id].tensor = t
                     p.children[device_id].tensor_offset = sum(split_sizes[:idx])
-                    allocate_info.append([p.children[device_id].owner.name, p.children[device_id].tensor_offset])
+                    allocate_info.append([p.children[device_id].fullName, p.children[device_id].tensor_offset])
                     
                       
                 for n in alloc_node.next:
                     # if n is virtual operations, it will be processed later
                     if not n.owner.isVirtual:
                         n.children[device_id].tensor = alloc_node.children[device_id].tensor
-                        allocate_info.append([n.children[device_id].owner.name, n.children[device_id].tensor_offset])
+                        allocate_info.append([n.children[device_id].fullName, n.children[device_id].tensor_offset])
             
 
         for virtual_op in virtual_ops:
@@ -168,22 +143,21 @@ class BufferAllocator():
                 if not(isinstance(node.prev[0].owner , Redist) and RedistMode.PARTITION):
                     node.children[device_id].tensor = node.prev[0].children[device_id].tensor
                     node.children[device_id].tensor_offset = node.prev[0].children[device_id].tensor_offset   
-                    allocate_info.append([node.children[device_id].owner.name, node.children[device_id].tensor_offset])
+                    allocate_info.append([node.children[device_id].fullName, node.children[device_id].tensor_offset])
 
-            
                 for n in node.next:
                     # if n is virtual operations, it will be processed later
                     if not n.owner.isVirtual:
                         n.children[device_id].tensor = node.children[device_id].tensor
                         n.children[device_id].tensor_offset = node.children[device_id].tensor_offset
-                        allocate_info.append([n.children[device_id].owner.name, n.children[device_id].tensor_offset])
+                        allocate_info.append([n.children[device_id].fullName, n.children[device_id].tensor_offset])
 
 
             elif isinstance(virtual_op, Redist):
                 if virtual_op.mode == RedistMode.PARTITION:
                     node.children[device_id].tensor = node.prev[0].children[device_id].tensor
                     node.children[device_id].tensor_offset = node.prev[0].children[device_id].tensor_offset   
-                    allocate_info.append([node.children[device_id].owner.name, node.children[device_id].tensor_offset])
+                    allocate_info.append([node.children[device_id].fullName, node.children[device_id].tensor_offset])
 
 
                     tensor = node.children[device_id].tensor
@@ -194,7 +168,7 @@ class BufferAllocator():
                     for idx, child, tensor_split in zip(range(len(node.next)), node.next, tensor_split_list):
                         child.children[device_id].tensor = tensor_split
                         child.children[device_id].tensor_offset = offset + sum(size_for_child[:idx])
-                        allocate_info.append([child.children[device_id].owner.name, child.children[device_id].tensor_offset])
+                        allocate_info.append([child.children[device_id].fullName, child.children[device_id].tensor_offset])
                         assert child.children[device_id].shape == tensor_split.shape, f"shape mismatch: {child.fullName} {child.shape} vs {tensor_split.shape}"
                     
                 else:
@@ -216,14 +190,14 @@ class BufferAllocator():
 
                     # Set offset as the first input's offset (or min offset)
                     node.children[device_id].tensor_offset = sorted_prev[0].children[device_id].tensor_offset
-                    allocate_info.append([node.children[device_id].owner.name, node.children[device_id].tensor_offset])
+                    allocate_info.append([node.children[device_id].fullName, node.children[device_id].tensor_offset])
 
                     for n in node.next:
                         # if n is virtual operations, it will be processed later
                         if not n.owner.isVirtual:
                             n.children[device_id].tensor = node.children[device_id].tensor
                             n.children[device_id].tensor = node.children[device_id].tensor_offset
-                            allocate_info.append([n.children[device_id].owner.name, n.children[device_id].tensor_offset])
+                            allocate_info.append([n.children[device_id].fullName, n.children[device_id].tensor_offset])
 
         self.allocate_infos.append(allocate_info)
         return True
@@ -257,14 +231,13 @@ class BufferAllocator():
             shape = alloc_node.children[device_id].shape
             tensor = torch.empty(alloc_node.children[device_id].shape, dtype=alloc_node.dtype, device=f"cuda:{device_id}")
             self.total_allocated += tensor.numel() * tensor.element_size()
-            alloc_node.tensor = tensor
+
            
             allocate_info.append(shape)
             
             for semi_root in semi_root_nodes:
                 semi_root.children[device_id].tensor = tensor
-                allocate_info.append([semi_root.children[device_id].owner.name, semi_root.children[device_id].tensor_offset])
-                # print("testing allocation deviceid = ",device_id,  semi_root.children[device_id].owner.name, semi_root.children[device_id])
+                allocate_info.append([semi_root.children[device_id].fullName, semi_root.children[device_id].tensor_offset])
                 assert semi_root.children[device_id].shape == alloc_node.children[device_id].shape, \
                     f"Shape mismatch: {semi_root.fullName} {semi_root.shape} vs {alloc_node.shape}"
             

@@ -62,7 +62,7 @@ class Pipeline():
         self.gen_embedding_devices = self.gen_embedding.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
         self.gen_embedding_layers_per_device = []
         for i in range(torch.cuda.device_count()):
-            self.gen_embedding_layers_per_device.append(self.gen_embedding_devices[i].expand_layer(self.actual_layer_range))
+            self.gen_embedding_layers_per_device.append(self.gen_embedding_devices[i].expand_layer([0]))
 
         self.layerNormAttn   = LayerNorm("LayerNormAttn").setWeightName("model.layers.{layer}.input_layernorm.weight")
         self.layerNormAttn_devices = self.layerNormAttn.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
@@ -402,12 +402,12 @@ class Pipeline():
             # print(executor.ordered_operations)
 
             temp_out = torch.zeros(self.batch_size, dtype=torch.int32, device='cuda')
-            os.makedirs("./llama3-kv-out", exist_ok=True)
+            # os.makedirs("./llama3-kv-out-gt", exist_ok=True)
 
-        # self.executor.execute({}, temp_out)
+
         self.executor.execute_using_operator_layers({}, temp_out)
-        # self.executor.print_debug("out-rope_test", filefolder_name="llama3-kv-out-rope_test", output=temp_out)
-        # self.executor.print_debug_using_operator_layers("out-operator_layer_test", filefolder_name="llama3-kv-out-rope_test", output=temp_out)
+
+        # self.executor.print_debug_using_operator_layers("out-gt", filefolder_name="llama3-kv-out-gt", output=temp_out)
 
         with prof_marker("after_execute_before_return"):
             temp_out = temp_out.cpu()

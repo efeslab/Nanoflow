@@ -10,9 +10,8 @@ from transformers import AutoTokenizer
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
-# from models.llama3_NoKVCacheTorch import Pipeline
-from models.llama3_KVCacheTorch import Pipeline
-# from models.llama3 import Pipeline
+from models.llama3_NoKVCacheTorch import Pipeline
+# from models.llama3_KVCacheTorch import Pipeline
 # from models.llama3_FlashinferKVCache import Pipeline
 
 tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
@@ -23,9 +22,11 @@ input_strings = [ "Hi, who are you?" for _ in range(16)]
 input_ids = [tokenizer.encode(s) for s in input_strings]
 print(input_ids)
 
+weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
+weight_map_amd_kan = "/work1/kasikci/kanzhu/models/llama3-8b"
 
 pipeline = Pipeline()
-pipeline.init("/work1/kasikci/kanzhu/models/llama3-8b")
+pipeline.init(weight_map_amd_kan)
 
 # torch.cuda.empty_cache()
 # device = torch.cuda.current_device()
@@ -47,10 +48,9 @@ for i in range(output_length):
         for i, item in enumerate(new_tokens):
             output_strings[i].append(item[0])
     with prof_marker("update_stage"):
-        # pipeline.update(output_strings)
-        pipeline.update(new_tokens, decode_flag=True)
+        pipeline.update(output_strings)
+        # pipeline.update(new_tokens, decode_flag=True)
     
 
-tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
 output_text = tokenizer.batch_decode(output_strings[:1], skip_special_tokens=True)
 print(output_text)
