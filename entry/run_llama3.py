@@ -42,7 +42,8 @@ for i in input_ids:
 output_length=20
 
 for i in range(output_length):
-    new_tokens = pipeline.run()
+    with prof_marker(f"running_{i}"):
+        new_tokens = pipeline.run()
     with prof_marker("post_run_stage"):
         for i, item in enumerate(new_tokens):
             output_strings[i].append(item[0])

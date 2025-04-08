@@ -2,7 +2,15 @@
 import platform_config as config 
 import contextlib
 
-if config.PLATFORM_CUDA:
+if config.PLATFORM_PROFILE_IN_TORCH:
+    import torch
+
+    @contextlib.contextmanager
+    def prof_marker(name: str):
+        with torch.autograd.profiler.record_function(name):
+            yield
+
+elif config.PLATFORM_CUDA:
     import nvtx
 
     @contextlib.contextmanager
@@ -11,12 +19,17 @@ if config.PLATFORM_CUDA:
             yield
 
 elif config.PLATFORM_ROCM:
-    import torch.profiler
+    import pybind_amd.bind_marker.build.bind_marker as bind_marker
 
     @contextlib.contextmanager
     def prof_marker(name: str):
-        with torch.profiler.record_function(name):
+        # Push the ROCm profiling range with the given name
+        bind_marker.roctxRangePush(name)
+        try:
             yield
+        finally:
+            # Ensure that the marker is popped when the context is exited
+            bind_marker.roctxRangePop()
 
 else:
     # Fallback: do nothing

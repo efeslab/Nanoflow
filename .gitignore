@@ -41,3 +41,4 @@ trace_processor
 Anaconda3-20*
 *.pftrace
 *.gz
+**/build/*
