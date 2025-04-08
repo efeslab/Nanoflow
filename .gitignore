@@ -39,3 +39,5 @@ trace_processor
 *.req_words
 *.schedule
 Anaconda3-20*
+*.pftrace
+*.gz

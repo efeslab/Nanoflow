@@ -20,8 +20,12 @@ class GEMMTorchImpl(OperationImpl):
         if self.bias:
             self.beta = parameter_map["beta"]
     
-    def run(self, A, B, C, D):
+    def run(self, B):
+        D = self.outputs["D"].children[0].tensor
+        A = self.inputs["A"].children[0].tensor
+        
         if self.bias:
+            C = self.inputs["C"].children[0].tensor
             D.copy_(A.matmul(B) * self.alpha + C * self.beta)
         else:
             D.copy_(A.matmul(B) * self.alpha)
@@ -198,10 +202,10 @@ class GEMM_Device(Operation_Device):
 
     def setBatchSize(self, M):
         self.M = M
-        if self.parent.name == "O":
-            self.inputs["A"].shape = (self.M, 32, 128)
-        else:
-            self.inputs["A"].shape = (self.M, self.parent.K)
+        # if self.parent.name == "O":
+        #     self.inputs["A"].shape = (self.M, 32, 128)
+        # else:
+        self.inputs["A"].shape = (self.M, self.parent.K)
         if self.parent.bias:
             self.inputs["C"].shape = (self.M, self.parent.N)
         self.outputs["D"].shape = (self.M, self.parent.N)

@@ -22,7 +22,7 @@ from core.weightManager import WeightManager
 from core.bufferAllocate import BufferAllocator
 from core.executor import Executor
 import torch
-from kvcache.kv import KVCacheNone
+from kvcache.kv import KVCacheTorch
 
 
 
@@ -49,7 +49,7 @@ class Pipeline():
         self.init_set_weight(weight_path)
 
     def init_external_data(self):
-        self.kv_cache = KVCacheNone()
+        self.kv_cache = KVCacheTorch()
 
     def init_operations(self):
         self.global_input    = GlobalInput("GlobalInput").first_only()
@@ -92,7 +92,7 @@ class Pipeline():
         self.decAttn.externals["KVCache"] = self.kv_cache
         
         self.decAttn_devices = self.decAttn.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
-        print(self.decAttn_devices[0].inputs["Q"])
+        # print(self.decAttn_devices[0].inputs["Q"])
         self.decAttn_layers_per_device = []
         for i in range(torch.cuda.device_count()):
             self.decAttn_layers_per_device.append(self.decAttn_devices[i].expand_layer(self.actual_layer_range))
@@ -100,7 +100,7 @@ class Pipeline():
         self.pfAttn          = PFAttn("PFAttn")
         self.pfAttn.externals["KVCache"] = self.kv_cache
         self.pfAttn_devices = self.pfAttn.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
-        print(self.pfAttn_devices[0].inputs["Q"])
+        # print(self.pfAttn_devices[0].inputs["Q"])
         self.pfAttn_layers_per_device = []
         for i in range(torch.cuda.device_count()):
             self.pfAttn_layers_per_device.append(self.pfAttn_devices[i].expand_layer(self.actual_layer_range))
@@ -294,7 +294,7 @@ class Pipeline():
         torch.cuda.empty_cache()
     
     def config_batch_size_devices(self, decode_flag, i):
-        print(f"batch_size: {self.batch_size}")
+        # print(f"batch_size: {self.batch_size}")
         self.gen_embedding_devices[i].setBatchSize(self.batch_size)
         self.layerNormAttn_devices[i].setBatchSize(self.batch_size)
         self.kqv_devices[i].setBatchSize(self.batch_size)
@@ -304,7 +304,7 @@ class Pipeline():
             self.decAttn_devices[i].setBatchSize(self.batch_size)
             self.pfAttn_devices[i].setBatchSize(0)
         self.ropeAppend_devices[i].setBatchSize(self.batch_size)
-        print(self.decAttn_devices[i].inputs["Q"].shape)
+        # print(self.decAttn_devices[i].inputs["Q"].shape)
         self.layerNormFFN_devices[i].setBatchSize(self.batch_size)
         self.ug_devices[i].setBatchSize(self.batch_size)
         self.activation_devices[i].setBatchSize(self.batch_size)
@@ -346,14 +346,14 @@ class Pipeline():
         self.config_algorithm()
     
     def update(self, input_ids, decode_flag=False):
-        print("update, " ,self.decAttn_devices[0].inputs["Q"])
+        # print("update, " ,self.decAttn_devices[0].inputs["Q"])
         self.input_ids = input_ids
         # concatenate input_ids into a single tensor
         flattened = [item for sublist in input_ids for item in sublist]
         self.batch_size = len(flattened)
         # print(f"batch_size: {self.batch_size}")
         self.config_batch_size_devices(decode_flag, 0)
-        print("after config, " ,self.decAttn_devices[0].inputs["Q"])
+        # print("after config, " ,self.decAttn_devices[0].inputs["Q"])
         self.update_allocate_buffers()
         self.config_algorithm()
         input_tensor = torch.tensor(flattened, dtype=torch.int32, device='cuda')
@@ -364,7 +364,7 @@ class Pipeline():
         # print(f"input_tensor: {input_tensor}")
         
         self.global_input.children[0].outputs["tokens"].tensor[:input_tensor.shape[0]].copy_(input_tensor)
-        self.ropeAppend.update(0, self.cumsum_input, 0, 0, 0, 0, 0, 0)
+        self.ropeAppend.update(0, self.cumsum_input, 0, 0, 0, 0, 0, decode_flag)
         self.decAttn.update(self.cumsum_input, 0, 0, 0, 0, 0, 0, 0)
         self.pfAttn.update(self.cumsum_input, 0, 0, 0, 0, 0, 0, 0)
         
@@ -374,10 +374,10 @@ class Pipeline():
         for operation in self.operation_list:
             for _, wrapper in operation.inputs.items():
                 buffers_list.append(wrapper)
-                print(f"input of {operation.name}: {wrapper.name}, {wrapper}")
+                # print(f"input of {operation.name}: {wrapper.name}, {wrapper}")
             for _, wrapper in operation.outputs.items():
                 buffers_list.append(wrapper)
-                print(f"output of {operation.name}: {wrapper.name}, {wrapper}")
+                # print(f"output of {operation.name}: {wrapper.name}, {wrapper}")
         for operation in self.virtual_operation_list:
             buffers_list.append(operation.io)
         # Allocate buffers.

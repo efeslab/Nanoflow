@@ -103,7 +103,7 @@ class RopeAppendTorchImpl(OperationImpl):
         output.copy_(x * cos + rotate_half(x) * sin)
         return
 
-    def run(self, layer, head_dim, num_qo_heads, num_kv_heads, qo_indicies, kv_indptr, kv_indices, kv_last_page_len, rev_input_indptr, per_token_offset, kqv, KVCache, rope_type, theta, original_max_position_embeddings, low_freq_factor, high_freq_factor, factor, output, decode_flag, offset=0):
+    def run(self, layer, page_size, head_dim, num_qo_heads, num_kv_heads, qo_indicies, rev_input_indptr, per_token_offset, kqv, KVCache, k_data, v_data, rope_type, theta, original_max_position_embeddings, low_freq_factor, high_freq_factor, factor, output, decode_flag, offset=0):
         # Determine the number of elements for each slice.
         layout_strides = [
             num_kv_heads * head_dim,
@@ -123,10 +123,10 @@ class RopeAppendTorchImpl(OperationImpl):
             end = qo_indicies[i + 1]
             sub_q = q[start:end, :]
             sub_k = k[start:end, :]
-            if not decode_flag or KVCache[layer].get_indices(i) is None:
+            if not decode_flag or KVCache.get_indices(layer, i) is None:
                 last_offest = 0
             else:
-                last_offest = KVCache[layer].get_indices(i)[0]
+                last_offest = KVCache.get_indices(layer, i)[0]
             self.apply_rope(
                 rope_type,
                 theta,
@@ -155,15 +155,15 @@ class RopeAppendTorchImpl(OperationImpl):
             k[start:end, :] = sub_k
 
             # Update the external KVCache with the new key and value.
-            KVCache[layer].put(i, sub_k, v[start:end, :])
-
+            KVCache.put(layer, i, sub_k, v[start:end, :])
+        q = q.reshape(-1, num_qo_heads, head_dim)
         output.copy_(q)
         
 if platform_config.PLATFORM_CUDA:
     import bind_ropeappend
     class RopeAppendCudaImpl(OperationImpl):
         category_tag = "cuda"
-        def run(self, layer, page_size, head_dim, num_qo_heads, num_kv_heads, qo_indicies, rev_input_indptr, per_token_offset, kqv, k_data, v_data, rope_type, theta, original_max_position_embeddings, low_freq_factor, high_freq_factor, factor, output, decode_flag, offset=0):
+        def run(self, layer, page_size, head_dim, num_qo_heads, num_kv_heads, qo_indicies, rev_input_indptr, per_token_offset,  kqv, KVCache, k_data, v_data, rope_type, theta, original_max_position_embeddings, low_freq_factor, high_freq_factor, factor, output, decode_flag, offset=0):
             
             # with prof_marker("RopeAppendCuda: GetKVCache"):
                 # k_data, v_data = KVCache.get_whole_kv_data(layer)\
@@ -358,8 +358,9 @@ class RopeAppend_Layer(Operations):
         self.layer = layer
         self.inputs = operator_device.inputs
         self.outputs = operator_device.outputs
-        # self.k_data_ptr, self.v_data_ptr = operator_device.externals["KVCache"].get_whole_kv_data(self.layer)
+        self.k_data_ptr, self.v_data_ptr = operator_device.externals["KVCache"].get_whole_kv_data(self.layer)
         self.impl = operator_device.impl
 
     def run(self):
-        self.operator_device.parent.impl.run(self.layer, self.operator_device.parent.page_size, self.operator_device.parent.head_dim, self.operator_device.parent.num_qo_heads, self.operator_device.parent.num_kv_heads, self.operator_device.parent.qo_indicies, self.operator_device.parent.rev_input_indptr, self.operator_device.parent.per_token_offset, self.inputs["kqv"].tensor, self.k_data_ptr, self.v_data_ptr, self.operator_device.parent.rope_type, self.operator_device.parent.theta, self.operator_device.parent.original_max_position_embeddings, self.operator_device.parent.low_freq_factor, self.operator_device.parent.high_freq_factor, self.operator_device.parent.factor, self.operator_device.outputs["q"].tensor, self.operator_device.parent.decode_flag, offset=0)
+        self.operator_device.parent.impl.run(self.layer, self.operator_device.parent.page_size, self.operator_device.parent.head_dim, self.operator_device.parent.num_qo_heads, self.operator_device.parent.num_kv_heads, self.operator_device.parent.qo_indicies, self.operator_device.parent.rev_input_indptr, self.operator_device.parent.per_token_offset,  self.inputs["kqv"].tensor, self.operator_device.externals["KVCache"], self.k_data_ptr, self.v_data_ptr, self.operator_device.parent.rope_type, self.operator_device.parent.theta, self.operator_device.parent.original_max_position_embeddings, self.operator_device.parent.low_freq_factor, self.operator_device.parent.high_freq_factor, self.operator_device.parent.factor, self.operator_device.outputs["q"].tensor, self.operator_device.parent.decode_flag, offset=0)
+        

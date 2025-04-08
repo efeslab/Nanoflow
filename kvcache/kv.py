@@ -17,16 +17,18 @@ class KVCacheNone():
         self.name = 'No KV Cache'
         self.cache = {}
     
-    def put(self, idx, key, value):
-        self.cache[idx] = (key, value)
+    def put(self, layer, idx, key, value):
+        self.cache[(layer, idx)] = (key, value)
 
-    def get(self, idx):
-        return self.cache.get(idx, None)
+    def get(self, layer, idx):
+        return self.cache.get((layer, idx), None)
     
     def get_whole_kv_data(self, layer: int):
         return None, None
     def get_whole_kv_data_all_layers(self):
         return None, None
+    def get_indices(self, layer, idx):
+        return True
 
 class KVCacheTorch():
     def __init__(self):
@@ -36,8 +38,8 @@ class KVCacheTorch():
         self.hidden_dim = 1024
         self.max_size_per_request = 2048
     
-    def put(self, idx, key, value):
-        if idx not in self.cache:
+    def put(self, layer, idx, key, value):
+        if (layer, idx) not in self.cache:
             reserved_key = torch.empty((self.max_size_per_request, self.hidden_dim), dtype=key.dtype, device=key.device)
             reserved_value = torch.empty((self.max_size_per_request, self.hidden_dim), dtype=value.dtype, device=value.device)
             
@@ -46,27 +48,35 @@ class KVCacheTorch():
             reserved_value[:value.shape[0]] = value
 
             # Store the reserved tensors in the cache.
-            self.cache[idx] = (reserved_key, reserved_value)
-            self.cache_indices[idx] = (key.shape[0], value.shape[0])
+            self.cache[(layer, idx)] = (reserved_key, reserved_value)
+            self.cache_indices[(layer, idx)] = (key.shape[0], value.shape[0])
+            # print(f"put the request {layer}, {idx}")
 
         else:
-            old_key, old_value = self.cache[idx]
-            key_offset, value_offset = self.cache_indices[idx]
+            old_key, old_value = self.cache[(layer, idx)]
+            key_offset, value_offset = self.cache_indices[(layer, idx)]
             assert key_offset + key.shape[0] <= self.max_size_per_request, "Key size exceeds maximum size"
             assert value_offset + value.shape[0] <= self.max_size_per_request, "Value size exceeds maximum size"
             old_key[key_offset:key_offset + key.shape[0]] = key
             old_value[value_offset:value_offset + value.shape[0]] = value
-            self.cache_indices[idx] = (key_offset + key.shape[0], value_offset + value.shape[0])
+            self.cache_indices[(layer, idx)] = (key_offset + key.shape[0], value_offset + value.shape[0])
             
-    def get(self, idx):
-        if idx in self.cache:
-            reserved_key, reserved_value = self.cache[idx]
-            key_offset, value_offset = self.cache_indices[idx]
+    def get(self, layer, idx):
+        # print(f"find the request {layer}, {idx}")
+        if (layer, idx) in self.cache:
+            # print(f"{layer, idx} is in kv cache.")
+            reserved_key, reserved_value = self.cache[(layer, idx)]
+            key_offset, value_offset = self.cache_indices[(layer, idx)]
             return reserved_key[:key_offset], reserved_value[:value_offset]
+        # print(f"{layer, idx} is not in kv cache.")
         return None
     
-    def get_indices(self, idx):
-        return self.cache_indices.get(idx, None)
+    def get_indices(self, layer, idx):
+        return self.cache_indices.get((layer, idx), None)
+    def get_whole_kv_data(self, layer: int):
+        return None, None
+    def get_whole_kv_data_all_layers(self):
+        return None, None
 
 class DistKVPool:
     """
