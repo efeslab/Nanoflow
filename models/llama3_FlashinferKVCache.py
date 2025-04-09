@@ -38,7 +38,22 @@ class Pipeline():
         self.batch_size = 7
         self.layer = 32
         self.actual_layer_range = [i for i in range(self.layer)]
+        self.num_devices = torch.cuda.device_count()
         self.page_size = 64
+        self.configuration = {
+            "num_kv_heads": self.num_kv_heads,
+            "num_qo_heads": self.num_qo_heads,
+            "kqv_heads": self.kqv_heads,
+            "head_dim": self.head_dim,
+            "vocab_size": self.vocab_size,
+            "hidden_dim": self.hidden_dim,
+            "intermediate_dim": self.intermediate_dim,
+            "batch_size": self.batch_size,
+            "layer": self.layer,
+            "actual_layer_range": self.actual_layer_range,
+            "num_devices": self.num_devices,
+            "page_size": self.page_size
+        }
 
     def init(self, weight_path):
         self.init_external_data()
@@ -50,134 +65,85 @@ class Pipeline():
 
     def init_external_data(self):
         self.kv_pool = DistKVPool(self.layer, self.num_kv_heads, self.head_dim, 4096, self.page_size, 1)
-
         self.batched_kv_cache = BatchedDistKVCache(self.kv_pool)
 
     def init_operations(self):
         self.global_input    = GlobalInput("GlobalInput").first_only()
-        self.global_input_devices = self.global_input.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
-        self.global_input_layers_per_device = []
-        for i in range(torch.cuda.device_count()):
-            self.global_input_layers_per_device.append([GlobalInput_Layer(0, self.global_input_devices[i])])
+        self.global_input_devices, self.global_input_layers_per_device = self.global_input.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
 
         self.gen_embedding  = GenEmbedding("GenEmbedding").setWeightName("model.embed_tokens.weight").first_only()
-        self.gen_embedding_devices = self.gen_embedding.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
-        self.gen_embedding_layers_per_device = []
-        for i in range(torch.cuda.device_count()):
-            self.gen_embedding_layers_per_device.append(self.gen_embedding_devices[i].expand_layer([0]))
+        self.gen_embedding_devices, self.gen_embedding_layers_per_device = self.gen_embedding.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
 
         self.layerNormAttn   = LayerNorm("LayerNormAttn").setWeightName("model.layers.{layer}.input_layernorm.weight")
-        self.layerNormAttn_devices = self.layerNormAttn.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
-        self.layerNormAttn_layers_per_device = []
-        for i in range(torch.cuda.device_count()):
-            self.layerNormAttn_layers_per_device.append(self.layerNormAttn_devices[i].expand_layer(self.actual_layer_range))
+        self.layerNormAttn_devices, self.layerNormAttn_layers_per_device = self.layerNormAttn.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
 
         self.kqv             = GEMM("KQV").setWeightName([
             "model.layers.{layer}.self_attn.k_proj.weight",
             "model.layers.{layer}.self_attn.v_proj.weight",
             "model.layers.{layer}.self_attn.q_proj.weight"
         ])
-        self.kqv_devices = self.kqv.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
-        self.kqv_layers_per_device = []
-        for i in range(torch.cuda.device_count()):
-            self.kqv_layers_per_device.append(self.kqv_devices[i].expand_layer(self.actual_layer_range))
+        self.kqv_devices, self.kqv_layers_per_device = self.kqv.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
 
         self.ropeAppend      = RopeAppend("RopeAppend")
         self.ropeAppend.externals["KVCache"] = self.batched_kv_cache
         self.ropeAppend.externals["k_data"], self.ropeAppend.externals["v_data"] = self.batched_kv_cache.get_whole_kv_data_all_layers()
-        self.ropeAppend_devices = self.ropeAppend.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
-        self.ropeAppend_layers_per_device_per_device = []
-        for i in range(torch.cuda.device_count()):
-            self.ropeAppend_layers_per_device_per_device.append(self.ropeAppend_devices[i].expand_layer(self.actual_layer_range))
+        self.ropeAppend_devices, self.ropeAppend_layers_per_device = self.ropeAppend.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+
 
         self.decAttn         = DecAttn("DecAttn")
         self.decAttn.externals["KVCache"] = self.batched_kv_cache
-        self.decAttn_devices = self.decAttn.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
-        self.decAttn_layers_per_device = []
-        for i in range(torch.cuda.device_count()):
-            self.decAttn_layers_per_device.append(self.decAttn_devices[i].expand_layer(self.actual_layer_range))
+        self.decAttn_devices, self.decAttn_layers_per_device = self.decAttn.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
 
         self.pfAttn          = PFAttn("PFAttn")
         self.pfAttn.externals["KVCache"] = self.batched_kv_cache
-        self.pfAttn_devices = self.pfAttn.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
-        self.pfAttn_layers_per_device = []
-        for i in range(torch.cuda.device_count()):
-            self.pfAttn_layers_per_device.append(self.pfAttn_devices[i].expand_layer(self.actual_layer_range))
+        self.pfAttn_devices, self.pfAttn_layers_per_device = self.pfAttn.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
 
         self.o               = GEMM("O", True).setWeightName("model.layers.{layer}.self_attn.o_proj.weight")
-        self.o_devices = self.o.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
-        self.o_layers_per_device = []
-        for i in range(torch.cuda.device_count()):
-            self.o_layers_per_device.append(self.o_devices[i].expand_layer(self.actual_layer_range))
+        self.o_devices, self.o_layers_per_device = self.o.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
 
         self.layerNormFFN    = LayerNorm("LayerNormFFN").setWeightName("model.layers.{layer}.post_attention_layernorm.weight")
-        self.layerNormFFN_devices = self.layerNormFFN.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
-        self.layerNormFFN_layers_per_device = []
-        for i in range(torch.cuda.device_count()):
-            self.layerNormFFN_layers_per_device.append(self.layerNormFFN_devices[i].expand_layer(self.actual_layer_range))
+        self.layerNormFFN_devices, self.layerNormFFN_layers_per_device = self.layerNormFFN.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
 
         self.ug              = GEMM("UG").setWeightName([
             "model.layers.{layer}.mlp.up_proj.weight",
             "model.layers.{layer}.mlp.gate_proj.weight"
         ])
-        self.ug_devices = self.ug.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
-        self.ug_layers_per_device = []
-        for i in range(torch.cuda.device_count()):
-            self.ug_layers_per_device.append(self.ug_devices[i].expand_layer(self.actual_layer_range))
+        self.ug_devices, self.ug_layers_per_device = self.ug.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
 
         self.activation      = Activation("Activation")
-        self.activation_devices = self.activation.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
-        self.activation_layers_per_device = []
-        for i in range(torch.cuda.device_count()):
-            self.activation_layers_per_device.append(self.activation_devices[i].expand_layer(self.actual_layer_range))
+        self.activation_devices, self.activation_layers_per_device = self.activation.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
 
         self.d               = GEMM("D", True).setWeightName("model.layers.{layer}.mlp.down_proj.weight")
-        self.d_devices = self.d.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
-        self.d_layers_per_device = []
-        for i in range(torch.cuda.device_count()):
-            self.d_layers_per_device.append(self.d_devices[i].expand_layer(self.actual_layer_range))
+        self.d_devices, self.d_layers_per_device = self.d.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
 
 
-        self.getLogits       = GEMM("GetLogits").setWeightName("lm_head.weight")
-        self.getLogits.last_layer_only = True
-        self.getLogits_devices = self.getLogits.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
-        self.getLogits_layers_per_device = []
-        for i in range(torch.cuda.device_count()):
-            self.getLogits_layers_per_device.append([GEMM_Layer(self.actual_layer_range[-1], self.getLogits_devices[i])])
+        self.getLogits       = GEMM("GetLogits").setWeightName("lm_head.weight").last_only()
+        self.getLogits_devices, self.getLogits_layers_per_device = self.getLogits.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
 
 
-        self.modelLayerNorm  = LayerNorm("ModelLayerNorm").setWeightName("model.norm.weight")
-        self.modelLayerNorm.last_layer_only = True
-        self.modelLayerNorm_devices = self.modelLayerNorm.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
-        self.modelLayerNorm_layers_per_device = []
-        for i in range(torch.cuda.device_count()):
-            self.modelLayerNorm_layers_per_device.append([LayerNorm_Layer(self.actual_layer_range[-1], self.modelLayerNorm_devices[i])])
+        self.modelLayerNorm  = LayerNorm("ModelLayerNorm").setWeightName("model.norm.weight").last_only()
+        self.modelLayerNorm_devices, self.modelLayerNorm_layers_per_device = self.modelLayerNorm.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
 
-        self.sample          = Sampling("Sampling")
-        self.sample.last_layer_only = True
-        self.sample_devices = self.sample.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
-        self.sample_layers_per_device = []
-        for i in range(torch.cuda.device_count()):
-            self.sample_layers_per_device.append([Sampling_Layer(self.actual_layer_range[-1], self.sample_devices[i])])
+        self.sample          = Sampling("Sampling").last_only()
+        self.sample_devices, self.sample_layers_per_device = self.sample.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
 
-        self.global_output   = GlobalOutput("GlobalOutput")
-        self.global_output.last_layer_only = True
-        self.global_output_devices = self.global_output.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
-        self.global_output_layers_per_device = []
-        for i in range(torch.cuda.device_count()):
-            self.global_output_layers_per_device.append([GlobalOutput_Layer(self.actual_layer_range[-1], self.global_output_devices[i])])
+        self.global_output   = GlobalOutput("GlobalOutput").last_only()
+        self.global_output_devices, self.global_output_layers_per_device = self.global_output.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+
+        self.copy_embedding = Copy("CopyEmbedding")
+        self.copy_embedding_devices = self.copy_embedding.expand_gpu(self.num_devices)
 
         self.copy_o = Copy("CopyO")
-        self.copy_o_devices = self.copy_o.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
-        self.copy_d = Copy("CopyD")
-        self.copy_d_devices = self.copy_d.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
-        self.redist_p = Redist("RedistPartition", RedistMode.PARTITION)
-        self.redist_p_devices = self.redist_p.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
-        self.redist_a = Redist("RedistAggregation", RedistMode.AGGREGATE)
-        self.redist_a_devices = self.redist_a.expand_gpu([torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())])
+        self.copy_o_devices = self.copy_o.expand_gpu(self.num_devices)
 
-      
-        self.virtual_operation_list = [self.copy_o, self.copy_d, self.redist_p, self.redist_a]
+        self.copy_d = Copy("CopyD")
+        self.copy_d_devices = self.copy_d.expand_gpu(self.num_devices)
+
+        self.redist_p = Redist("RedistPartition", RedistMode.PARTITION)
+        self.redist_p_devices = self.redist_p.expand_gpu(self.num_devices)
+
+        self.redist_a = Redist("RedistAggregation", RedistMode.AGGREGATE)
+        self.redist_a_devices = self.redist_a.expand_gpu(self.num_devices)
 
         # Save operations in an instance variable
         self.operation_list = [
@@ -185,32 +151,14 @@ class Pipeline():
             self.decAttn, self.pfAttn, self.o, self.layerNormFFN, self.ug, self.activation, self.d,
             self.modelLayerNorm, self.getLogits, self.sample, self.global_output
         ]
+        self.virtual_operation_list = [self.copy_o, self.copy_d, self.redist_p, self.redist_a]
 
         self.operation_layers_per_device = []
-
-        for i in range(torch.cuda.device_count()):
-            layers = [
-                self.global_input_layers_per_device[i],
-                self.gen_embedding_layers_per_device[i],
-                self.layerNormAttn_layers_per_device[i],
-                self.kqv_layers_per_device[i],
-                self.ropeAppend_layers_per_device_per_device[i],  # Seems like a typo: consider fixing the name
-                self.decAttn_layers_per_device[i],
-                self.pfAttn_layers_per_device[i],
-                self.o_layers_per_device[i],
-                self.layerNormFFN_layers_per_device[i],
-                self.ug_layers_per_device[i],
-                self.activation_layers_per_device[i],
-                self.d_layers_per_device[i],
-                self.modelLayerNorm_layers_per_device[i],
-                self.getLogits_layers_per_device[i],
-                self.sample_layers_per_device[i],
-                self.global_output_layers_per_device[i]
-            ]
-            self.operation_layers_per_device.append(layers)
-
-
-        # self.all_operations_layers = [item for operation_layers in self.operation_layers_list for item in operation_layers]
+        for i in range(self.num_devices):
+            op_layers = []
+            for operation in self.operation_list:
+                op_layers.extend(operation.op_layers_per_device[i])
+            self.operation_layers_per_device.append(op_layers)
     
     def init_dependency(self):
         self.global_input.outputs["tokens"] >> self.gen_embedding.inputs["token"]
@@ -270,7 +218,7 @@ class Pipeline():
     
     
     def init_executor(self):
-        self.executor = Executor(self.operation_list, self.operation_layers_per_device[0], self.layer)
+        self.executor = Executor(self.operation_layers_per_device[0], self.layer)
         # self.executor.plan_layer_ordering()
         self.executor.plan_layer_ordering_using_operator_layers()
 

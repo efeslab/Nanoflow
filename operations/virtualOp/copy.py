@@ -1,15 +1,20 @@
 from operations.operation_base import Operations
-from core.IOWrapper import IOWrapper, IOBufferType
+from core.IOWrapper import IOWrapper
 from core.IOWrapper import IOWrapper_Device
 
 
 class Copy(Operations):
     """Virtual copy operation for memory sharing between multiple consumers"""
-    def __init__(self, name):
+    def __init__(self, name, num_outputs=1):
         super().__init__(name)
         self.name = name
         self.isVirtual = True
-        self.io = IOWrapper(self, "io", IOBufferType.FULL)
+        self.inputs = {
+            "input": IOWrapper(self, "input")
+        }
+        self.outputs = dict([(f"output_{i}", IOWrapper(self, f"output_{i}")) for i in range(num_outputs)])
+        self.io = IOWrapper(self, "io")
+        self.op_device = Copy_Device
         
     def check(self):
         if len(self.io.prev) == 0:
@@ -21,20 +26,11 @@ class Copy(Operations):
         # Get input shape from connected predecessor
         self.io.shape = self.io.prev[0].shape
 
-    def expand_gpu(self, gpu_list):
-        for i in gpu_list:
-            i_str = str(i)
-            name = self.name + "_" + i_str
-            op_device = Copy_Device(self, self.name, i)
-            self.children.append(op_device)
-        
-        return self.children
-
 class Copy_Device(Copy):
     def __init__(self, op_general, name, device):
         super().__init__(name)
         self.base_io = op_general.io
-        self.io = IOWrapper_Device(owner=self,name=self.base_io.name, IOtype=self.base_io.IOtype, dtype=self.base_io.dtype)
+        self.io = IOWrapper_Device(owner=self,name=self.base_io.name, dtype=self.base_io.dtype)
         self.base_io.append_child(self.io)
 
     def setBatchSize(self, wrapper):

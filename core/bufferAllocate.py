@@ -1,7 +1,7 @@
 import torch
 import matplotlib.pyplot as plt
 import networkx as nx
-from core.IOWrapper import IOWrapper, IOBufferType
+from core.IOWrapper import IOWrapper
 from operations.virtualOp.copy import Copy
 from operations.virtualOp.redist import Redist, RedistMode
 from utils.graph_plot import plot_graph_topological, draw_graphs_subplots
@@ -232,7 +232,6 @@ class BufferAllocator():
             tensor = torch.empty(alloc_node.children[device_id].shape, dtype=alloc_node.dtype, device=f"cuda:{device_id}")
             self.total_allocated += tensor.numel() * tensor.element_size()
 
-           
             allocate_info.append(shape)
             
             for semi_root in semi_root_nodes:

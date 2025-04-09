@@ -5,7 +5,7 @@ import time
 from utils.prof_marker import prof_marker
 import platform_config
 from operations.operation_base import Operations, Operation_Device, Operation_Layer
-from core.IOWrapper import IOWrapper, IOBufferType
+from core.IOWrapper import IOWrapper
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none, process_weight_layer
 from operations.impl_base import OperationImpl
@@ -58,15 +58,15 @@ class GEMM(Operations):
         super().__init__(name)
         if bias:
             self.inputs = {
-                "A": IOWrapper(self, 'A', IOBufferType.FULL),
-                "C": IOWrapper(self, 'C', IOBufferType.FULL)
+                "A": IOWrapper(self, 'A'),
+                "C": IOWrapper(self, 'C')
             }
         else:
             self.inputs = {
-                "A": IOWrapper(self, 'A', IOBufferType.FULL)
+                "A": IOWrapper(self, 'A')
             }
         self.outputs = {
-            "D": IOWrapper(self, 'D', IOBufferType.FULL)
+            "D": IOWrapper(self, 'D')
         }
         self.weights = {
             "B": WeightWrapper()
@@ -79,6 +79,7 @@ class GEMM(Operations):
             self.beta = 0.0
         self.impl_map = {}
         self.init_impl_map()
+        self.op_device = GEMM_Device
 
     def setParameter(self, alpha = 1, beta = 0):
         self.alpha = alpha
@@ -186,19 +187,11 @@ class GEMM(Operations):
         # device = torch.cuda.current_device()
         # reserved_memory = torch.cuda.memory_reserved(device)
         # print(f"Reserved memory: {reserved_memory / 1024 / 1024} MB")
-
-    def expand_gpu(self, gpu_list):
-        for i in gpu_list:
-            i_str = str(i)
-            name = self.name + "_" + i_str
-            op_device = GEMM_Device(self, self.name, i)
-            self.children.append(op_device)
-        
-        return self.children
     
 class GEMM_Device(Operation_Device):
     def __init__(self, op_general, name, device):
         super().__init__(op_general, name, device)
+        self.op_layer = GEMM_Layer
 
     def setBatchSize(self, M):
         self.M = M
@@ -210,13 +203,6 @@ class GEMM_Device(Operation_Device):
             self.inputs["C"].shape = (self.M, self.parent.N)
         self.outputs["D"].shape = (self.M, self.parent.N)
         
-        
-    def expand_layer(self, layer_list):
-        for i in layer_list:
-            op_layer = GEMM_Layer(i, self)
-            self.children.append(op_layer)
-        
-        return self.children
 
 class GEMM_Layer(Operation_Layer):
     def __init__(self, layer, operator_device):

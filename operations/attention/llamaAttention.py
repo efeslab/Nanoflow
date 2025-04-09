@@ -4,7 +4,7 @@ import time
 from operations.operation_base import Operations, Operation_Device, Operation_Layer
 from utils.prof_marker import prof_marker
 import platform_config
-from core.IOWrapper import IOWrapper, IOBufferType
+from core.IOWrapper import IOWrapper
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none, process_weight_layer
 from operations.impl_base import OperationImpl
@@ -124,10 +124,10 @@ class DecAttn(Operations):
     def __init__(self, name):
         super().__init__(name)
         self.inputs = {
-            "Q": IOWrapper(self, 'Q', IOBufferType.ContinousPartition),
+            "Q": IOWrapper(self, 'Q')
         }
         self.outputs = {
-            "output": IOWrapper(self, 'output', IOBufferType.ContinousPartition)
+            "output": IOWrapper(self, 'output')
         }
         self.externals = {
             "KVCache": None
@@ -135,6 +135,7 @@ class DecAttn(Operations):
         self.impl_map = {}
         self.init_impl_map()
         self.batched_decode_wrapper = None
+        self.op_device = DecAttn_Device
 
     def init_impl_map(self):
         self.add_impl(DecAttnTorchImpl)
@@ -161,31 +162,16 @@ class DecAttn(Operations):
     def run(self, layer):
         Q = self.inputs["Q"].tensor
         self.impl.run(layer, self.head_dim, self.num_qo_heads, self.num_kv_heads, self.qo_indicies, Q, self.externals["KVCache"], self.outputs["output"].tensor)
-
-    def expand_gpu(self, gpu_list):
-        for i in gpu_list:
-            i_str = str(i)
-            name = self.name + "_" + i_str
-            op_device = DecAttn_Device(self, self.name, i)
-            self.children.append(op_device)
-        
-        return self.children
     
 class DecAttn_Device(Operation_Device):
     def __init__(self, op_general, name, device):
-        super().__init__(op_general, name, device)    
+        super().__init__(op_general, name, device)
+        self.op_layer = DecAttn_Layer 
 
     def setBatchSize(self, batch_size):
         self.batch_size = batch_size
         self.inputs["Q"].shape = (self.batch_size, self.parent.num_qo_heads, self.parent.head_dim)
         self.outputs["output"].shape = (self.batch_size, self.parent.num_qo_heads * self.parent.head_dim)
-
-    def expand_layer(self, layer_list):
-        for i in layer_list:
-            op_layer = DecAttn_Layer(i, self)
-            self.children.append(op_layer)
-        
-        return self.children
 
 class DecAttn_Layer(Operation_Layer):
     def __init__(self, layer, operator_device):
@@ -339,10 +325,10 @@ class PFAttn(Operations):
     def __init__(self, name):
         super().__init__(name)
         self.inputs = {
-            "Q": IOWrapper(self, 'Q', IOBufferType.ContinousPartition),
+            "Q": IOWrapper(self, 'Q'),
         }
         self.outputs = {
-            "output": IOWrapper(self, 'output', IOBufferType.ContinousPartition)
+            "output": IOWrapper(self, 'output')
         }
         # Note: for consistency with other operators (like RopeAppend), we expect the external KV cache to be
         # available as "KVCache". If needed, you can change the key name.
@@ -351,6 +337,7 @@ class PFAttn(Operations):
         }
         self.impl_map = {}
         self.init_impl_map()
+        self.op_device = PFAttn_Device
 
     def init_impl_map(self):
         self.add_impl(PFAttnTorchImpl)
@@ -424,30 +411,18 @@ class PFAttn(Operations):
     def run(self, layer):
         Q = self.inputs["Q"].tensor
         self.impl.run(layer, self.head_dim, self.num_qo_heads, self.num_kv_heads, self.qo_indicies, Q, self.externals["KVCache"], self.outputs["output"].tensor)
-    
-    def expand_gpu(self, gpu_list):
-        for i in gpu_list:
-            i_str = str(i)
-            name = self.name + "_" + i_str
-            op_device = PFAttn_Device(self, self.name, i)
-            self.children.append(op_device)
-        
-        return self.children
+
     
 class PFAttn_Device(Operation_Device):
     def __init__(self, op_general, name, device):
-        super().__init__(op_general, name, device)    
+        super().__init__(op_general, name, device)
+        self.op_layer = PFAttn_Layer  
     
     def setBatchSize(self, batch_size):
         self.batch_size = batch_size
         self.inputs["Q"].shape = (self.batch_size, self.parent.num_qo_heads, self.parent.head_dim)
         self.outputs["output"].shape = (self.batch_size, self.parent.num_qo_heads * self.parent.head_dim)
-    def expand_layer(self, layer_list):
-        for i in layer_list:
-            op_layer = PFAttn_Layer(i, self)
-            self.children.append(op_layer)
-        
-        return self.children
+
 
 class PFAttn_Layer(Operation_Layer):
     def __init__(self, layer, operator_device):

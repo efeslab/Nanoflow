@@ -1,6 +1,6 @@
 import torch
 from operations.operation_base import Operations
-from core.IOWrapper import IOWrapper, IOBufferType
+from core.IOWrapper import IOWrapper
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none, process_weight_layer
 
@@ -8,10 +8,10 @@ class AllReduce(Operations):
     def __init__(self, name, nranks):
         super().__init__(name)
         self.inputs = {
-            "input": IOWrapper(self, 'input', IOBufferType.FULL)
+            "input": IOWrapper(self, 'input')
         }
         self.outputs = {
-            "output": IOWrapper(self, 'output', IOBufferType.FULL)
+            "output": IOWrapper(self, 'output')
         }
         self.nranks = nranks
     

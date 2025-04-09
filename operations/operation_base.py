@@ -82,6 +82,9 @@ class Operations:
     def setWeightName(self, name):
         self.weight_name = name
         return self
+
+    def setShape(self, config):
+        pass
     
     def processWeight(self, global_weight_map, total_layers, cached = False):
         return process_weight_none(global_weight_map, self.weight_name, None, total_layers, cached)
@@ -135,14 +138,32 @@ class Operations:
     def __str__(self):
         return self.name   
     
-    def expand_gpu(self, gpu_list):
+    def expand_gpu(self, num_devices):
+        gpu_list = [torch.device(f"cuda:{i}") for i in range(num_devices)]
         for i in gpu_list:
             i_str = str(i)
             name = self.name + "_" + i_str
-            op_device = Operation_Device(self, name, i)
+            op_device = self.op_device(self, self.name, i)
             self.children.append(op_device)
         
         return self.children
+    
+    def expand_gpu_and_layers(self, num_devices, layer_list):
+        gpu_list = [torch.device(f"cuda:{i}") for i in range(num_devices)]
+        self.op_layers_per_device = []
+        for i in gpu_list:
+            i_str = str(i)
+            name = self.name + "_" + i_str
+            op_device = self.op_device(self, self.name, i)
+            if self.first_layer_only:
+                layer_list = [layer_list[0]]
+            elif self.last_layer_only:
+                layer_list = [layer_list[-1]]
+        
+            self.op_layers_per_device.append(op_device.expand_layer(layer_list))
+            self.children.append(op_device)
+        
+        return self.children, self.op_layers_per_device
     
 class Operation_Device(Operations):
     def __init__(self, op_general, name, device):
@@ -158,7 +179,6 @@ class Operation_Device(Operations):
             dev_wrapper = IOWrapper_Device(
                 owner=self,
                 name=base_wrapper.name,
-                IOtype=base_wrapper.IOtype,
                 dtype=base_wrapper.dtype
             )
             base_wrapper.append_child(dev_wrapper)
@@ -169,7 +189,6 @@ class Operation_Device(Operations):
             dev_wrapper = IOWrapper_Device(
                 owner=self,
                 name=base_wrapper.name,
-                IOtype=base_wrapper.IOtype,
                 dtype=base_wrapper.dtype
             )
             base_wrapper.append_child(dev_wrapper)
@@ -177,13 +196,13 @@ class Operation_Device(Operations):
     
     def expand_layer(self, layer_list):
         for i in layer_list:
-            op_layer = Operation_Layer(self, self.name + "_" + str(i), i, self.device)
+            op_layer = self.op_layer(i, self)
             self.children.append(op_layer)
         
         return self.children
 
 class Operation_Layer(Operation_Device):
-    def __init__(self, op_general, name, layer, device):
+    def __init__(self, op_device, name, layer, device):
         super().__init__(name)
         self.layer = layer
         self.inputs = {}
@@ -192,6 +211,6 @@ class Operation_Layer(Operation_Device):
         self.externals = {}
         self.impl:OperationImpl = None
         self.device = device
-        self.parent = op_general
+        self.parent = op_device
 
     

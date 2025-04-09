@@ -2,7 +2,7 @@ import torch
 import time
 import platform_config
 from operations.operation_base import Operations, Operation_Device, Operation_Layer
-from core.IOWrapper import IOWrapper, IOBufferType
+from core.IOWrapper import IOWrapper
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none, process_weight_layer
 
@@ -27,13 +27,14 @@ class Sampling(Operations):
     def __init__(self, name):
         super().__init__(name)
         self.inputs = {
-            "logits": IOWrapper(self, 'logits', IOBufferType.FULL)
+            "logits": IOWrapper(self, 'logits')
         }
         self.outputs = {
-            "tokens": IOWrapper(self, 'tokens', IOBufferType.FULL, dtype=torch.int32)
+            "tokens": IOWrapper(self, 'tokens', dtype=torch.int32)
         }
         self.impl_map = {}
         self.init_impl_map()
+        self.op_device = Sampling_Device
     
     def init_impl_map(self):
         self.add_impl(SamplingTorchImpl)
@@ -84,18 +85,10 @@ class Sampling(Operations):
 
         self.impl.run(logits, self.outputs["tokens"].tensor)
 
-    def expand_gpu(self, gpu_list):
-        for i in gpu_list:
-            i_str = str(i)
-            name = self.name + "_" + i_str
-            op_device = Sampling_Device(self, self.name, i)
-            self.children.append(op_device)
-        
-        return self.children
-
 class Sampling_Device(Operation_Device):
     def __init__(self, op_general, name, device):
-        super().__init__(op_general, name, device)     
+        super().__init__(op_general, name, device)
+        self.op_layer = Sampling_Layer   
 
     def setBatchSize(self, batch_size):
         self.batch_size = batch_size

@@ -2,7 +2,7 @@ import torch
 import time
 import platform_config
 from operations.operation_base import Operations, Operation_Device, Operation_Layer
-from core.IOWrapper import IOWrapper, IOBufferType
+from core.IOWrapper import IOWrapper
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none, process_weight_layer
 
@@ -28,16 +28,17 @@ class LayerNorm(Operations):
     def __init__(self, name):
         super().__init__(name)
         self.inputs = {
-            "input": IOWrapper(self, 'input', IOBufferType.FULL),
+            "input": IOWrapper(self, 'input'),
         }
         self.outputs = {
-            "output": IOWrapper(self, 'output', IOBufferType.FULL)
+            "output": IOWrapper(self, 'output')
         }
         self.weights = {
             "weight": WeightWrapper(),
         }
         self.impl_map = {}
         self.init_impl_map()
+        self.op_device = LayerNorm_Device
 
     def init_impl_map(self):
         self.add_impl(LayerNormTorchImpl)
@@ -91,31 +92,17 @@ class LayerNorm(Operations):
     
     def processWeight(self, global_weight_map, total_layers, cached = False):
         return process_weight_layer(global_weight_map, self.weight_name, self.weights["weight"], total_layers, cached)
-        
-    def expand_gpu(self, gpu_list):
-        for i in gpu_list:
-            i_str = str(i)
-            name = self.name + "_" + i_str
-            op_device = LayerNorm_Device(self, self.name, i)
-            self.children.append(op_device)
-        
-        return self.children
+
     
 class LayerNorm_Device(Operation_Device):
     def __init__(self, op_general, name, device):
         super().__init__(op_general, name, device)
+        self.op_layer = LayerNorm_Layer
 
     def setBatchSize(self, batch_size):
         self.batch_size = batch_size
         self.inputs["input"].shape = (self.batch_size, self.parent.hidden_dim)
         self.outputs["output"].shape = (self.batch_size, self.parent.hidden_dim)
-
-    def expand_layer(self, layer_list):
-        for i in layer_list:
-            op_layer = LayerNorm_Layer(i, self)
-            self.children.append(op_layer)
-        
-        return self.children
         
 
 class LayerNorm_Layer(Operation_Layer):

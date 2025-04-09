@@ -5,7 +5,7 @@ import time
 
 import platform_config
 from operations.operation_base import Operations, Operation_Device, Operation_Layer
-from core.IOWrapper import IOWrapper, IOBufferType
+from core.IOWrapper import IOWrapper
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none, process_weight_layer
 from operations.impl_base import OperationImpl
@@ -211,8 +211,8 @@ class RopeAppend(Operations):
             original_max_position_embeddings (int): The original maximum context length used in pretraining.
         """
         super().__init__(name)
-        self.inputs = {"kqv": IOWrapper(self, "kqv", IOBufferType.FULL)}
-        self.outputs = {"q": IOWrapper(self, "q", IOBufferType.FULL)}
+        self.inputs = {"kqv": IOWrapper(self, "kqv")}
+        self.outputs = {"q": IOWrapper(self, "q")}
         self.externals = {"KVCache": None, "k_data": None, "v_data": None}
         
         # Save RoPE configuration.
@@ -225,6 +225,7 @@ class RopeAppend(Operations):
 
         self.impl_map = {}
         self.init_impl_map()
+        self.op_device = RopeAppend_Device
 
     def init_impl_map(self):
         self.add_impl(RopeAppendTorchImpl)
@@ -319,18 +320,10 @@ class RopeAppend(Operations):
         kqv = self.inputs["kqv"].tensor
         self.impl.run(layer, self.head_dim, self.num_qo_heads, self.num_kv_heads, self.qo_indicies, self.kv_indptr, self.kv_indices, self.kv_last_page_len, self.rev_input_indptr, self.per_token_offset, kqv, self.externals["KVCache"], self.externals["k_data"], self.externals["v_data"], self.rope_type, self.theta, self.original_max_position_embeddings, self.low_freq_factor, self.high_freq_factor, self.factor, self.outputs["q"].tensor, self.decode_flag, offset=0)
     
-    def expand_gpu(self, gpu_list):
-        for i in gpu_list:
-            i_str = str(i)
-            name = self.name + "_" + i_str
-            op_device = RopeAppend_Device(self, self.name, i)
-            self.children.append(op_device)
-        
-        return self.children
-    
 class RopeAppend_Device(Operation_Device):
     def __init__(self, op_general, name, device):
         super().__init__(op_general, name, device)
+        self.op_layer = RopeAppend_Layer
 
     def setBatchSize(self, batch_size):
         self.batch_size = batch_size
@@ -343,13 +336,6 @@ class RopeAppend_Device(Operation_Device):
         # The output "q" has shape [batch_size, num_qo_heads * head_dim]
         self.outputs["q"].shape = (self.batch_size, self.parent.num_qo_heads, self.parent.head_dim)
         print("RopeAppend_Device setBatchSize:", self.inputs["kqv"].shape, self.outputs["q"].shape)
-
-    def expand_layer(self, layer_list):
-        for i in layer_list:
-            op_layer = RopeAppend_Layer(i, self)
-            self.children.append(op_layer)
-        
-        return self.children
 
 class RopeAppend_Layer(Operations):
     def __init__(self, layer, operator_device):

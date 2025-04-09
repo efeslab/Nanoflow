@@ -3,15 +3,9 @@ import numpy as np
 import torch
 from collections import defaultdict
 
-class IOBufferType(Enum):
-    FULL = 1
-    DiscontinousPartition = 2
-    ContinousPartition = 3
-    PartialSum = 4
-
 # To Do: delete the attributes that related to tensor that should not belong to a base IOWrapper anymore
 class IOWrapper:
-    def __init__(self, owner, name, IOtype, dtype=torch.float16):
+    def __init__(self, owner, name, dtype=torch.float16):
         self.owner = owner  # owner is now an Operations object or similar
         self.name = name
         self.prev = []
@@ -19,7 +13,6 @@ class IOWrapper:
         self.prev_depend_on_prev_layer = []
         self.shape = None # shape [0] is non-contiguous dimension, shape [1] is contiguous dimension
         self.ptr = 0
-        self.IOtype = IOtype
         self.tensor: torch.Tensor = None
         self.transform = None
         self.tensor_offset = 0
@@ -60,10 +53,9 @@ class IOWrapper:
     
 
 class IOWrapper_Device:
-    def __init__(self, owner, name, IOtype, dtype=torch.float16):
+    def __init__(self, owner, name, dtype=torch.float16):
         self.owner = owner  # owner is now an Operations object or similar
         self.name = name
-        self.IOtype = IOtype
         self.dtype = dtype
         self.shape = None # shape [0] is non-contiguous dimension, shape [1] is contiguous dimension
         self.tensor: torch.Tensor = None     
