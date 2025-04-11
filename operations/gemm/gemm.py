@@ -46,6 +46,8 @@ if platform_config.PLATFORM_CUDA:
                 self.beta = parameter_map["beta"]
                 bind_gemm.configGEMM(impl_tag, self.name, self.inputs["A"].children[0].tensor, self.inputs["C"].children[0].tensor, self.outputs["D"].children[0].tensor, self.M, self.N, self.K, self.alpha, self.beta)
             else:
+                # print("input A:", self.inputs["A"].children[0].tensor)
+                # print("output D:", self.outputs["D"].children[0].tensor)
                 bind_gemm.configGEMM(impl_tag, self.name, self.inputs["A"].children[0].tensor, torch.empty((self.M, self.N), dtype=torch.float16, device=self.inputs["A"].children[0].tensor.device), self.outputs["D"].children[0].tensor, self.M, self.N, self.K, self.alpha, self.beta)
 
         # def profile(self, impl_tag):
@@ -99,6 +101,8 @@ class GEMM(Operations):
         self.N = N
         self.K = K
         self.weights["B"].shape = (self.K, self.N)
+        for op_device in self.children:
+            op_device.setShapeForIOWrappers()
     
     def profile(self):
         # print("Get into profile", self.name)
@@ -189,31 +193,24 @@ class GEMM(Operations):
         # print(f"Reserved memory: {reserved_memory / 1024 / 1024} MB")
     
 class GEMM_Device(Operation_Device):
-    def __init__(self, op_general, name, device):
-        super().__init__(op_general, name, device)
+    def __init__(self, parent, device):
+        super().__init__(parent, device)
         self.op_layer = GEMM_Layer
 
-    def setBatchSize(self, M):
-        self.M = M
+    def setShapeForIOWrappers(self):
         # if self.parent.name == "O":
-        #     self.inputs["A"].shape = (self.M, 32, 128)
+        #     self.inputs["A"].init_shape((0, 32, 128))
         # else:
-        self.inputs["A"].shape = (self.M, self.parent.K)
+        self.inputs["A"].init_shape((0, self.parent.K))
         if self.parent.bias:
-            self.inputs["C"].shape = (self.M, self.parent.N)
-        self.outputs["D"].shape = (self.M, self.parent.N)
+            self.inputs["C"].init_shape((0, self.parent.N))
+        self.outputs["D"].init_shape((0, self.parent.N))
         
 
 class GEMM_Layer(Operation_Layer):
-    def __init__(self, layer, operator_device):
-        self.operator_device = operator_device
-        self.name = f"{operator_device.name}_{layer}"
-        self.layer = layer
-        self.inputs = operator_device.inputs
-        self.outputs = operator_device.outputs
-        self.weights = operator_device.weights
-        self.impl = operator_device.impl
+    def __init__(self, layer, op_device):
+        super().__init__(layer=layer, op_device=op_device)
 
     def run(self):
         with prof_marker("GEMM_run"):
-            self.operator_device.parent.impl.run(self.weights["B"].weight_map[self.layer])
+            self.parent.parent.impl.run(self.weights["B"].weight_map[self.layer])

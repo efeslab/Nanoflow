@@ -23,7 +23,7 @@ ElementInputB* gemm_weight = nullptr;
 ElementOutput* gemm_bias = nullptr;
 ElementOutput* gemm_output = nullptr;
 
-void configGEMM(const std::string& gemm_tag, const std::string& gemm_name, torch::Tensor Input_A, torch::Tensor Input_C, torch::Tensor Output_D,int M, int N, int K, float alpha, float beta) {
+void configGEMM(const std::string& gemm_tag, const std::string& gemm_name, torch::Tensor Input_A, torch::Tensor Input_C, torch::Tensor Output_D, int M, int N, int K, float alpha, float beta) {
 
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 

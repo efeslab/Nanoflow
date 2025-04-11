@@ -1,9 +1,10 @@
 import torch
 import matplotlib.pyplot as plt
 import networkx as nx
+import re
+import sympy as sp
 from core.IOWrapper import IOWrapper
-from operations.virtualOp.copy import Copy
-from operations.virtualOp.redist import Redist, RedistMode
+from operations.virtualOp.virtual_ops import Copy, Copy_Device, Redist, Redist_Device
 from utils.graph_plot import plot_graph_topological, draw_graphs_subplots
 
 class BufferAllocator():
@@ -28,10 +29,58 @@ class BufferAllocator():
         G = nx.DiGraph()
         for wrapper in self.buffers_list:
             G.add_node(wrapper.fullName, wrapper=wrapper)
+            print(f"add node {wrapper.fullName}")
         for wrapper in self.buffers_list:
             for next_wrapper in wrapper.next:
                 G.add_edge(wrapper.fullName, next_wrapper.fullName)
+                print(f"add edge {wrapper.fullName} -> {next_wrapper.fullName}")
         self.full_graph = G
+    
+    def set_all_batchsize_by_linear_programming(self):
+        variables = {}
+        equations = []
+        for wrapper in self.buffers_list:
+            # create a new variable for each wrapper
+            variables[wrapper.fullName] = sp.symbols(wrapper.fullName)
+            if wrapper.shape is not None:
+                # assert wrapper.shape[0] > 0, f"{wrapper.fullName} has no shape"
+                equations.append(sp.Eq(variables[wrapper.fullName], wrapper.shape[0]))
+                print(f"add equation {wrapper.fullName} = {wrapper.shape[0]}")
+        
+        # build the equations
+        for wrapper in self.buffers_list:
+        # if the wrapper is input, build the equation inside the op (Redist will only execute once)
+            if wrapper.is_input_wrapper:
+                if isinstance(wrapper.owner, Redist_Device) and len(wrapper.next) > 0:
+                    # for Redist_Device, we need to build the equation for each input and output
+                    input_symbols = [variables[input_wrapper.fullName] for input_wrapper in wrapper.owner.inputs.values()]
+                    output_symbols = [variables[output_wrapper.fullName] for output_wrapper in wrapper.next]
+                    print(f"add equation {wrapper.fullName}: {input_symbols} = {output_symbols}")
+                    equations.append(sp.Eq(sum(input_symbols), sum(output_symbols)))
+                else:
+                    # for the case of real op and Copy, the relationship is all the same buffer.
+                    for output_wrapper in wrapper.owner.outputs.values():
+                        print(f"add equation {wrapper.fullName} = {output_wrapper.fullName}")
+                        equations.append(sp.Eq(variables[wrapper.fullName], variables[output_wrapper.fullName]))
+
+            # all links between the ops
+            if wrapper.is_output_wrapper:
+                assert len(wrapper.next) <= 1, f"{wrapper.fullName} has more than one next connections!\n"
+                for next_wrapper in wrapper.next:
+                    print(f"add equation {wrapper.fullName} = {next_wrapper.fullName}")
+                    equations.append(sp.Eq(variables[wrapper.fullName], variables[next_wrapper.fullName]))
+
+        print(f"equations: {equations}")
+        # Solve the linear programming problem
+        solution = sp.solve(equations, variables)
+        print(f"solution: {solution}")
+        assert len(solution) != 0, f"The solution space is empty, please check the batchsize setting!"
+        assert len(solution) == len(variables), f"There are infinitely many solutions, please check the batchsize setting!"
+        
+        # Set the shape for each wrapper
+        for wrapper in self.buffers_list:
+            wrapper.batch_size = solution[variables[wrapper.fullName]]
+            print(f"set {wrapper.fullName} batch size to {wrapper.batch_size} with shape {wrapper.shape}")
 
     def draw_dependency_graph(self):
         # Draw full graph.
@@ -51,196 +100,94 @@ class BufferAllocator():
     def draw_allocation_subgraphs(self):
         draw_graphs_subplots(self.allocation_graph, title_prefix="Allocation")
     
-
-    def handle_virtual_ops(self, component, device_id):
-        wrappers = [self.full_graph.nodes[name]['wrapper'] for name in component]
-        virtual_ops = []
-        alloc_nodes = []
-
-        # Find all virtual operations in component
-        for wrapper in wrappers:
-            if wrapper.owner.isVirtual:
-                if not wrapper.prev[0].owner.isVirtual:
-                    alloc_nodes.append(wrapper)
-                else:
-                    virtual_ops.append(wrapper.owner)
-
-        # Only single allocation node per component
-        if len(alloc_nodes) > 1:
-            op_names = [op.name for op in alloc_nodes]
-            raise Exception(
-                f"Component contains multiple virtual operations connect to real operations output: {op_names}\n"
-            )
-        
-        if not alloc_nodes:
-            return False  
-        
-        allocate_info = []    
-
-        alloc_node = alloc_nodes[0] 
-        shape = alloc_node.children[device_id].shape
-        tensor = torch.empty(shape, dtype=alloc_node.dtype, device=f"cuda:{device_id}")
-        self.total_allocated += tensor.numel() * tensor.element_size()
-        alloc_node.children[device_id].tensor = tensor
-
-        allocate_info.append(shape)
-        allocate_info.append([alloc_node.children[device_id].fullName, alloc_node.children[device_id].tensor_offset])
-
-        if isinstance(alloc_node.owner, Copy):
-            # Share tensor with prev real nodes 
-            for p in alloc_node.prev:
-                print(f"prev: {p.fullName}") if alloc_node.owner.name == "CopyD" else None
-                p.children[device_id].tensor = tensor
-                allocate_info.append([p.children[device_id].fullName, p.children[device_id].tensor_offset])
-           
-            for n in alloc_node.next:
-                # if n is virtual operations, it will be processed later
-                if not n.owner.isVirtual:
-                    print(f"next: {n.fullName}") if alloc_node.owner.name == "CopyD" else None
-                    n.children[device_id].tensor = tensor
-                    allocate_info.append([n.children[device_id].fullName, n.children[device_id].tensor_offset])
-
-            
-        elif isinstance(alloc_node.owner, Redist):
-            if alloc_node.owner.mode == RedistMode.PARTITION:
-                # Share tensor with prev real nodes 
-                for p in alloc_node.prev:
-                    p.children[device_id].tensor = tensor
-                    allocate_info.append([p.children[device_id].fullName, p.children[device_id].tensor_offset])
-
-                # Split the tensor to its child    
-                size_for_child = [child.children[device_id].shape[0] for child in alloc_node.next]
-                assert sum(size_for_child) == shape[0], f"shape mismatch: {alloc_node.fullName} {size_for_child} vs {shape}"
-                tensor_split_list = tensor.split(size_for_child, dim=0)
-                for idx, child, tensor_split in zip(range(len(alloc_node.next)), alloc_node.next, tensor_split_list):
-                    child.children[device_id].tensor = tensor_split
-                    child.children[device_id].tensor_offset = sum(size_for_child[:idx])
-                    allocate_info.append([child.children[device_id].fullName, child.children[device_id].tensor_offset])
-                    assert child.children[device_id].shape == tensor_split.shape, f"shape mismatch: {child.fullName} {child.shape} vs {tensor_split.shape}"
-                                
-            elif alloc_node.owner.mode ==  RedistMode.AGGREGATE:
-                # Split to real prev nodes
-                split_sizes = [p.children[device_id].shape[0] for p in alloc_node.prev]
-                assert sum(split_sizes) == shape[0], f"shape mismatch: {alloc_node.fullName} {split_sizes} vs {shape}"
-                tensors = torch.split(tensor, split_sizes, dim=0)
-                for idx, p, t in zip(range(len(alloc_node.prev)), alloc_node.prev, tensors):
-                    p.children[device_id].tensor = t
-                    p.children[device_id].tensor_offset = sum(split_sizes[:idx])
-                    allocate_info.append([p.children[device_id].fullName, p.children[device_id].tensor_offset])
-                    
-                      
-                for n in alloc_node.next:
-                    # if n is virtual operations, it will be processed later
-                    if not n.owner.isVirtual:
-                        n.children[device_id].tensor = alloc_node.children[device_id].tensor
-                        allocate_info.append([n.children[device_id].fullName, n.children[device_id].tensor_offset])
-            
-
-        for virtual_op in virtual_ops:
-            node = virtual_op.io
-            if isinstance(virtual_op, Copy):
-                # If its prev node is partition, its tensor should already shared before
-                if not(isinstance(node.prev[0].owner , Redist) and RedistMode.PARTITION):
-                    node.children[device_id].tensor = node.prev[0].children[device_id].tensor
-                    node.children[device_id].tensor_offset = node.prev[0].children[device_id].tensor_offset   
-                    allocate_info.append([node.children[device_id].fullName, node.children[device_id].tensor_offset])
-
-                for n in node.next:
-                    # if n is virtual operations, it will be processed later
-                    if not n.owner.isVirtual:
-                        n.children[device_id].tensor = node.children[device_id].tensor
-                        n.children[device_id].tensor_offset = node.children[device_id].tensor_offset
-                        allocate_info.append([n.children[device_id].fullName, n.children[device_id].tensor_offset])
-
-
-            elif isinstance(virtual_op, Redist):
-                if virtual_op.mode == RedistMode.PARTITION:
-                    node.children[device_id].tensor = node.prev[0].children[device_id].tensor
-                    node.children[device_id].tensor_offset = node.prev[0].children[device_id].tensor_offset   
-                    allocate_info.append([node.children[device_id].fullName, node.children[device_id].tensor_offset])
-
-
-                    tensor = node.children[device_id].tensor
-                    offset = node.children[device_id].tensor_offset
-                    size_for_child = [child.children[device_id].shape[0] for child in node.next]
-                    assert sum(size_for_child) == shape[0], f"shape mismatch: {node.io.fullName} {size_for_child} vs {shape}"
-                    tensor_split_list = tensor.split(size_for_child, dim=0)
-                    for idx, child, tensor_split in zip(range(len(node.next)), node.next, tensor_split_list):
-                        child.children[device_id].tensor = tensor_split
-                        child.children[device_id].tensor_offset = offset + sum(size_for_child[:idx])
-                        allocate_info.append([child.children[device_id].fullName, child.children[device_id].tensor_offset])
-                        assert child.children[device_id].shape == tensor_split.shape, f"shape mismatch: {child.fullName} {child.shape} vs {tensor_split.shape}"
-                    
-                else:
-                    # Aggregation from prev nodes
-                    assert all(n.children[device_id].shape[1:] == node.prev[0].children[device_id].shape[1:] for n in node.prev), \
-                        f"Shape mismatch among inputs to {node.fullName}"
-
-                    # Sort prev nodes by tensor_offset to preserve order
-                    sorted_prev = sorted(node.prev, key=lambda x: x.tensor_offset)
-                    for i in range(len(sorted_prev) - 1):
-                        current = sorted_prev[i]
-                        next_node = sorted_prev[i + 1]
-                        assert current.tensor_offset + current.tensor.children[device_id].shape[0] == next_node.tensor_offset, \
-                            f"Invalid dependency between: {current.fullName} and {next_node.fullName}"
-
-                    # Collect tensors and offsets
-                    prev_tensors = [n.children[device_id].tensor for n in sorted_prev]
-                    node.children[device_id].tensor = torch.cat(prev_tensors, dim=0)
-
-                    # Set offset as the first input's offset (or min offset)
-                    node.children[device_id].tensor_offset = sorted_prev[0].children[device_id].tensor_offset
-                    allocate_info.append([node.children[device_id].fullName, node.children[device_id].tensor_offset])
-
-                    for n in node.next:
-                        # if n is virtual operations, it will be processed later
-                        if not n.owner.isVirtual:
-                            n.children[device_id].tensor = node.children[device_id].tensor
-                            n.children[device_id].tensor = node.children[device_id].tensor_offset
-                            allocate_info.append([n.children[device_id].fullName, n.children[device_id].tensor_offset])
-
-        self.allocate_infos.append(allocate_info)
-        return True
-    
     def allocate_buffers_for_components(self, device_id):
         self.total_allocated = 0
         self.allocate_infos = []
         components = self.get_connected_components()
         for comp in components:
+            print("component: ", comp)
             # Create a subgraph for the component:
             comp = self.full_graph.subgraph(comp)
-
+            
             if nx.is_directed_acyclic_graph(comp):
                 sorted_nodes = list(nx.topological_sort(comp))
             else:
                 raise Exception("Component must be a DAG")
-
-            if self.handle_virtual_ops(sorted_nodes, device_id):
-                continue
             
-            # Allocation logic for non-virtual components
-            wrappers = [self.full_graph.nodes[name]['wrapper'] for name in comp]
-            semi_root_nodes = [w for w in wrappers]
-            
-            if not semi_root_nodes:
-                continue
+            # Define a custom key function
+            def sort_key(node):
+                assert len(node.next) <= 1, f"Node {node.fullName} has more than one next node"
+                next_node_name = node.next[0].fullName if node.next else ""
+                # This regex captures a non-digit prefix and the subsequent numeric part.
+                match = re.match(r'(\D+)(\d+)', next_node_name)
+                if match:
+                    prefix, num = match.groups()
+                    return (prefix, int(num))
+                # Fallback: if no match, return the original string and 0
+                return (next_node_name, 0)
 
-            allocate_info = []    
+            root_nodes_name = [name for name, indeg in comp.in_degree() if indeg == 0]
+            # print(f"root_nodes_name: {root_nodes_name}")
+            root_nodes = [self.full_graph.nodes[name]['wrapper'] for name in root_nodes_name]
+            # sort these nodes by their next connections
+            sorted_root_nodes = sorted(root_nodes, key=sort_key)
+            print(f"sorted_root_nodes: {[sorted_root.fullName for sorted_root in sorted_root_nodes]}")
 
-            alloc_node = semi_root_nodes[0]
-            shape = alloc_node.children[device_id].shape
-            tensor = torch.empty(alloc_node.children[device_id].shape, dtype=alloc_node.dtype, device=f"cuda:{device_id}")
-            self.total_allocated += tensor.numel() * tensor.element_size()
+            # allocate_info = []
+            processing_queue = []
 
-            allocate_info.append(shape)
+            cum_batchsize = 0
+            # accumulate the first dimension of root nodes' shape
+            for root_node in sorted_root_nodes:
+                root_node.set_tensor_offset(cum_batchsize)
+                cum_batchsize += root_node.shape[0]
+                processing_queue.append(root_node)
             
-            for semi_root in semi_root_nodes:
-                semi_root.children[device_id].tensor = tensor
-                allocate_info.append([semi_root.children[device_id].fullName, semi_root.children[device_id].tensor_offset])
-                assert semi_root.children[device_id].shape == alloc_node.children[device_id].shape, \
-                    f"Shape mismatch: {semi_root.fullName} {semi_root.shape} vs {alloc_node.shape}"
-            
-            self.allocate_infos.append(allocate_info)
+            shape = (cum_batchsize, *sorted_root_nodes[0].shape[1:])
+            dtype = sorted_root_nodes[0].dtype
+
+            # print(f"total_size: {cum_batchsize}")
+            # print(f"shape: {shape}")
+
+            whole_buffer = torch.empty(shape, dtype=dtype, device=f"cuda:{device_id}")
+            self.total_allocated += whole_buffer.numel() * whole_buffer.element_size()
+            print(f"allocated buffer: {whole_buffer.shape} with dtype: {dtype} and device: {device_id}")
+
+            # allocate_info.append(shape)
+            while processing_queue:
+                node = processing_queue.pop(0)
+                node.set_whole_buffer(whole_buffer)
+                print("node: ", node.fullName, "with whole buffer: ", whole_buffer.shape, "tensor", node.tensor.shape,"and offset: ", node.tensor_offset)
+                next_nodes = [self.full_graph.nodes[name]["wrapper"] for name in list(self.full_graph[node.fullName])]
+                # print(f"next nodes: {[n for n in next_nodes]}")
+                for next_node in next_nodes:
+                    if isinstance(next_node.owner, Redist_Device):
+                        next_node.set_whole_buffer(whole_buffer)
+                        additional_offset = 0
+                        flag = True
+                        if next_node.is_input_wrapper:
+                            for input_wrapper in next_node.owner.inputs.values():
+                                if next_node.fullName == input_wrapper.fullName:
+                                    next_node.set_tensor_offset(node.tensor_offset + additional_offset)
+                                    if additional_offset != 0:
+                                        flag = False
+                                    break
+                                additional_offset += input_wrapper.batch_size
+                        elif next_node.is_output_wrapper:
+                            for output_wrapper in next_node.owner.outputs.values():
+                                if next_node.fullName == output_wrapper.fullName:
+                                    next_node.set_tensor_offset(node.tensor_offset + additional_offset)
+                                    break
+                                print("additional_offset: ", additional_offset, "output_wrapper: ", output_wrapper.fullName, "batch_size: ", output_wrapper.batch_size)
+                                additional_offset += output_wrapper.batch_size
+
+                        processing_queue.append(next_node) if flag else None
+
+                    else:
+                        next_node.set_whole_buffer(whole_buffer)
+                        next_node.set_tensor_offset(node.tensor_offset)
+                        assert node.batch_size == next_node.batch_size, f"Shape mismatch: {node.fullName} {node.batch_size} vs {next_node.batch_size}"
+                        processing_queue.append(next_node)
 
     def allocate_buffer(self, device_id, plot = False):
         self.allocate_buffers_for_components(device_id)

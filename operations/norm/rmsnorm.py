@@ -48,6 +48,8 @@ class LayerNorm(Operations):
     def setShape(self, hidden_dim):
         self.hidden_dim = hidden_dim
         self.weights["weight"].shape = (self.hidden_dim,)
+        for op_device in self.children:
+            op_device.setShapeForIOWrappers()
 
     def profile(self):
         # check the similarity of the outputs
@@ -95,25 +97,18 @@ class LayerNorm(Operations):
 
     
 class LayerNorm_Device(Operation_Device):
-    def __init__(self, op_general, name, device):
-        super().__init__(op_general, name, device)
+    def __init__(self, parent, device):
+        super().__init__(parent, device)
         self.op_layer = LayerNorm_Layer
 
-    def setBatchSize(self, batch_size):
-        self.batch_size = batch_size
-        self.inputs["input"].shape = (self.batch_size, self.parent.hidden_dim)
-        self.outputs["output"].shape = (self.batch_size, self.parent.hidden_dim)
+    def setShapeForIOWrappers(self):
+        self.inputs["input"].init_shape((0, self.parent.hidden_dim))
+        self.outputs["output"].init_shape((0, self.parent.hidden_dim))
         
 
 class LayerNorm_Layer(Operation_Layer):
-    def __init__(self, layer, operator_device):
-        self.operator_device = operator_device
-        self.name = f"{operator_device.name}_{layer}"
-        self.layer = layer
-        self.inputs = operator_device.inputs
-        self.outputs = operator_device.outputs
-        self.weights = operator_device.weights
-        self.impl = operator_device.impl
+    def __init__(self, layer, op_device):
+        super().__init__(layer, op_device)
 
     def run(self):
-        self.operator_device.parent.impl.run(self.inputs["input"].tensor, self.weights["weight"].weight_map[self.layer], self.outputs["output"].tensor, epsilon = 1e-5)
+        self.parent.parent.impl.run(self.inputs["input"].tensor, self.weights["weight"].weight_map[self.layer], self.outputs["output"].tensor, epsilon = 1e-5)

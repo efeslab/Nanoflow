@@ -24,24 +24,17 @@ class GlobalInput(Operations):
 
 
 class GlobalInput_Device(Operation_Device):
-    def __init__(self, op_general, name, device):
-        super().__init__(op_general, name, device) 
-        self.op_layer = GlobalInput_Layer     
+    def __init__(self, parent, device):
+        super().__init__(parent, device) 
+        self.op_layer = GlobalInput_Layer
 
-    def setBatchSize(self, batch_size):
-        self.batch_size = batch_size
-        self.outputs["tokens"].shape = (self.batch_size,)
+    def setShapeForIOWrappers(self):
+        self.outputs["tokens"].init_shape((0,))
         # self.outputs["tokens"].tensor[:self.batch_size].copy_(torch.tensor([0] * self.batch_size, dtype=torch.int32))
 
-class GlobalInput_Layer(Operations):
-    def __init__(self, layer, operator_device):
-        self.operator_device = operator_device
-        self.name = f"{operator_device.name}_{layer}"
-        self.layer = layer
-        self.inputs = operator_device.inputs
-        self.outputs = operator_device.outputs
-        self.weights = operator_device.weights
-        self.impl = operator_device.impl
+class GlobalInput_Layer(Operation_Layer):
+    def __init__(self, layer, op_device):
+        super().__init__(layer=layer, op_device=op_device)
     
     def run(self):
         pass
@@ -67,25 +60,17 @@ class GlobalOutput(Operations):
         pass
 
 class GlobalOutput_Device(Operation_Device):
-    def __init__(self, op_general, name, device):
-        super().__init__(op_general, name, device)      
+    def __init__(self, parent, device):
+        super().__init__(parent, device)      
         self.op_layer = GlobalOutput_Layer
 
-      
-    def setBatchSize(self, batch_size):
-        self.batch_size = batch_size
-        self.inputs["tokens"].shape = (self.batch_size,)
-        self.outputs["new_token"].shape = (1,)
+    def setShapeForIOWrappers(self):
+        self.inputs["tokens"].init_shape((0,))
+        self.outputs["new_token"].init_shape((0,))
 
 class GlobalOutput_Layer(Operation_Layer):
-    def __init__(self, layer, operator_device):
-        self.operator_device = operator_device
-        self.name = f"{operator_device.name}_{layer}"
-        self.layer = layer
-        self.inputs = operator_device.inputs
-        self.outputs = operator_device.outputs
-        self.weights = operator_device.weights
-        self.impl = operator_device.impl
+    def __init__(self, layer, op_device):
+        super().__init__(layer=layer, op_device=op_device)
 
     def run(self):
         pass

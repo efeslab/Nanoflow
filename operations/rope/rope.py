@@ -236,6 +236,8 @@ class RopeAppend(Operations):
         self.num_kv_heads = num_kv_heads
         self.num_qo_heads = num_qo_heads
         self.head_dim = head_dim
+        for op_device in self.children:
+            op_device.setShapeForIOWrappers()
 
     def update(self, page_size, qo_indicies, kv_indptr, kv_indices, kv_last_page_len, rev_input_indptr, per_token_offset, decode_flag=False):
         """Stores the starting indices for the query/key segments."""
@@ -321,32 +323,25 @@ class RopeAppend(Operations):
         self.impl.run(layer, self.head_dim, self.num_qo_heads, self.num_kv_heads, self.qo_indicies, self.kv_indptr, self.kv_indices, self.kv_last_page_len, self.rev_input_indptr, self.per_token_offset, kqv, self.externals["KVCache"], self.externals["k_data"], self.externals["v_data"], self.rope_type, self.theta, self.original_max_position_embeddings, self.low_freq_factor, self.high_freq_factor, self.factor, self.outputs["q"].tensor, self.decode_flag, offset=0)
     
 class RopeAppend_Device(Operation_Device):
-    def __init__(self, op_general, name, device):
-        super().__init__(op_general, name, device)
+    def __init__(self, parent, device):
+        super().__init__(parent, device)
         self.op_layer = RopeAppend_Layer
 
-    def setBatchSize(self, batch_size):
-        self.batch_size = batch_size
+    def setShapeForIOWrappers(self):
         # The input tensor "kqv" is assumed to have a flattened layout:
         # [batch_size, (num_qo_heads + 2 * num_kv_heads) * head_dim]
-        self.inputs["kqv"].shape = (
-            self.batch_size,
+        self.inputs["kqv"].init_shape((
+            0,
             (self.parent.num_qo_heads + 2 * self.parent.num_kv_heads) * self.parent.head_dim,
-        )
+        ))
         # The output "q" has shape [batch_size, num_qo_heads * head_dim]
-        self.outputs["q"].shape = (self.batch_size, self.parent.num_qo_heads, self.parent.head_dim)
-        print("RopeAppend_Device setBatchSize:", self.inputs["kqv"].shape, self.outputs["q"].shape)
+        self.outputs["q"].init_shape((0, self.parent.num_qo_heads, self.parent.head_dim))
 
-class RopeAppend_Layer(Operations):
-    def __init__(self, layer, operator_device):
-        self.operator_device = operator_device
-        self.name = f"{operator_device.name}_{layer}"
-        self.layer = layer
-        self.inputs = operator_device.inputs
-        self.outputs = operator_device.outputs
-        self.k_data_ptr, self.v_data_ptr = operator_device.externals["KVCache"].get_whole_kv_data(self.layer)
-        self.impl = operator_device.impl
+class RopeAppend_Layer(Operation_Layer):
+    def __init__(self, layer, op_device):
+        super().__init__(layer, op_device)
+        self.k_data_ptr, self.v_data_ptr = op_device.externals["KVCache"].get_whole_kv_data(self.layer)
 
     def run(self):
-        self.operator_device.parent.impl.run(self.layer, self.operator_device.parent.page_size, self.operator_device.parent.head_dim, self.operator_device.parent.num_qo_heads, self.operator_device.parent.num_kv_heads, self.operator_device.parent.qo_indicies, self.operator_device.parent.rev_input_indptr, self.operator_device.parent.per_token_offset,  self.inputs["kqv"].tensor, self.operator_device.externals["KVCache"], self.k_data_ptr, self.v_data_ptr, self.operator_device.parent.rope_type, self.operator_device.parent.theta, self.operator_device.parent.original_max_position_embeddings, self.operator_device.parent.low_freq_factor, self.operator_device.parent.high_freq_factor, self.operator_device.parent.factor, self.operator_device.outputs["q"].tensor, self.operator_device.parent.decode_flag, offset=0)
+        self.parent.parent.impl.run(self.layer, self.parent.parent.page_size, self.parent.parent.head_dim, self.parent.parent.num_qo_heads, self.parent.parent.num_kv_heads, self.parent.parent.qo_indicies, self.parent.parent.rev_input_indptr, self.parent.parent.per_token_offset,  self.inputs["kqv"].tensor, self.parent.externals["KVCache"], self.k_data_ptr, self.v_data_ptr, self.parent.parent.rope_type, self.parent.parent.theta, self.parent.parent.original_max_position_embeddings, self.parent.parent.low_freq_factor, self.parent.parent.high_freq_factor, self.parent.parent.factor, self.parent.outputs["q"].tensor, self.parent.parent.decode_flag, offset=0)
         

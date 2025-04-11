@@ -15,15 +15,17 @@ class Executor():
         return (op.first_layer_only and layer != 0) or (op.last_layer_only and layer != self.layer - 1)
     
     
-    def plan_layer_ordering_using_operator_layers(self):
+    def plan_layer_ordering(self):
         G = nx.DiGraph()
         for op in self.operations_layers_list:
             G.add_node(f"{op.name}", op=op, layer = op.layer)
 
-
         for op in self.operations_layers_list:
             layer = op.layer
+            print("op.name", op.name) if layer == 0 else None
             for dep, dep_on_prev_layer in op.prerequisites:
+                print("dep", dep.name) if layer == 0 else None
+                print("dep_on_prev_layer", dep_on_prev_layer) if layer == 0 else None
                 if (self.not_this_layer(dep, layer)):
                     continue
                 if dep_on_prev_layer:
@@ -33,6 +35,7 @@ class Executor():
                     G.add_edge(f"{dep.name}_{layer}", f"{op.name}")
 
         self.ordered_operations = list(nx.topological_sort(G))
+        print(self.ordered_operations)
         self.ordered_graph = G
     
     def draw_ordered_graph(self):
@@ -40,22 +43,13 @@ class Executor():
     
     def execute(self, weight_map, output):
         for op_name in self.ordered_operations:
-            print("op_name", op_name)
-            op, layer = self.ordered_graph.nodes[op_name]['op'], self.ordered_graph.nodes[op_name]['layer']          
-            with prof_marker(f"{op.name}_{layer}"):
-                op.run(layer)
-            if op.name == "GlobalOutput":
-                output.copy_(op.inputs["tokens"].tensor)
-    
-    def execute_using_operator_layers(self, weight_map, output):
-        for op_name in self.ordered_operations:
             op = self.ordered_graph.nodes[op_name]['op']
             with prof_marker(f"{op.name}"):
                 op.run()
             if op.name == "GlobalOutput_31":
                 output.copy_(op.inputs["tokens"].tensor)
 
-    def print_debug_using_operator_layers(self, filename="out.txt", filefolder_name = None, output=None):
+    def print_debug(self, filename="out.txt", filefolder_name = None, output=None):
         file = f"{filename}"
 
         with open(file, "w") as f:

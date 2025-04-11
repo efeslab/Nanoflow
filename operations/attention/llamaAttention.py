@@ -148,6 +148,8 @@ class DecAttn(Operations):
         self.num_qo_heads = num_qo_heads
         self.head_dim = head_dim
         self.q_dim = num_qo_heads * head_dim
+        for op_device in self.children:
+            op_device.setShapeForIOWrappers()
     
     def update(self, qo_indicies, kv_indptr, kv_indices, kv_last_page_len,
                 num_qo_heads, num_kv_heads, head_dim, page_size):
@@ -164,31 +166,25 @@ class DecAttn(Operations):
         self.impl.run(layer, self.head_dim, self.num_qo_heads, self.num_kv_heads, self.qo_indicies, Q, self.externals["KVCache"], self.outputs["output"].tensor)
     
 class DecAttn_Device(Operation_Device):
-    def __init__(self, op_general, name, device):
-        super().__init__(op_general, name, device)
+    def __init__(self, parent, device):
+        super().__init__(parent, device)
         self.op_layer = DecAttn_Layer 
 
-    def setBatchSize(self, batch_size):
-        self.batch_size = batch_size
-        self.inputs["Q"].shape = (self.batch_size, self.parent.num_qo_heads, self.parent.head_dim)
-        self.outputs["output"].shape = (self.batch_size, self.parent.num_qo_heads * self.parent.head_dim)
+    def setShapeForIOWrappers(self):
+        self.inputs["Q"].init_shape((0, self.parent.num_qo_heads, self.parent.head_dim))
+        self.outputs["output"].init_shape((0, self.parent.num_qo_heads * self.parent.head_dim))
 
 class DecAttn_Layer(Operation_Layer):
-    def __init__(self, layer, operator_device):
-        self.operator_device = operator_device
-        self.name = f"{operator_device.name}_{layer}"
-        self.layer = layer
-        self.inputs = operator_device.inputs
-        self.outputs = operator_device.outputs
-        self.externals = operator_device.externals
-        self.k_data_ptr, self.v_data_ptr = operator_device.externals["KVCache"].get_whole_kv_data(self.layer)
+    def __init__(self, layer, op_device):
+        super().__init__(layer, op_device=op_device)
+        self.k_data_ptr, self.v_data_ptr = op_device.externals["KVCache"].get_whole_kv_data(self.layer)
         self.kv_tuple = tuple([self.k_data_ptr, self.v_data_ptr])
-        self.impl = operator_device.impl
+
     
     def run(self):
         Q = self.inputs["Q"].tensor
         # self.operator_device.parent.impl.run(Q, self.kv_tuple, self.outputs["output"].tensor)
-        self.operator_device.parent.impl.run(self.layer, self.operator_device.parent.head_dim, self.operator_device.parent.num_qo_heads, self.operator_device.parent.num_kv_heads, self.operator_device.parent.qo_indicies,  Q, self.kv_tuple, self.operator_device.externals["KVCache"], self.outputs["output"].tensor)
+        self.parent.parent.impl.run(self.layer, self.parent.parent.head_dim, self.parent.parent.num_qo_heads, self.parent.parent.num_kv_heads, self.parent.parent.qo_indicies,  Q, self.kv_tuple, self.parent.externals["KVCache"], self.outputs["output"].tensor)
     
 class PFAttnTorchImpl(OperationImpl):
     category_tag = "torch"
@@ -350,6 +346,8 @@ class PFAttn(Operations):
         self.num_qo_heads = num_qo_heads
         self.head_dim = head_dim
         self.q_dim = num_qo_heads * head_dim
+        for op_device in self.children:
+            op_device.setShapeForIOWrappers()
     
     def update(self, qo_indicies, kv_indptr, kv_indices, kv_last_page_len, num_qo_heads, num_kv_heads, head_dim, page_size,
              causal=True, logits_soft_cap=0.0, pos_encoding_mode="NONE"):
@@ -414,30 +412,24 @@ class PFAttn(Operations):
 
     
 class PFAttn_Device(Operation_Device):
-    def __init__(self, op_general, name, device):
-        super().__init__(op_general, name, device)
-        self.op_layer = PFAttn_Layer  
-    
-    def setBatchSize(self, batch_size):
-        self.batch_size = batch_size
-        self.inputs["Q"].shape = (self.batch_size, self.parent.num_qo_heads, self.parent.head_dim)
-        self.outputs["output"].shape = (self.batch_size, self.parent.num_qo_heads * self.parent.head_dim)
+    def __init__(self, parent, device):
+        super().__init__(parent, device)
+        self.op_layer = PFAttn_Layer 
+
+    def setShapeForIOWrappers(self):
+        self.inputs["Q"].init_shape((0, self.parent.num_qo_heads, self.parent.head_dim))
+        self.outputs["output"].init_shape((0, self.parent.num_qo_heads * self.parent.head_dim))
 
 
 class PFAttn_Layer(Operation_Layer):
-    def __init__(self, layer, operator_device):
-        self.operator_device = operator_device
-        self.name = f"{operator_device.name}_{layer}"
-        self.layer = layer
-        self.inputs = operator_device.inputs
-        self.outputs = operator_device.outputs
-        self.externals = operator_device.externals
-        self.k_data_ptr, self.v_data_ptr = operator_device.externals["KVCache"].get_whole_kv_data(self.layer)
+    def __init__(self, layer, op_device):
+        super().__init__(layer=layer, op_device=op_device)
+        self.k_data_ptr, self.v_data_ptr = op_device.externals["KVCache"].get_whole_kv_data(self.layer)
         self.kv_tuple = tuple([self.k_data_ptr, self.v_data_ptr])
-        self.impl = operator_device.impl
+
     
     def run(self):
         Q = self.inputs["Q"].tensor
         # self.operator_device.parent.impl.run(Q, self.kv_tuple, self.outputs["output"].tensor)
-        self.operator_device.parent.impl.run(self.layer, self.operator_device.parent.head_dim, self.operator_device.parent.num_qo_heads, self.operator_device.parent.num_kv_heads, self.operator_device.parent.qo_indicies,  Q, self.kv_tuple, self.operator_device.externals["KVCache"], self.outputs["output"].tensor)
+        self.parent.parent.impl.run(self.layer, self.parent.parent.head_dim, self.parent.parent.num_qo_heads, self.parent.parent.num_kv_heads, self.parent.parent.qo_indicies,  Q, self.kv_tuple, self.parent.externals["KVCache"], self.outputs["output"].tensor)
         

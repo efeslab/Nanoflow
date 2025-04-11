@@ -44,6 +44,8 @@ class Activation(Operations):
         
     def setShape(self, N):
         self.N = N
+        for op_device in self.children:
+            op_device.setShapeForIOWrappers()
     
     def profile(self):
         # check the similarity of the outputs
@@ -93,23 +95,17 @@ class Activation(Operations):
         self.impl.run(x, self.outputs["output"].tensor)
 
 class Activation_Device(Operation_Device):
-    def __init__(self, op_general, name, device):
-        super().__init__(op_general, name, device)
+    def __init__(self, parent, device):
+        super().__init__(parent, device)
         self.op_layer = Activation_Layer
 
-    def setBatchSize(self, batch_size):
-        self.batch_size = batch_size
-        self.inputs["input"].shape = (self.batch_size, self.parent.N * 2)
-        self.outputs["output"].shape = (self.batch_size, self.parent.N)
+    def setShapeForIOWrappers(self):
+        self.inputs["input"].init_shape((0, self.parent.N * 2))
+        self.outputs["output"].init_shape((0, self.parent.N))
 
-class Activation_Layer(Operations):
-    def __init__(self, layer, operation_device):
-        self.operator_device = operation_device
-        self.name = f"{operation_device.name}_{layer}"
-        self.layer = layer
-        self.inputs = operation_device.inputs
-        self.outputs = operation_device.outputs
-        self.impl = operation_device.impl
+class Activation_Layer(Operation_Layer):
+    def __init__(self, layer, op_device):
+        super().__init__(layer=layer, op_device=op_device)
     
     def run(self):
-        self.operator_device.parent.impl.run(self.inputs["input"].tensor, self.outputs["output"].tensor)
+        self.parent.parent.impl.run(self.inputs["input"].tensor, self.outputs["output"].tensor)

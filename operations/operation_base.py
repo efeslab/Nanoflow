@@ -52,19 +52,6 @@ class Operations:
         
     def print_available_impl(self):
         print(self.impl_map.keys())
-        
-    @property
-    def prerequisites(self):
-        dep = []
-        for _, input_wrapper in self.operator_device.parent.inputs.items():
-            for dep_wrapper, prev_layer in zip(input_wrapper.prev, input_wrapper.prev_depend_on_prev_layer):
-                # Skip the virtual operations to find the real dependency
-                if dep_wrapper.owner.isVirtual == True:
-                    dep.extend(dep_wrapper.real_deps[input_wrapper])
-                else:
-                    dep.append((dep_wrapper.owner, prev_layer))
-        
-        return dep
     
     def checkConsistencyBetweenImpl(self, outputs):
         if self.impl_map.keys() == 0:
@@ -83,8 +70,9 @@ class Operations:
         self.weight_name = name
         return self
 
-    def setShape(self, config):
-        pass
+    def setShape(self):
+        for op_device in self.children:
+            op_device.setShapeForIOWrappers()
     
     def processWeight(self, global_weight_map, total_layers, cached = False):
         return process_weight_none(global_weight_map, self.weight_name, None, total_layers, cached)
@@ -139,22 +127,16 @@ class Operations:
         return self.name   
     
     def expand_gpu(self, num_devices):
-        gpu_list = [torch.device(f"cuda:{i}") for i in range(num_devices)]
-        for i in gpu_list:
-            i_str = str(i)
-            name = self.name + "_" + i_str
-            op_device = self.op_device(self, self.name, i)
+        for device_id in range(num_devices):
+            op_device = self.op_device(self, device_id)
             self.children.append(op_device)
         
         return self.children
     
     def expand_gpu_and_layers(self, num_devices, layer_list):
-        gpu_list = [torch.device(f"cuda:{i}") for i in range(num_devices)]
         self.op_layers_per_device = []
-        for i in gpu_list:
-            i_str = str(i)
-            name = self.name + "_" + i_str
-            op_device = self.op_device(self, self.name, i)
+        for device_id in range(num_devices):
+            op_device = self.op_device(self, device_id)
             if self.first_layer_only:
                 layer_list = [layer_list[0]]
             elif self.last_layer_only:
@@ -165,35 +147,51 @@ class Operations:
         
         return self.children, self.op_layers_per_device
     
-class Operation_Device(Operations):
-    def __init__(self, op_general, name, device):
-        super().__init__(name)
-        self.parent = op_general
-        self.device = device
-        self.weights = op_general.weights
+class Operation_Device:
+    def __init__(self, parent, device_id):
+        self.name = parent.name
+        self.parent = parent
+        self.device_id = device_id
+        self.weights = parent.weights
         self.externals = self.parent.externals
         self.impl = self.parent.impl
         self.children = []
         self.inputs = {}
-        for key, base_wrapper in op_general.inputs.items():
+        for key, base_wrapper in parent.inputs.items():
             dev_wrapper = IOWrapper_Device(
                 owner=self,
                 name=base_wrapper.name,
-                dtype=base_wrapper.dtype
-            )
+                device_id=device_id,
+                dtype=base_wrapper.dtype,
+                base_wrapper=base_wrapper
+            ).is_input()
             base_wrapper.append_child(dev_wrapper)
             self.inputs[key] = dev_wrapper
 
         self.outputs = {}
-        for key, base_wrapper in op_general.outputs.items():
+        for key, base_wrapper in parent.outputs.items():
             dev_wrapper = IOWrapper_Device(
                 owner=self,
                 name=base_wrapper.name,
-                dtype=base_wrapper.dtype
-            )
+                device_id=device_id,
+                dtype=base_wrapper.dtype,
+                base_wrapper=base_wrapper
+            ).is_output()
             base_wrapper.append_child(dev_wrapper)
             self.outputs[key] = dev_wrapper
     
+    @property
+    def isVirtual(self):
+        return self.parent.isVirtual
+    
+    @property
+    def first_layer_only(self):
+        return self.parent.first_layer_only
+    
+    @property
+    def last_layer_only(self):
+        return self.parent.last_layer_only
+
     def expand_layer(self, layer_list):
         for i in layer_list:
             op_layer = self.op_layer(i, self)
@@ -201,16 +199,66 @@ class Operation_Device(Operations):
         
         return self.children
 
-class Operation_Layer(Operation_Device):
-    def __init__(self, op_device, name, layer, device):
-        super().__init__(name)
+    def setBatchSize(self, batch_size):
+        self.batch_size = batch_size
+        for _, input_wrapper in self.inputs.items():
+            input_wrapper.batch_size = batch_size
+        for _, output_wrapper in self.outputs.items():
+            output_wrapper.batch_size = batch_size
+        
+
+class Operation_Layer:
+    def __init__(self, layer, op_device):
         self.layer = layer
-        self.inputs = {}
-        self.outputs = {}
-        self.weights = {}
-        self.externals = {}
-        self.impl:OperationImpl = None
-        self.device = device
+        self.name = f"{op_device.name}_{layer}"
+        self.inputs = op_device.inputs
+        self.outputs = op_device.outputs
+        self.weights = op_device.weights
+        self.externals = op_device.externals
+        self.impl:OperationImpl = op_device.impl
         self.parent = op_device
 
+    @property
+    def prerequisites(self):
+        dep = []
+        prev = []
+        depend_on_prev = []
+        for _, input_wrapper in self.parent.inputs.items():
+            prev.extend(input_wrapper.prev)
+            depend_on_prev.extend(input_wrapper.prev_depend_on_prev_layer)
+
+        while len(prev) > 0:
+            dep_wrapper = prev.pop()
+            prev_layer = depend_on_prev.pop()
+            if dep_wrapper.owner.isVirtual == False:
+                dep.append((dep_wrapper.owner, prev_layer))
+            elif dep_wrapper.owner.isCopy:
+                assert len(dep_wrapper.prev) == 1, f"Copy operation '{dep_wrapper.name}' has more than one prev connections!\n"
+                prev.append(dep_wrapper.prev[0])
+                depend_on_prev.append(prev_layer or dep_wrapper.prev_depend_on_prev_layer[0])
+            elif dep_wrapper.owner.isRedist:
+                if dep_wrapper.is_input_wrapper:
+                    assert len(dep_wrapper.prev) == 1, f"Redist operation '{dep_wrapper.name}' has more than one prev connections!\n"
+                    prev.append(dep_wrapper.prev[0])
+                    depend_on_prev.append(prev_layer or dep_wrapper.prev_depend_on_prev_layer[0])
+                elif dep_wrapper.is_output_wrapper:
+                    input_wrapper_begin_id = None
+                    input_wrapper_end_id = None
+                    tensor_offset = dep_wrapper.tensor_offset
+                    tensor_end = tensor_offset + dep_wrapper.batch_size
+                    for idx, input_wrapper in enumerate(dep_wrapper.owner.inputs.values()):
+                        if input_wrapper_begin_id is None and input_wrapper.tensor_offset + input_wrapper.batch_size > tensor_offset:
+                            input_wrapper_begin_id = idx
+                        if input_wrapper_end_id is None and input_wrapper.tensor_offset + input_wrapper.batch_size >= tensor_end:
+                            input_wrapper_end_id = idx
+                            break
+
+                    if input_wrapper_begin_id is None:
+                        continue
+
+                    for idx in range(input_wrapper_begin_id, input_wrapper_end_id + 1):
+                        prev.append(dep_wrapper.owner.inputs[f"input_{idx}"])
+                        depend_on_prev.append(prev_layer)
+                        
+        return dep
     
