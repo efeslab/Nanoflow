@@ -34,7 +34,7 @@ class Pipeline():
         self.vocab_size = 128256
         self.hidden_dim = 4096
         self.intermediate_dim = 14 * 1024
-        self.batch_size = 7
+        self.batch_size = None
         self.layer = 32
         self.actual_layer_range = [i for i in range(self.layer)]
         self.num_devices = torch.cuda.device_count()
@@ -62,7 +62,7 @@ class Pipeline():
         self.init_set_weight(weight_path)
 
     def init_external_data(self):
-        self.kv_pool = DistKVPool(self.layer, self.num_kv_heads, self.head_dim, 4096, self.page_size, 1)
+        self.kv_pool = DistKVPool(self.layer, self.num_kv_heads, self.head_dim, 4096, self.page_size, self.num_devices)
         self.batched_kv_cache = BatchedDistKVCache(self.kv_pool)
 
     def init_operations(self):
@@ -84,7 +84,7 @@ class Pipeline():
 
         self.ropeAppend      = RopeAppend("RopeAppend")
         self.ropeAppend.externals["KVCache"] = self.batched_kv_cache
-        self.ropeAppend.externals["k_data"], self.ropeAppend.externals["v_data"] = self.batched_kv_cache.get_whole_kv_data_all_layers()
+        # self.ropeAppend.externals["k_data"], self.ropeAppend.externals["v_data"] = self.batched_kv_cache.get_whole_kv_data_all_layers()
         self.ropeAppend_devices, self.ropeAppend_layers_per_device = self.ropeAppend.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
 
 
@@ -215,103 +215,81 @@ class Pipeline():
             operation.checkConnection()
     
     
-    def init_executor(self):
-        self.executor = Executor(self.operation_layers_per_device[0], self.layer)
+    def init_executor(self, device_id=0):
+        assert 0 <= device_id < self.num_devices, "device_id should be in range [0, num_devices)"
+        self.executor = Executor(self.operation_layers_per_device[device_id], self.layer)
         self.executor.plan_layer_ordering()
 
     def init_set_shape(self):
         self.global_input.setShape()
         self.gen_embedding.setShape(self.hidden_dim, self.vocab_size)
         self.layerNormAttn.setShape(self.hidden_dim)
-        self.kqv.setShape(self.kqv_heads * self.head_dim, self.hidden_dim)
+        self.kqv.setShape(self.kqv_heads * self.head_dim, self.hidden_dim).setParameter(1.0, 0.0)
         self.decAttn.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim)
         self.pfAttn.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim)
         self.ropeAppend.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim)
-        self.o.setShape(self.hidden_dim, self.hidden_dim)
+        self.o.setShape(self.hidden_dim, self.hidden_dim).setParameter(1.0, 1.0)
         self.layerNormFFN.setShape(self.hidden_dim)
-        self.ug.setShape(self.intermediate_dim * 2, self.hidden_dim)
-        self.d.setShape(self.hidden_dim, self.intermediate_dim)
+        self.ug.setShape(self.intermediate_dim * 2, self.hidden_dim).setParameter(1.0, 0.0)
+        self.d.setShape(self.hidden_dim, self.intermediate_dim).setParameter(1.0, 1.0)
         self.activation.setShape(self.intermediate_dim)
         self.modelLayerNorm.setShape(self.hidden_dim)
-        self.getLogits.setShape(self.vocab_size, self.hidden_dim)
+        self.getLogits.setShape(self.vocab_size, self.hidden_dim).setParameter(1.0, 0.0)
         self.sample.setShape(self.vocab_size)
         self.global_output.setShape()
     
     def init_set_weight(self, weight_path):
         weight_manager = WeightManager()
-        weight_manager.load_from_safe_tensor(weight_path)
-        weight_manager.set_weight(self.operation_list, self.layer)
+        weight_manager.load_from_safe_tensor(weight_path, self.num_devices)
+        weight_manager.set_weight(self.operation_list, self.num_devices, self.layer)
         torch.cuda.empty_cache()
     
 
-    def config_batch_size_devices(self, decode_flag):
+    def config_batch_size(self, decode_flag, device_id=0):
+        # init the batchsize to None
+        for op_device in self.operation_device_list[device_id]:
+            op_device.setBatchSize(None)
 
-        for device_id in range(self.num_devices):
-            # init the batchsize to None
-            for op_device in self.operation_device_list[device_id]:
-                op_device.setBatchSize(None)
+        self.global_input_devices[device_id].setBatchSize(self.batch_size)
+        self.decAttn_devices[device_id].setBatchSize(0)
+        if decode_flag:
+            self.decAttn_devices[device_id].setBatchSize(self.batch_size)
 
-            self.global_input_devices[device_id].setBatchSize(self.batch_size)
-            # self.gen_embedding_devices[device_id].setBatchSize(self.batch_size)
-            # self.layerNormAttn_devices[device_id].setBatchSize(self.batch_size)
-            # self.kqv_devices[device_id].setBatchSize(self.batch_size)
-            self.decAttn_devices[device_id].setBatchSize(0)
-            self.pfAttn_devices[device_id].setBatchSize(self.batch_size)
-            if decode_flag:
-                self.decAttn_devices[device_id].setBatchSize(self.batch_size)
-                self.pfAttn_devices[device_id].setBatchSize(0)
-            # self.ropeAppend_devices[device_id].setBatchSize(self.batch_size)
-            # self.layerNormFFN_devices[device_id].setBatchSize(self.batch_size)
-            # self.ug_devices[device_id].setBatchSize(self.batch_size)
-            # self.activation_devices[device_id].setBatchSize(self.batch_size)
-            # self.o_devices[device_id].setBatchSize(self.batch_size)
-            # self.d_devices[device_id].setBatchSize(self.batch_size)
-            # self.modelLayerNorm_devices[device_id].setBatchSize(self.batch_size)
-            # self.getLogits_devices[device_id].setBatchSize(self.batch_size)
-            # self.sample_devices[device_id].setBatchSize(self.batch_size)
-            self.global_output_devices[device_id].setBatchSize(self.batch_size)
     
-    def config_algorithm(self):
+    def config_algorithm(self, device_id=0):
         gemm_tag = "cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto"
-        self.gen_embedding.config_tag("cuda")
-        self.layerNormAttn.config_tag("cuda")
-        self.activation.config_tag("cuda")
-        self.kqv.config_tag(gemm_tag, {"name": f"{self.kqv.name}", "M" : self.batch_size, "N": self.kqv_heads * self.head_dim, "K": self.hidden_dim, "alpha": 1.0, "bias": False})
-        self.ropeAppend.config_tag("cuda")
-        self.decAttn.config_tag("batched_cuda")
-        self.pfAttn.config_tag("batched_cuda")
-        self.layerNormFFN.config_tag("cuda")
+        self.gen_embedding.config_tag("cuda", device_id)
+        self.layerNormAttn.config_tag("cuda", device_id)
+        self.activation.config_tag("cuda", device_id)
+        self.kqv.config_tag(gemm_tag, device_id)
+        self.ropeAppend.config_tag("cuda", device_id)
+        self.decAttn.config_tag("batched_cuda", device_id)
+        self.pfAttn.config_tag("batched_cuda", device_id)
+        self.layerNormFFN.config_tag("cuda", device_id)
+        self.o.config_tag(gemm_tag, device_id)
+        self.ug.config_tag(gemm_tag, device_id)
+        self.d.config_tag(gemm_tag, device_id)
+        self.modelLayerNorm.config_tag("cuda", device_id)
+        self.sample.config_tag("cuda", device_id)
+        self.getLogits.config_tag(gemm_tag, device_id)
 
-        self.o.config_tag(gemm_tag, {"name": f"{self.o.name}", "M" : self.batch_size, "N": self.hidden_dim, "K": self.hidden_dim, "alpha": 1.0, "bias": True, "beta": 1.0})
-        self.ug.config_tag(gemm_tag, {"name": f"{self.ug.name}", "M" : self.batch_size, "N": self.intermediate_dim * 2, "K": self.hidden_dim, "alpha": 1.0, "bias": False})
-        self.d.config_tag(gemm_tag, {"name": f"{self.d.name}", "M" : self.batch_size, "N": self.hidden_dim, "K": self.intermediate_dim, "alpha": 1.0, "bias": True, "beta": 1.0})
-        
-        self.modelLayerNorm.config_tag("cuda")
-        self.sample.config_tag("cuda")
-        self.getLogits.config_tag(gemm_tag, {"name": f"{self.getLogits.name}", "M" : self.batch_size, "N": self.vocab_size, "K": self.hidden_dim, "alpha": 1.0, "bias": False})
-
-
-    def config(self, decode_flag=False):
-        self.config_batch_size(decode_flag)
-        self.config_algorithm()
     
-    def update(self, input_ids, decode_flag=False):
+    def update(self, input_ids, decode_flag=False, device_id=0):
         
         self.input_ids = input_ids
         # concatenate input_ids into a single tensor
         flattened = [item for sublist in input_ids for item in sublist]
         if len(flattened) != self.batch_size:
             self.batch_size = len(flattened)
-            # print(f"batch_size: {self.batch_size}")
-            # self.config(decode_flag)
-            self.config_batch_size_devices(decode_flag)
-            self.update_allocate_buffers()
-            self.config_algorithm()
-            self.init_executor()
-        input_tensor = torch.tensor(flattened, dtype=torch.int32, device='cuda')
+            self.config_batch_size(decode_flag, device_id)
+            self.update_allocate_buffers(device_id)
+            print("finish update_allocate_buffers")
+            self.config_algorithm(device_id)
+            self.init_executor(device_id)
+        input_tensor = torch.tensor(flattened, dtype=torch.int32, device=f'cuda:{device_id}')
         # get cumulative sum of the number of tokens in each input
-        request_length = torch.tensor([len(x) for x in input_ids], dtype=torch.int32)
-        self.cumsum_input = torch.cat([torch.tensor([0], dtype=torch.int32), torch.cumsum(request_length, dim=0, dtype=torch.int32)])
+        request_length = torch.tensor([len(x) for x in input_ids], dtype=torch.int32, device=f'cuda:{device_id}')
+        self.cumsum_input = torch.cat([torch.tensor([0], dtype=torch.int32, device=f'cuda:{device_id}'), torch.cumsum(request_length, dim=0, dtype=torch.int32)])
         # update rev_input_indptr and per_token_offset
         rev_input_indptr_list = []
         per_token_offset_list = []
@@ -325,37 +303,32 @@ class Pipeline():
             # extend the per_token_offset with a list from last_offest to last_offest + (end - start)
             per_token_offset_list.extend(list(range(seq_len - (end - start), seq_len)))
 
-        self.rev_input_indptr = torch.tensor(rev_input_indptr_list, dtype=torch.int32, device='cuda')
-        self.per_token_offset = torch.tensor(per_token_offset_list, dtype=torch.int32, device='cuda')
-        kv_indptr, kv_indices, kv_last_page_len = self.batched_kv_cache.update()
+        self.rev_input_indptr = torch.tensor(rev_input_indptr_list, dtype=torch.int32, device=f'cuda:{device_id}')
+        self.per_token_offset = torch.tensor(per_token_offset_list, dtype=torch.int32, device=f'cuda:{device_id}')
+        kv_indptr, kv_indices, kv_last_page_len = self.batched_kv_cache.update(device_id)
 
-        # print(f"cumsum_input: {self.cumsum_input}")
-        # print(f"input_tensor: {input_tensor}")
-        
-        self.global_input.children[0].outputs["tokens"].tensor[:input_tensor.shape[0]].copy_(input_tensor)
+        self.global_input.children[device_id].outputs["tokens"].tensor[:input_tensor.shape[0]].copy_(input_tensor)
         self.ropeAppend.update(self.page_size, self.cumsum_input, kv_indptr, kv_indices, kv_last_page_len, self.rev_input_indptr, self.per_token_offset, decode_flag)
-        self.decAttn.update(self.cumsum_input, kv_indptr, kv_indices, kv_last_page_len,
-                self.num_qo_heads, self.num_kv_heads, self.head_dim, self.page_size)
-        self.pfAttn.update(self.cumsum_input, kv_indptr, kv_indices, kv_last_page_len, self.num_qo_heads, self.num_kv_heads, self.head_dim, self.page_size)
+        self.decAttn.update(self.cumsum_input, kv_indptr, kv_indices, kv_last_page_len, self.page_size)
+        self.pfAttn.update(self.cumsum_input, kv_indptr, kv_indices, kv_last_page_len, self.page_size)
         
-    def update_allocate_buffers(self):
+    def update_allocate_buffers(self, device_id):
         # Build list of buffers(op_device)
-        for device_id in range(self.num_devices):
-            buffers_list = []
-            for operation in self.operation_device_list[device_id]:
-                for _, wrapper in operation.inputs.items():
-                    buffers_list.append(wrapper)
-                for _, wrapper in operation.outputs.items():
-                    buffers_list.append(wrapper)
+        buffers_list = []
+        for operation in self.operation_device_list[device_id]:
+            for _, wrapper in operation.inputs.items():
+                buffers_list.append(wrapper)
+            for _, wrapper in operation.outputs.items():
+                buffers_list.append(wrapper)
 
-            # Allocate buffers for each devices seperatly
-            bufferAllocator = BufferAllocator(buffers_list)
-            bufferAllocator.create_dependency_graph()
-            bufferAllocator.set_all_batchsize_by_linear_programming()
-            
-            bufferAllocator.allocate_buffer(device_id)
-            print(f"bufferAllocator.allocation_infos: {bufferAllocator.allocate_infos}")
-            print(f"Total allocated: {bufferAllocator.total_allocated / 1024 / 1024} MB in device {device_id}")
+        # Allocate buffers for each devices seperatly
+        bufferAllocator = BufferAllocator(buffers_list)
+        bufferAllocator.create_dependency_graph()
+        bufferAllocator.set_all_batchsize_by_linear_programming()
+        
+        bufferAllocator.allocate_buffer(device_id)
+        print(f"bufferAllocator.allocation_infos: {bufferAllocator.allocate_infos}")
+        print(f"Total allocated: {bufferAllocator.total_allocated / 1024 / 1024} MB in device {device_id}")
 
     def profile(self):
         for operation in self.operation_list:
@@ -365,19 +338,14 @@ class Pipeline():
         operation_base = Operations()
         operation_base.search_profile_data()
 
-    def run(self):
-        # with nvtx.annotate("initialize_executor"):
-            # executor = Executor(self.operation_list, self.layer)
-            # executor.plan_layer_ordering()
-            # executor.draw_ordered_graph()
-            # print(executor.ordered_operations)
+    def run(self, rank=0, file_name="out-operator_layer_test", filefolder_name="llama3-kv-out-rope_test"):
 
         temp_out = torch.zeros(self.batch_size, dtype=torch.int32, device='cuda')
 
-        os.makedirs("./llama3-kv-out-rope_test", exist_ok=True)
+        os.makedirs(f"./{filefolder_name}", exist_ok=True)
 
         self.executor.execute({}, temp_out)
-        # self.executor.print_debug("out-operator_layer_test", filefolder_name="llama3-kv-out-rope_test", output=temp_out)
+        # self.executor.print_debug(file_name, rank, filefolder_name=filefolder_name, output=temp_out)
 
         with nvtx.annotate("after_execute_before_return"):
             temp_out = temp_out.cpu()

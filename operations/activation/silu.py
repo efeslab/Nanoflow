@@ -89,10 +89,6 @@ class Activation(Operations):
         rows = self.cursor.fetchall()
         for row in rows:
             print(row)
-        
-    def run(self, layer):
-        x = self.inputs["input"].tensor
-        self.impl.run(x, self.outputs["output"].tensor)
 
 class Activation_Device(Operation_Device):
     def __init__(self, parent, device):
@@ -108,4 +104,4 @@ class Activation_Layer(Operation_Layer):
         super().__init__(layer=layer, op_device=op_device)
     
     def run(self):
-        self.parent.parent.impl.run(self.inputs["input"].tensor, self.outputs["output"].tensor)
+        self.impl.run(self.inputs["input"].tensor, self.outputs["output"].tensor)

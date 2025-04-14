@@ -22,10 +22,10 @@ class Executor():
 
         for op in self.operations_layers_list:
             layer = op.layer
-            print("op.name", op.name) if layer == 0 else None
+            # print("op.name", op.name) if layer == 0 else None
             for dep, dep_on_prev_layer in op.prerequisites:
-                print("dep", dep.name) if layer == 0 else None
-                print("dep_on_prev_layer", dep_on_prev_layer) if layer == 0 else None
+                # print("dep", dep.name) if layer == 0 else None
+                # print("dep_on_prev_layer", dep_on_prev_layer) if layer == 0 else None
                 if (self.not_this_layer(dep, layer)):
                     continue
                 if dep_on_prev_layer:
@@ -49,7 +49,7 @@ class Executor():
             if op.name == "GlobalOutput_31":
                 output.copy_(op.inputs["tokens"].tensor)
 
-    def print_debug(self, filename="out.txt", filefolder_name = None, output=None):
+    def print_debug(self, filename="out.txt", rank=0, filefolder_name = None, output=None):
         file = f"{filename}"
 
         with open(file, "w") as f:
@@ -64,12 +64,12 @@ class Executor():
                     f.write(str(inputs.tensor.shape))
                     torch.save(inputs.tensor.cpu(), f"./{filefolder_name}/{op.name}_{inputs.name}")
 
-                # for weights in op.weights.values():
-                #     f.write(f"[{op.name}_{weights.name}]\n")
-                #     f.write(str(weights.weight_map))
-                #     f.write("\n")
-                #     f.write(str(weights.weight_map.shape))
-                #     torch.save(weights.weight_map.cpu(), f"./{filefolder_name}/{op.name}_{weights.name}")
+                for weights in op.weights.values():
+                    f.write(f"[{op.name}_{weights.name}]\n")
+                    f.write(str(weights.weight_map[rank][op.layer]))
+                    f.write("\n")
+                    f.write(str(weights.weight_map[rank][op.layer].shape))
+                    torch.save(weights.weight_map[rank][op.layer].cpu(), f"./{filefolder_name}/{op.name}_{weights.name}")
 
                 f.flush()
 

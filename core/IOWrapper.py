@@ -40,7 +40,7 @@ class IOWrapper:
         depend_on_prev = False
         if isinstance(next_wrapper, tuple):
             next_wrapper, depend_on_prev = next_wrapper
-        print("IOWrapper __rshift__", depend_on_prev)
+        # print("IOWrapper __rshift__", depend_on_prev)
         return self.chain(next_wrapper, depend_on_prev)
     
     def toStr(self):

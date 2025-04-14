@@ -35,20 +35,20 @@ if platform_config.PLATFORM_CUDA:
         category_tag = "cuda"
         impl_tag_profile = "SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto"
         def config(self, impl_tag, parameter_map):
-            self.name = parameter_map["name"]
-            self.M = parameter_map["M"]
-            self.N = parameter_map["N"]
-            self.K = parameter_map["K"]
-            self.alpha = parameter_map["alpha"]
-            self.bias = parameter_map["bias"]
+            self.name = self.op_base.name
+            self.M = self.batch_size
+            self.N = self.op_base.N
+            self.K = self.op_base.K
+            self.alpha = self.op_base.alpha
+            self.bias = self.op_base.bias
             self.beta = 0.0
+            # print("M:", self.M, "N:", self.N, "K:", self.K)
+            # print("alpha:", self.alpha, "beta:", self.beta)
             if self.bias:
-                self.beta = parameter_map["beta"]
-                bind_gemm.configGEMM(impl_tag, self.name, self.inputs["A"].children[0].tensor, self.inputs["C"].children[0].tensor, self.outputs["D"].children[0].tensor, self.M, self.N, self.K, self.alpha, self.beta)
+                self.beta = self.op_base.beta
+                bind_gemm.configGEMM(impl_tag, self.name, self.inputs["A"].tensor, self.inputs["C"].tensor, self.outputs["D"].tensor, self.M, self.N, self.K, self.alpha, self.beta)
             else:
-                # print("input A:", self.inputs["A"].children[0].tensor)
-                # print("output D:", self.outputs["D"].children[0].tensor)
-                bind_gemm.configGEMM(impl_tag, self.name, self.inputs["A"].children[0].tensor, torch.empty((self.M, self.N), dtype=torch.float16, device=self.inputs["A"].children[0].tensor.device), self.outputs["D"].children[0].tensor, self.M, self.N, self.K, self.alpha, self.beta)
+                bind_gemm.configGEMM(impl_tag, self.name, self.inputs["A"].tensor, torch.empty((self.M, self.N), dtype=torch.float16, device=f"cuda:{self.device_id}"), self.outputs["D"].tensor, self.M, self.N, self.K, self.alpha, self.beta)
 
         # def profile(self, impl_tag):
 
@@ -103,6 +103,7 @@ class GEMM(Operations):
         self.weights["B"].shape = (self.K, self.N)
         for op_device in self.children:
             op_device.setShapeForIOWrappers()
+        return self
     
     def profile(self):
         # print("Get into profile", self.name)
@@ -160,29 +161,18 @@ class GEMM(Operations):
                     ''', (self.name + f"_{category_tag}", batch_size, average_time))
         self.conn.commit()
     
-    def run(self, layer):
-        with prof_marker("GEMM_prepare"):
-            A = self.inputs["A"].tensor
-            if self.bias:
-                C = self.inputs["C"].tensor
-            else:
-                C = torch.empty((self.M, self.N), dtype=torch.float16, device=self.inputs["A"].tensor.device)
-        
-            B = self.weights["B"].weight_map[layer]
-        with prof_marker("GEMM_run"):
-            self.impl.run(A, B, C, self.outputs["D"].tensor)
-    
-    def processWeight(self, global_weight_map, total_layers, cached = False):
-        self.weights["B"].weight_map = {}
+    def processWeight(self, global_weight_map, total_devices, total_layers, cached = False):
+        self.weights["B"].weight_map = [{} for _ in range(total_devices)]
         if not isinstance(self.weight_name, list):
             self.weight_name = [self.weight_name]
-        if any(['{layer}' in name for name in self.weight_name]):
-            for l in range(total_layers):
-                self.weights["B"].weight_map[l] = torch.cat([global_weight_map[name.format(layer=l)].t() for name in self.weight_name], dim=1).contiguous()
-        else:
-            weight_tensor = torch.cat([global_weight_map[name].t() for name in self.weight_name], dim=1).contiguous()
-            for l in range(total_layers):
-                self.weights["B"].weight_map[l] = weight_tensor
+        for device_id in range(total_devices):
+            if any(['{layer}' in name for name in self.weight_name]):
+                for l in range(total_layers):
+                    self.weights["B"].weight_map[device_id][l] = torch.cat([global_weight_map[device_id][name.format(layer=l)].t() for name in self.weight_name], dim=1).contiguous()
+            else:
+                weight_tensor = torch.cat([global_weight_map[device_id][name].t() for name in self.weight_name], dim=1).contiguous()
+                for l in range(total_layers):
+                    self.weights["B"].weight_map[device_id][l] = weight_tensor
         # for l in range(total_layers):
         #     for name in self.weight_name:
         #         if name.format(layer=l) in global_weight_map:
@@ -213,4 +203,4 @@ class GEMM_Layer(Operation_Layer):
 
     def run(self):
         with prof_marker("GEMM_run"):
-            self.parent.parent.impl.run(self.weights["B"].weight_map[self.layer])
+            self.impl.run(self.weights["B"].weight_map[self.device_id][self.layer])

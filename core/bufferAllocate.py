@@ -29,11 +29,11 @@ class BufferAllocator():
         G = nx.DiGraph()
         for wrapper in self.buffers_list:
             G.add_node(wrapper.fullName, wrapper=wrapper)
-            print(f"add node {wrapper.fullName}")
+            # print(f"add node {wrapper.fullName}")
         for wrapper in self.buffers_list:
             for next_wrapper in wrapper.next:
                 G.add_edge(wrapper.fullName, next_wrapper.fullName)
-                print(f"add edge {wrapper.fullName} -> {next_wrapper.fullName}")
+                # print(f"add edge {wrapper.fullName} -> {next_wrapper.fullName}")
         self.full_graph = G
     
     def set_all_batchsize_by_linear_programming(self):
@@ -45,7 +45,7 @@ class BufferAllocator():
             if wrapper.shape is not None:
                 # assert wrapper.shape[0] > 0, f"{wrapper.fullName} has no shape"
                 equations.append(sp.Eq(variables[wrapper.fullName], wrapper.shape[0]))
-                print(f"add equation {wrapper.fullName} = {wrapper.shape[0]}")
+                # print(f"add equation {wrapper.fullName} = {wrapper.shape[0]}")
         
         # build the equations
         for wrapper in self.buffers_list:
@@ -55,30 +55,32 @@ class BufferAllocator():
                     # for Redist_Device, we need to build the equation for each input and output
                     input_symbols = [variables[input_wrapper.fullName] for input_wrapper in wrapper.owner.inputs.values()]
                     output_symbols = [variables[output_wrapper.fullName] for output_wrapper in wrapper.next]
-                    print(f"add equation {wrapper.fullName}: {input_symbols} = {output_symbols}")
+                    # print(f"add equation {wrapper.fullName}: {input_symbols} = {output_symbols}")
                     equations.append(sp.Eq(sum(input_symbols), sum(output_symbols)))
                 else:
                     # for the case of real op and Copy, the relationship is all the same buffer.
                     for output_wrapper in wrapper.owner.outputs.values():
-                        print(f"add equation {wrapper.fullName} = {output_wrapper.fullName}")
+                        # print(f"add equation {wrapper.fullName} = {output_wrapper.fullName}")
                         equations.append(sp.Eq(variables[wrapper.fullName], variables[output_wrapper.fullName]))
 
             # all links between the ops
             if wrapper.is_output_wrapper:
                 assert len(wrapper.next) <= 1, f"{wrapper.fullName} has more than one next connections!\n"
                 for next_wrapper in wrapper.next:
-                    print(f"add equation {wrapper.fullName} = {next_wrapper.fullName}")
+                    # print(f"add equation {wrapper.fullName} = {next_wrapper.fullName}")
                     equations.append(sp.Eq(variables[wrapper.fullName], variables[next_wrapper.fullName]))
 
-        print(f"equations: {equations}")
+        # print(f"equations: {equations}")
         # Solve the linear programming problem
         solution = sp.solve(equations, variables)
-        print(f"solution: {solution}")
+        # print(f"solution: {solution}")
         assert len(solution) != 0, f"The solution space is empty, please check the batchsize setting!"
         assert len(solution) == len(variables), f"There are infinitely many solutions, please check the batchsize setting!"
         
         # Set the shape for each wrapper
         for wrapper in self.buffers_list:
+            if wrapper.owner.batch_size is None:
+                wrapper.owner.batch_size = solution[variables[wrapper.fullName]]
             wrapper.batch_size = solution[variables[wrapper.fullName]]
             print(f"set {wrapper.fullName} batch size to {wrapper.batch_size} with shape {wrapper.shape}")
 
@@ -105,7 +107,7 @@ class BufferAllocator():
         self.allocate_infos = []
         components = self.get_connected_components()
         for comp in components:
-            print("component: ", comp)
+            # print("component: ", comp)
             # Create a subgraph for the component:
             comp = self.full_graph.subgraph(comp)
             
@@ -131,7 +133,7 @@ class BufferAllocator():
             root_nodes = [self.full_graph.nodes[name]['wrapper'] for name in root_nodes_name]
             # sort these nodes by their next connections
             sorted_root_nodes = sorted(root_nodes, key=sort_key)
-            print(f"sorted_root_nodes: {[sorted_root.fullName for sorted_root in sorted_root_nodes]}")
+            # print(f"sorted_root_nodes: {[sorted_root.fullName for sorted_root in sorted_root_nodes]}")
 
             # allocate_info = []
             processing_queue = []
@@ -151,13 +153,13 @@ class BufferAllocator():
 
             whole_buffer = torch.empty(shape, dtype=dtype, device=f"cuda:{device_id}")
             self.total_allocated += whole_buffer.numel() * whole_buffer.element_size()
-            print(f"allocated buffer: {whole_buffer.shape} with dtype: {dtype} and device: {device_id}")
+            # print(f"allocated buffer: {whole_buffer.shape} with dtype: {dtype} and device: {device_id}")
 
             # allocate_info.append(shape)
             while processing_queue:
                 node = processing_queue.pop(0)
                 node.set_whole_buffer(whole_buffer)
-                print("node: ", node.fullName, "with whole buffer: ", whole_buffer.shape, "tensor", node.tensor.shape,"and offset: ", node.tensor_offset)
+                # print("node: ", node.fullName, "with whole buffer: ", whole_buffer.shape, "tensor", node.tensor.shape,"and offset: ", node.tensor_offset)
                 next_nodes = [self.full_graph.nodes[name]["wrapper"] for name in list(self.full_graph[node.fullName])]
                 # print(f"next nodes: {[n for n in next_nodes]}")
                 for next_node in next_nodes:
@@ -178,7 +180,7 @@ class BufferAllocator():
                                 if next_node.fullName == output_wrapper.fullName:
                                     next_node.set_tensor_offset(node.tensor_offset + additional_offset)
                                     break
-                                print("additional_offset: ", additional_offset, "output_wrapper: ", output_wrapper.fullName, "batch_size: ", output_wrapper.batch_size)
+                                # print("additional_offset: ", additional_offset, "output_wrapper: ", output_wrapper.fullName, "batch_size: ", output_wrapper.batch_size)
                                 additional_offset += output_wrapper.batch_size
 
                         processing_queue.append(next_node) if flag else None

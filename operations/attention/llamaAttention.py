@@ -13,26 +13,32 @@ from kvcache.kv import KVCacheNone, KVCacheTorch, DistKVPool, BatchedDistKVCache
 
 class DecAttnTorchImpl(OperationImpl):
     category_tag = "torch"
-    def run(self, layer, head_dim, num_qo_heads, num_kv_heads, qo_indicies,  Q, kv_tuple, KVCache, output
+    def __init__(self, op_base, device_id):
+        super().__init__(op_base, device_id)
+        self.num_qo_heads = op_base.num_qo_heads
+        self.num_kv_heads = op_base.num_kv_heads
+        self.head_dim = op_base.head_dim
+
+    def run(self, layer, qo_indicies,  Q, kv_tuple, KVCache, output
     ):
         if Q.shape[0] == 0:
                 return
-        scale = 1.0 / (head_dim ** 0.5)
+        scale = 1.0 / (self.head_dim ** 0.5)
         # Compute group size: how many query heads correspond to one key/value head.
-        group_size = num_qo_heads // num_kv_heads
+        group_size = self.num_qo_heads // self.num_kv_heads
         for i in range(len(qo_indicies) - 1):
             # Retrieve the query slice for this batch element.
             start = qo_indicies[i]
             end = qo_indicies[i + 1]
 
             sub_q = Q[start:end, :]  # shape: [n_q, num_qo_heads * head_dim]
-            sub_q = sub_q.view(-1, num_qo_heads, head_dim)
+            sub_q = sub_q.view(-1, self.num_qo_heads, self.head_dim)
             
             sub_k, sub_v = KVCache.get(layer, i) # [n_k, num_kv_heads * head_dim]
             n_k = sub_k.shape[0]
 
-            sub_k = sub_k.view(n_k, num_kv_heads, head_dim)
-            sub_v = sub_v.view(n_k, num_kv_heads, head_dim)
+            sub_k = sub_k.view(n_k, self.num_kv_heads, self.head_dim)
+            sub_v = sub_v.view(n_k, self.num_kv_heads, self.head_dim)
 
             sub_k = sub_k.repeat_interleave(group_size, dim=1)
             sub_v = sub_v.repeat_interleave(group_size, dim=1)
@@ -45,7 +51,7 @@ class DecAttnTorchImpl(OperationImpl):
             # Resulting shape: [n_q, num_qo_heads, head_dim]
             out = torch.einsum("qhk,khd->qhd", attn_weights, sub_v)
             # Flatten heads back to shape: [n_q, num_qo_heads * head_dim]
-            out = out.reshape(-1, num_qo_heads * head_dim)
+            out = out.reshape(-1, self.num_qo_heads * self.head_dim)
             # Write the computed output into the operator's output tensor.
             output[start:end, :].copy_(out)
 
@@ -53,52 +59,60 @@ if platform_config.PLATFORM_CUDA:
     import flashinfer
     class DecAttnCudaImpl(OperationImpl):
         category_tag = "cuda"
-        def run(self, layer, head_dim, num_qo_heads, num_kv_heads, qo_indicies,  Q, KVCache, output
+        def __init__(self, op_base, device_id):
+            super().__init__(op_base, device_id)
+            self.num_qo_heads = op_base.num_qo_heads
+            self.num_kv_heads = op_base.num_kv_heads
+            self.head_dim = op_base.head_dim
+
+        def run(self, layer, qo_indicies,  Q, KVCache, output
         ):
             if Q.shape[0] == 0:
                 return
-            scale = 1.0 / (head_dim ** 0.5)
+            scale = 1.0 / (self.head_dim ** 0.5)
             # Compute group size: how many query heads correspond to one key/value head.
-            group_size = num_qo_heads // num_kv_heads
+            group_size = self.num_qo_heads // self.num_kv_heads
             for i in range(len(qo_indicies) - 1):
                 # Retrieve the query slice for this batch element.
                 start = qo_indicies[i]
                 end = qo_indicies[i + 1]
 
                 sub_q = Q[start:end, :]  # shape: [n_q, num_qo_heads * head_dim]
-                sub_q = sub_q.view(-1, num_qo_heads, head_dim)
+                sub_q = sub_q.view(-1, self.num_qo_heads, self.head_dim)
                 
                 sub_k, sub_v = KVCache[layer].get(i) # [n_k, num_kv_heads * head_dim]
 
                 n_k = sub_k.shape[0]
 
-                sub_k = sub_k.view(n_k, num_kv_heads, head_dim)
-                sub_v = sub_v.view(n_k, num_kv_heads, head_dim)
+                sub_k = sub_k.view(n_k, self.num_kv_heads, self.head_dim)
+                sub_v = sub_v.view(n_k, self.num_kv_heads, self.head_dim)
                 sub_q = sub_q.squeeze(0)
                 out = flashinfer.single_decode_with_kv_cache(sub_q, sub_k, sub_v, use_tensor_cores=True)
 
-                out = out.reshape(-1, num_qo_heads * head_dim)
+                out = out.reshape(-1, self.num_qo_heads * self.head_dim)
                 output[start:end, :].copy_(out)
 
     class DecAttnBatchedCudaImpl(OperationImpl):
         category_tag = "batched_cuda"
-        def __init__(self, inputs, outputs, weights):
-            super().__init__(inputs, outputs, weights)
-            self.workspace_buffer = torch.empty(32 * 1024 * 1024, dtype=torch.int8).to(0)
+        def __init__(self, op_base, device_id):
+            super().__init__(op_base, device_id)
+            self.workspace_buffer = torch.empty(32 * 1024 * 1024, dtype=torch.int8).to(self.device_id)
             self.wrapper = flashinfer.decode.BatchDecodeWithPagedKVCacheWrapper(
                     self.workspace_buffer, "HND", False, True
                 )
+            self.num_qo_heads = op_base.num_qo_heads
+            self.num_kv_heads = op_base.num_kv_heads
+            self.head_dim = op_base.head_dim
         
-        def plan(self, kv_indptr, kv_indices, kv_last_page_len,
-                    num_qo_heads, num_kv_heads, head_dim, page_size):
+        def plan(self, kv_indptr, kv_indices, kv_last_page_len, page_size):
             with prof_marker("DecAttnBatchedCudaImpl.plan"):
                 self.wrapper.plan(
                         kv_indptr,
                         kv_indices,
                         kv_last_page_len,
-                        num_qo_heads,
-                        num_kv_heads,
-                        head_dim,
+                        self.num_qo_heads,
+                        self.num_kv_heads,
+                        self.head_dim,
                         page_size,
                         logits_soft_cap=0.0,
                         pos_encoding_mode="NONE",
@@ -106,11 +120,11 @@ if platform_config.PLATFORM_CUDA:
                         q_data_type=torch.float16
                     )
 
-        def run(self, layer, head_dim, num_qo_heads, num_kv_heads, qo_indicies,  Q, kv_tuple, KVCache, output):
+        def run(self, layer, qo_indicies,  Q, kv_tuple, KVCache, output):
             if Q.shape[0] == 0:
                 return
 
-            output = output.view(-1, num_qo_heads, head_dim)
+            output = output.view(-1, self.num_qo_heads, self.head_dim)
             with prof_marker("DecAttnBatchedCudaImpl.run"):
                 # print("output shape: ", output.shape)
                 self.wrapper.run(Q, kv_tuple, out=output)
@@ -118,7 +132,7 @@ if platform_config.PLATFORM_CUDA:
                 # print("o is_contiguous: ", o.is_contiguous())
                 # print("o device: ", o.device)
                 # print("output device: ", output.device)
-            output = output.view(-1, num_qo_heads * head_dim)
+            output = output.view(-1, self.num_qo_heads * self.head_dim)
 
 class DecAttn(Operations):
     def __init__(self, name):
@@ -151,19 +165,13 @@ class DecAttn(Operations):
         for op_device in self.children:
             op_device.setShapeForIOWrappers()
     
-    def update(self, qo_indicies, kv_indptr, kv_indices, kv_last_page_len,
-                num_qo_heads, num_kv_heads, head_dim, page_size):
+    def update(self, qo_indicies, kv_indptr, kv_indices, kv_last_page_len, page_size):
         self.qo_indicies = qo_indicies
         if self.impl.category_tag == "batched_cuda":
-            self.impl.plan(kv_indptr, kv_indices, kv_last_page_len,
-                num_qo_heads, num_kv_heads, head_dim, page_size)
+            self.impl.plan(kv_indptr, kv_indices, kv_last_page_len, page_size)
     
     def profile(self):
         pass
-
-    def run(self, layer):
-        Q = self.inputs["Q"].tensor
-        self.impl.run(layer, self.head_dim, self.num_qo_heads, self.num_kv_heads, self.qo_indicies, Q, self.externals["KVCache"], self.outputs["output"].tensor)
     
 class DecAttn_Device(Operation_Device):
     def __init__(self, parent, device):
@@ -177,14 +185,13 @@ class DecAttn_Device(Operation_Device):
 class DecAttn_Layer(Operation_Layer):
     def __init__(self, layer, op_device):
         super().__init__(layer, op_device=op_device)
-        self.k_data_ptr, self.v_data_ptr = op_device.externals["KVCache"].get_whole_kv_data(self.layer)
+        self.k_data_ptr, self.v_data_ptr = op_device.externals["KVCache"].get_whole_kv_data(self.device_id, self.layer)
         self.kv_tuple = tuple([self.k_data_ptr, self.v_data_ptr])
 
-    
     def run(self):
         Q = self.inputs["Q"].tensor
         # self.operator_device.parent.impl.run(Q, self.kv_tuple, self.outputs["output"].tensor)
-        self.parent.parent.impl.run(self.layer, self.parent.parent.head_dim, self.parent.parent.num_qo_heads, self.parent.parent.num_kv_heads, self.parent.parent.qo_indicies,  Q, self.kv_tuple, self.parent.externals["KVCache"], self.outputs["output"].tensor)
+        self.impl.run(self.layer, self.parent.parent.qo_indicies,  Q, self.kv_tuple, self.parent.externals["KVCache"], self.outputs["output"].tensor)
     
 class PFAttnTorchImpl(OperationImpl):
     category_tag = "torch"
@@ -245,16 +252,21 @@ class PFAttnTorchImpl(OperationImpl):
 if platform_config.PLATFORM_CUDA:
     class PFAttnCudaImpl(OperationImpl):
         category_tag = "cuda"
-        def run(self, layer, head_dim, num_qo_heads, num_kv_heads, qo_indicies, Q, KVCache, output
+        def __init__(self, op_base, device_id):
+            super().__init__(op_base, device_id)
+            self.num_qo_heads = op_base.num_qo_heads
+            self.num_kv_heads = op_base.num_kv_heads
+            self.head_dim = op_base.head_dim
+        def run(self, layer, qo_indicies, Q, KVCache, output
         ):
             if Q.shape[0] == 0:
                 return
             # print("PFAttnCudaImpl")
             # print("Q shape: ", Q.shape)
             # print("Q: ", Q)
-            scale = 1.0 / (head_dim ** 0.5)
+            scale = 1.0 / (self.head_dim ** 0.5)
             # Compute group size: how many query heads correspond to one key/value head.
-            group_size = num_qo_heads // num_kv_heads
+            group_size = self.num_qo_heads // self.num_kv_heads
 
             for i in range(len(qo_indicies) - 1):
                 # Retrieve the query slice for this batch element.
@@ -263,58 +275,61 @@ if platform_config.PLATFORM_CUDA:
                 # Q is expected to be flattened as [n_total, num_qo_heads * head_dim];
                 # extract the sub-tensor corresponding to this batch element.
                 sub_q = Q[start:end, :]  # shape: [n_q, num_qo_heads * head_dim]
-                sub_q = sub_q.view(-1, num_qo_heads, head_dim)
+                sub_q = sub_q.view(-1, self.num_qo_heads, self.head_dim)
 
                 sub_k, sub_v = KVCache[layer].get(i)
                 n_k = sub_k.shape[0]
 
                 # Reshape keys and values so that the head dimension is explicit.
                 # New shapes: [n_k, num_kv_heads, head_dim]
-                sub_k = sub_k.view(n_k, num_kv_heads, head_dim)
-                sub_v = sub_v.view(n_k, num_kv_heads, head_dim)
+                sub_k = sub_k.view(n_k, self.num_kv_heads, self.head_dim)
+                sub_v = sub_v.view(n_k, self.num_kv_heads, self.head_dim)
                 sub_q = sub_q.contiguous()
                 sub_k = sub_k.contiguous()
                 sub_v = sub_v.contiguous()
                 
                 out = flashinfer.single_prefill_with_kv_cache(sub_q, sub_k, sub_v, causal=True)
-                out = out.reshape(-1, num_qo_heads * head_dim)
+                out = out.reshape(-1, self.num_qo_heads * self.head_dim)
 
                 output[start:end, :].copy_(out)
 
     class PFAttnBatchedCudaImpl(OperationImpl):
         category_tag = "batched_cuda"
-        def __init__(self, inputs, outputs, weights):
-            super().__init__(inputs, outputs, weights)
-            self.workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8).to(0)
+        def __init__(self, op_base, device_id):
+            super().__init__(op_base, device_id)
+            self.workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8).to(self.device_id)
             self.wrapper = flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper(
                 self.workspace_buffer, "HND"
             )
+            self.num_qo_heads = op_base.num_qo_heads
+            self.num_kv_heads = op_base.num_kv_heads
+            self.head_dim = op_base.head_dim
         
-        def plan(self, qo_indicies, kv_indptr, kv_indices, kv_last_page_len, num_qo_heads, num_kv_heads, head_dim, page_size,
+        def plan(self, qo_indicies, kv_indptr, kv_indices, kv_last_page_len, page_size,
                 causal=True, logits_soft_cap=0.0, pos_encoding_mode="NONE"):
             self.wrapper.plan(
                 qo_indicies,
                 kv_indptr,
                 kv_indices,
                 kv_last_page_len,
-                num_qo_heads,
-                num_kv_heads,
-                head_dim,
+                self.num_qo_heads,
+                self.num_kv_heads,
+                self.head_dim,
                 page_size,
                 causal=causal,
                 logits_soft_cap=logits_soft_cap,
                 pos_encoding_mode=pos_encoding_mode
             )
 
-        def run(self, layer, head_dim, num_qo_heads, num_kv_heads, qo_indicies, Q, kv_tuple, KVCache, output):
+        def run(self, layer, qo_indicies, Q, kv_tuple, KVCache, output):
             if Q.shape[0] == 0:
                 return
-            output = output.view(-1, num_qo_heads, head_dim)
+            output = output.view(-1, self.num_qo_heads, self.head_dim)
             # print("PFAttnBatchedCudaImpl")
             # print("qo_indicies: ", qo_indicies)
             self.wrapper.run(Q, kv_tuple, out=output)
 
-            output = output.view(-1, num_qo_heads * head_dim)
+            output = output.view(-1, self.num_qo_heads * self.head_dim)
 
 
 class PFAttn(Operations):
@@ -349,7 +364,7 @@ class PFAttn(Operations):
         for op_device in self.children:
             op_device.setShapeForIOWrappers()
     
-    def update(self, qo_indicies, kv_indptr, kv_indices, kv_last_page_len, num_qo_heads, num_kv_heads, head_dim, page_size,
+    def update(self, qo_indicies, kv_indptr, kv_indices, kv_last_page_len, page_size,
              causal=True, logits_soft_cap=0.0, pos_encoding_mode="NONE"):
         """Stores the query offset indices for each batch element.  
         qo_indicies should be a list (or tensor) of length (batch_size + 1) such that for each batch index i,  
@@ -358,8 +373,7 @@ class PFAttn(Operations):
         self.qo_indicies = qo_indicies
         if self.impl.category_tag == "batched_cuda":
             # Only plan for the batched CUDA implementation.
-            self.impl.plan(qo_indicies, kv_indptr, kv_indices, kv_last_page_len, 
-                num_qo_heads, num_kv_heads, head_dim, page_size,
+            self.impl.plan(qo_indicies, kv_indptr, kv_indices, kv_last_page_len, page_size,
                 causal=causal, logits_soft_cap=logits_soft_cap, pos_encoding_mode=pos_encoding_mode)
         # print("qo_indicies: ", qo_indicies)
         # print("qo_indicies dtype: ", qo_indicies.dtype) 
@@ -405,11 +419,6 @@ class PFAttn(Operations):
 
         self.checkConsistencyBetweenImpl(output_list)
 
-        
-    def run(self, layer):
-        Q = self.inputs["Q"].tensor
-        self.impl.run(layer, self.head_dim, self.num_qo_heads, self.num_kv_heads, self.qo_indicies, Q, self.externals["KVCache"], self.outputs["output"].tensor)
-
     
 class PFAttn_Device(Operation_Device):
     def __init__(self, parent, device):
@@ -424,12 +433,12 @@ class PFAttn_Device(Operation_Device):
 class PFAttn_Layer(Operation_Layer):
     def __init__(self, layer, op_device):
         super().__init__(layer=layer, op_device=op_device)
-        self.k_data_ptr, self.v_data_ptr = op_device.externals["KVCache"].get_whole_kv_data(self.layer)
+        self.k_data_ptr, self.v_data_ptr = op_device.externals["KVCache"].get_whole_kv_data(self.device_id, self.layer)
         self.kv_tuple = tuple([self.k_data_ptr, self.v_data_ptr])
 
     
     def run(self):
         Q = self.inputs["Q"].tensor
         # self.operator_device.parent.impl.run(Q, self.kv_tuple, self.outputs["output"].tensor)
-        self.parent.parent.impl.run(self.layer, self.parent.parent.head_dim, self.parent.parent.num_qo_heads, self.parent.parent.num_kv_heads, self.parent.parent.qo_indicies,  Q, self.kv_tuple, self.parent.externals["KVCache"], self.outputs["output"].tensor)
+        self.impl.run(self.layer, self.parent.parent.qo_indicies,  Q, self.kv_tuple, self.parent.externals["KVCache"], self.outputs["output"].tensor)
         

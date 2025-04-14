@@ -16,12 +16,15 @@ class WeightManager():
     def __init__(self):
         pass
     
-    def load_from_safe_tensor(self, tensor_path):
+    def load_from_safe_tensor(self, tensor_path, num_devices):
         self.weight_map = WeightManager.load_tensors(tensor_path)
-        # make all the tensor fp16
-        for key in self.weight_map.keys():
-            self.weight_map[key] = self.weight_map[key].half().to('cuda')
+        self.weights_per_device = [{} for _ in range(num_devices)]
+        for device_id in range(num_devices):
+            # make all the tensor fp16
+            for key in self.weight_map.keys():
+                # self.weight_map[key] = self.weight_map[key].half().to('cuda')
+                self.weights_per_device[device_id][key] = self.weight_map[key].half().to(f'cuda:{device_id}')
     
-    def set_weight(self, operation_list, total_layers):
+    def set_weight(self, operation_list, total_devices, total_layers):
         for op in operation_list:
-            op.processWeight(self.weight_map, total_layers)
+            op.processWeight(self.weights_per_device, total_devices, total_layers)

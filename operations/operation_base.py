@@ -26,18 +26,18 @@ class Operations:
         self.isVirtual = False
 
         # Connect to the database
-        self.conn = sqlite3.connect('performance.db')
-        self.cursor = self.conn.cursor()
-        # Create a table to store performance data if it doesn't exist
-        # self.cursor.execute('''
-        #     CREATE TABLE IF NOT EXISTS performance (
-        #         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        #         keyword TEXT,
-        #         batch_size INTEGER,
-        #         average_time REAL
-        #     )
-        # ''')
-        self.conn.commit()
+        # self.conn = sqlite3.connect('performance.db')
+        # self.cursor = self.conn.cursor()
+        # # Create a table to store performance data if it doesn't exist
+        # # self.cursor.execute('''
+        # #     CREATE TABLE IF NOT EXISTS performance (
+        # #         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        # #         keyword TEXT,
+        # #         batch_size INTEGER,
+        # #         average_time REAL
+        # #     )
+        # # ''')
+        # self.conn.commit()
         self.impl_map = {}
         
     def init_impl_map(self):
@@ -74,8 +74,8 @@ class Operations:
         for op_device in self.children:
             op_device.setShapeForIOWrappers()
     
-    def processWeight(self, global_weight_map, total_layers, cached = False):
-        return process_weight_none(global_weight_map, self.weight_name, None, total_layers, cached)
+    def processWeight(self, global_weight_map, total_devices, total_layers, cached = False):
+        return process_weight_none(global_weight_map, self.weight_name, None, total_devices, total_layers, cached)
     
     def first_only(self):
         self.first_layer_only = True
@@ -93,7 +93,7 @@ class Operations:
         for row in rows:
             print(row)
             
-    def config_tag(self, tag, parameter_map = {}):
+    def config_tag(self, tag, device_id, parameter_map = {}):
         self.tag = tag
         parts = tag.split(":", 1)
         category_tag = ""
@@ -103,7 +103,8 @@ class Operations:
         else:
             category_tag = parts[0]
             impl_tag = parts[1]
-        self.impl  = self.impl_map[category_tag](self.inputs, self.outputs, self.weights)
+        # self.impl  = self.impl_map[category_tag](self.inputs, self.outputs, self.weights, device_id)
+        self.impl  = self.impl_map[category_tag](self, device_id)
         self.config_impl(impl_tag, parameter_map)
         return self
     
@@ -154,8 +155,8 @@ class Operation_Device:
         self.device_id = device_id
         self.weights = parent.weights
         self.externals = self.parent.externals
-        self.impl = self.parent.impl
         self.children = []
+        self.batch_size = None
         self.inputs = {}
         for key, base_wrapper in parent.inputs.items():
             dev_wrapper = IOWrapper_Device(
@@ -180,6 +181,10 @@ class Operation_Device:
             base_wrapper.append_child(dev_wrapper)
             self.outputs[key] = dev_wrapper
     
+    @property
+    def impl(self):
+        return self.parent.impl
+
     @property
     def isVirtual(self):
         return self.parent.isVirtual
@@ -215,8 +220,12 @@ class Operation_Layer:
         self.outputs = op_device.outputs
         self.weights = op_device.weights
         self.externals = op_device.externals
-        self.impl:OperationImpl = op_device.impl
         self.parent = op_device
+        self.device_id = op_device.device_id
+
+    @property
+    def impl(self):
+        return self.parent.impl
 
     @property
     def prerequisites(self):

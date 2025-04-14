@@ -80,12 +80,6 @@ class Sampling(Operations):
                     ''', (self.name + f"_{category_tag}", batch_size, average_time))
         self.conn.commit()
 
-    def run(self, layer):
-        logits = self.inputs["logits"].tensor
-        # print("logits: ", logits)
-
-        self.impl.run(logits, self.outputs["tokens"].tensor)
-
 class Sampling_Device(Operation_Device):
     def __init__(self, parent, device):
         super().__init__(parent, device)
@@ -100,4 +94,4 @@ class Sampling_Layer(Operation_Layer):
         super().__init__(layer, op_device)
     
     def run(self):
-        self.parent.parent.impl.run(self.inputs["logits"].tensor, self.outputs["tokens"].tensor)
+        self.impl.run(self.inputs["logits"].tensor, self.outputs["tokens"].tensor)

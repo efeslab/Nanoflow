@@ -19,9 +19,6 @@ class GlobalInput(Operations):
     def profile(self):
         pass
 
-    def run(self, layer):
-        pass
-
 
 class GlobalInput_Device(Operation_Device):
     def __init__(self, parent, device):
@@ -53,10 +50,6 @@ class GlobalOutput(Operations):
         self.op_device = GlobalOutput_Device
 
     def profile(self):
-        pass
-
-    def run(self, layer):
-        # self.outputs["new_token"].tensor.copy_(self.inputs["tokens"].tensor[-1])
         pass
 
 class GlobalOutput_Device(Operation_Device):

@@ -2,11 +2,14 @@ from typing import List
 
 class OperationImpl:
     category_tag = None
-    def __init__(self, inputs, outputs, weights):
+    def __init__(self, op_base, device_id):
         self.impl_tag = None
-        self.inputs = inputs
-        self.outputs = outputs
-        self.weights = weights
+        self.op_base = op_base
+        self.device_id = device_id
+        self.batch_size = op_base.children[device_id].batch_size
+        self.inputs = op_base.children[device_id].inputs
+        self.outputs = op_base.children[device_id].outputs
+        self.weights = op_base.children[device_id].weights
     
     @staticmethod
     def list_tags(self) -> List[str]:

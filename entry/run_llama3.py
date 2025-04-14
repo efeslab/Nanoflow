@@ -8,7 +8,7 @@ from transformers import AutoTokenizer
 
 
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 # from models.llama3_NoKVCacheTorch import Pipeline
 # from models.llama3_KVCacheTorch import Pipeline

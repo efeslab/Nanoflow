@@ -85,15 +85,9 @@ class LayerNorm(Operations):
                     VALUES (?, ?, ?)
                     ''', (self.name + f"_{category_tag}", batch_size, average_time))
         self.conn.commit()
-
-    def run(self, layer):
-        x = self.inputs["input"].tensor
-        weight_val = self.weights["weight"].weight_map[layer]
-        
-        self.impl.run(x, weight_val, self.outputs["output"].tensor, epsilon = 1e-5)
     
-    def processWeight(self, global_weight_map, total_layers, cached = False):
-        return process_weight_layer(global_weight_map, self.weight_name, self.weights["weight"], total_layers, cached)
+    def processWeight(self, global_weight_map, total_devices, total_layers, cached = False):
+        return process_weight_layer(global_weight_map, self.weight_name, self.weights["weight"], total_devices, total_layers, cached)
 
     
 class LayerNorm_Device(Operation_Device):
@@ -111,4 +105,4 @@ class LayerNorm_Layer(Operation_Layer):
         super().__init__(layer, op_device)
 
     def run(self):
-        self.parent.parent.impl.run(self.inputs["input"].tensor, self.weights["weight"].weight_map[self.layer], self.outputs["output"].tensor, epsilon = 1e-5)
+        self.impl.run(self.inputs["input"].tensor, self.weights["weight"].weight_map[self.device_id][self.layer], self.outputs["output"].tensor, epsilon = 1e-5)

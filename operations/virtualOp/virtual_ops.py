@@ -7,11 +7,6 @@ def link_allinputs_to_alloutputs(inputs, outputs):
         for _, output_wrapper in outputs.items():
             input_wrapper >> output_wrapper
 
-def link_firstinputs_to_alloutputs(first_input, outputs):
-    for _, output_wrapper in outputs.items():
-        first_input >> output_wrapper
-
-
 class Copy(Operations):
     """Virtual copy operation for memory sharing between multiple consumers"""
     def __init__(self, name, num_outputs):
