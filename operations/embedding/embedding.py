@@ -47,10 +47,10 @@ class GenEmbedding(Operations):
         if platform_config.PLATFORM_CUDA:
             self.add_impl(GenEmbeddingCudaImpl)
         
-    def setShape(self, hidden_dim, vocab_size):
-        self.hidden_dim = hidden_dim
+    def setShape(self, hidden_dim, vocab_size, tp_size=1):
+        self.N = hidden_dim // tp_size
         self.vocab_size = vocab_size
-        self.weights["embedding"].shape = (self.vocab_size, self.hidden_dim)
+        self.weights["embedding"].shape = (self.vocab_size, self.N)
         for op_device in self.children:
             op_device.setShapeForIOWrappers()
     
@@ -101,7 +101,7 @@ class GenEmbedding_Device(Operation_Device):
 
     def setShapeForIOWrappers(self):
         self.inputs["token"].init_shape((0,))
-        self.outputs["output"].init_shape((0, self.parent.hidden_dim))
+        self.outputs["output"].init_shape((0, self.parent.N))
 
 
 class GenEmbedding_Layer(Operation_Layer):

@@ -123,7 +123,7 @@ if platform_config.PLATFORM_CUDA:
         def run(self, layer, qo_indicies,  Q, kv_tuple, KVCache, output):
             if Q.shape[0] == 0:
                 return
-
+            Q = Q.view(-1, self.num_qo_heads, self.head_dim)
             output = output.view(-1, self.num_qo_heads, self.head_dim)
             with prof_marker("DecAttnBatchedCudaImpl.run"):
                 # print("output shape: ", output.shape)
@@ -179,7 +179,7 @@ class DecAttn_Device(Operation_Device):
         self.op_layer = DecAttn_Layer 
 
     def setShapeForIOWrappers(self):
-        self.inputs["Q"].init_shape((0, self.parent.num_qo_heads, self.parent.head_dim))
+        self.inputs["Q"].init_shape((0, self.parent.num_qo_heads* self.parent.head_dim))
         self.outputs["output"].init_shape((0, self.parent.num_qo_heads * self.parent.head_dim))
 
 class DecAttn_Layer(Operation_Layer):
@@ -195,14 +195,19 @@ class DecAttn_Layer(Operation_Layer):
     
 class PFAttnTorchImpl(OperationImpl):
     category_tag = "torch"
+    def __init__(self, op_base, device_id):
+        super().__init__(op_base, device_id)
+        self.num_qo_heads = op_base.num_qo_heads
+        self.num_kv_heads = op_base.num_kv_heads
+        self.head_dim = op_base.head_dim
 
-    def run(self, layer, head_dim, num_qo_heads, num_kv_heads, qo_indicies, Q, kv_tuple, KVCache, output
+    def run(self, layer, qo_indicies, Q, kv_tuple, KVCache, output
     ):
         if Q.shape[0] == 0:
                 return
-        scale = 1.0 / (head_dim ** 0.5)
+        scale = 1.0 / (self.head_dim ** 0.5)
         # Compute group size: how many query heads correspond to one key/value head.
-        group_size = num_qo_heads // num_kv_heads
+        group_size = self.num_qo_heads // self.num_kv_heads
 
         for i in range(len(qo_indicies) - 1):
             # Retrieve the query slice for this batch element.
@@ -211,13 +216,13 @@ class PFAttnTorchImpl(OperationImpl):
             # Q is expected to be flattened as [n_total, num_qo_heads * head_dim];
             # extract the sub-tensor corresponding to this batch element.
             sub_q = Q[start:end, :]  # shape: [n_q, num_qo_heads * head_dim]
-            sub_q = sub_q.view(-1, num_qo_heads, head_dim)
+            sub_q = sub_q.view(-1, self.num_qo_heads, self.head_dim)
 
             sub_k, sub_v = KVCache.get(layer, i)
             n_k = sub_k.shape[0]
 
-            sub_k = sub_k.view(n_k, num_kv_heads, head_dim)
-            sub_v = sub_v.view(n_k, num_kv_heads, head_dim)
+            sub_k = sub_k.view(n_k, self.num_kv_heads, self.head_dim)
+            sub_v = sub_v.view(n_k, self.num_kv_heads, self.head_dim)
             # Expand (repeat) the keys and values so that they align with the query heads.
             sub_k = sub_k.repeat_interleave(group_size, dim=1)
             sub_v = sub_v.repeat_interleave(group_size, dim=1)
@@ -245,7 +250,7 @@ class PFAttnTorchImpl(OperationImpl):
             
             out = torch.einsum("qhk,khd->qhd", attn_weights, sub_v)
 
-            out = out.reshape(-1, num_qo_heads * head_dim)
+            out = out.reshape(-1, self.num_qo_heads * self.head_dim)
             # Write the computed output into th e operator's output tensor.
             output[start:end, :].copy_(out)
 
@@ -324,6 +329,7 @@ if platform_config.PLATFORM_CUDA:
         def run(self, layer, qo_indicies, Q, kv_tuple, KVCache, output):
             if Q.shape[0] == 0:
                 return
+            Q = Q.view(-1, self.num_qo_heads, self.head_dim)
             output = output.view(-1, self.num_qo_heads, self.head_dim)
             # print("PFAttnBatchedCudaImpl")
             # print("qo_indicies: ", qo_indicies)
@@ -426,7 +432,7 @@ class PFAttn_Device(Operation_Device):
         self.op_layer = PFAttn_Layer 
 
     def setShapeForIOWrappers(self):
-        self.inputs["Q"].init_shape((0, self.parent.num_qo_heads, self.parent.head_dim))
+        self.inputs["Q"].init_shape((0, self.parent.num_qo_heads * self.parent.head_dim))
         self.outputs["output"].init_shape((0, self.parent.num_qo_heads * self.parent.head_dim))
 
 

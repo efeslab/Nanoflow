@@ -1,5 +1,6 @@
 import transformers
 import torch
+import torch.distributed as dist
 import nvtx
 import os, sys
 sys.path.append("../")
@@ -11,6 +12,7 @@ from operations.activation.silu import Activation
 from operations.embedding.embedding import GenEmbedding
 from operations.globalOp.globalOp import GlobalInput, GlobalOutput
 from operations.gemm.gemm import GEMM
+from operations.allgather.allgather import AllGather
 from operations.norm.rmsnorm import LayerNorm
 from operations.sampling.max_sampling import Sampling
 from operations.rope.rope import RopeAppend
@@ -20,8 +22,6 @@ from kvcache.kv import KVCacheTorch
 from core.weightManager import WeightManager
 from core.bufferAllocate import BufferAllocator
 from core.executor import Executor
-
-
 
 class Pipeline():
     def __init__(self):
@@ -38,6 +38,13 @@ class Pipeline():
         self.actual_layer_range = [i for i in range(self.layer)]
         self.num_devices = torch.cuda.device_count()
         self.page_size = 64
+
+        self.pp_size = 1
+        self.dp_size = 1
+        self.tp_size = 2
+        assert self.pp_size * self.dp_size * self.tp_size == self.num_devices, f"num_devices {self.num_devices} should be equal to pp_size * dp_size * tp_size {self.pp_size * self.dp_size * self.tp_size}"
+        # create torch.distributed group
+        assert self.num_devices % self.tp_size == 0, f"num_devices {self.num_devices} should be divisible by tp_size {self.tp_size}"
 
     def init(self, weight_path):
         self.init_external_data()
@@ -56,6 +63,12 @@ class Pipeline():
         self.gen_embedding  = GenEmbedding("GenEmbedding").setWeightName("model.embed_tokens.weight").first_only()
         self.gen_embedding_devices, self.gen_embedding_layers_per_device = self.gen_embedding.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
 
+        self.allGather_embedding = AllGather("AllGatherEmbedding").first_only()
+        self.allGather_embedding_devices, self.allGather_embedding_layers_per_device = self.allGather_embedding.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+
+        self.copy_allgather_embedding = Copy("CopyAllGatherEmbedding", num_outputs=2)
+        self.copy_allgather_embedding_devices = self.copy_allgather_embedding.expand_gpu(self.num_devices)
+
         self.layerNormAttn   = LayerNorm("LayerNormAttn").setWeightName("model.layers.{layer}.input_layernorm.weight")
         self.layerNormAttn_devices, self.layerNormAttn_layers_per_device = self.layerNormAttn.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
 
@@ -65,6 +78,9 @@ class Pipeline():
             "model.layers.{layer}.self_attn.q_proj.weight"
         ])
         self.kqv_devices, self.kqv_layers_per_device = self.kqv.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+
+        self.allGather_kqv = AllGather("AllGatherKQV")
+        self.allGather_kqv_devices, self.allGather_kqv_layers_per_device = self.allGather_kqv.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
 
         self.ropeAppend      = RopeAppend("RopeAppend")
         self.ropeAppend.externals["KVCache"] = self.kv_cache
@@ -82,6 +98,9 @@ class Pipeline():
         self.o               = GEMM("O", True).setWeightName("model.layers.{layer}.self_attn.o_proj.weight")
         self.o_devices, self.o_layers_per_device = self.o.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
 
+        self.allGather_o = AllGather("AllGatherO")
+        self.allGather_o_devices, self.allGather_o_layers_per_device = self.allGather_o.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+
         self.layerNormFFN    = LayerNorm("LayerNormFFN").setWeightName("model.layers.{layer}.post_attention_layernorm.weight")
         self.layerNormFFN_devices, self.layerNormFFN_layers_per_device = self.layerNormFFN.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
 
@@ -91,12 +110,20 @@ class Pipeline():
         ])
         self.ug_devices, self.ug_layers_per_device = self.ug.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
 
+        self.allGather_ug = AllGather("AllGatherUG")
+        self.allGather_ug_devices, self.allGather_ug_layers_per_device = self.allGather_ug.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+
         self.activation      = Activation("Activation")
         self.activation_devices, self.activation_layers_per_device = self.activation.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
 
         self.d               = GEMM("D", True).setWeightName("model.layers.{layer}.mlp.down_proj.weight")
         self.d_devices, self.d_layers_per_device = self.d.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
 
+        self.allGather_d = AllGather("AllGatherD")
+        self.allGather_d_devices, self.allGather_d_layers_per_device = self.allGather_d.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+
+        self.copy_allgather_d = Copy("CopyAllGatherD", num_outputs=2)
+        self.copy_allgather_d_devices = self.copy_allgather_d.expand_gpu(self.num_devices)
 
         self.getLogits       = GEMM("GetLogits").setWeightName("lm_head.weight").last_only()
         self.getLogits_devices, self.getLogits_layers_per_device = self.getLogits.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
@@ -117,7 +144,7 @@ class Pipeline():
         self.copy_o = Copy("CopyO", num_outputs=2)
         self.copy_o_devices = self.copy_o.expand_gpu(self.num_devices)
 
-        self.copy_d = Copy("CopyD", num_outputs=3)
+        self.copy_d = Copy("CopyD", num_outputs=2)
         self.copy_d_devices = self.copy_d.expand_gpu(self.num_devices)
 
         self.redist_p = Redist("RedistPartition", num_inputs=1, num_outputs=2)
@@ -128,11 +155,12 @@ class Pipeline():
 
         # Save operations in an instance variable
         self.operation_list = [
-            self.global_input, self.gen_embedding, self.layerNormAttn, self.kqv, self.ropeAppend,
-            self.decAttn, self.pfAttn, self.o, self.layerNormFFN, self.ug, self.activation, self.d,
+            self.global_input, self.gen_embedding, self.allGather_embedding, self.layerNormAttn, self.kqv, self.allGather_kqv, self.ropeAppend,
+            self.decAttn, self.pfAttn, self.o, self.allGather_o, self.layerNormFFN, self.ug, self.allGather_ug,
+            self.activation, self.d, self.allGather_d,
             self.modelLayerNorm, self.getLogits, self.sample, self.global_output
         ]
-        self.virtual_operation_list = [self.copy_embedding, self.copy_o, self.copy_d, self.redist_p, self.redist_a]
+        self.virtual_operation_list = [self.copy_embedding, self.copy_allgather_embedding, self.copy_o, self.copy_d, self.copy_allgather_d, self.redist_p, self.redist_a]
 
         self.operation_device_list = []
         self.operation_layers_per_device = []
@@ -150,13 +178,19 @@ class Pipeline():
         self.global_input.outputs["tokens"] >> self.gen_embedding.inputs["token"]
 
         self.gen_embedding.outputs["output"] >> self.copy_embedding.inputs["input"]
-        self.copy_embedding.outputs["output_0"] >> self.layerNormAttn.inputs["input"]
+
+        self.copy_embedding.outputs["output_0"] >> self.allGather_embedding.inputs["input"]
+        self.allGather_embedding.outputs["output"] >> self.copy_allgather_embedding.inputs["input"]
+        self.copy_allgather_embedding.outputs["output_0"] >> self.layerNormAttn.inputs["input"]
+        self.copy_allgather_embedding.outputs["output_1"] >> self.allGather_d.outputs["output"]
+
         self.copy_embedding.outputs["output_1"] >> self.o.inputs["C"]
         self.copy_embedding.outputs["output_2"] >> self.d.outputs["D"]
 
         self.layerNormAttn.outputs["output"] >> self.kqv.inputs["A"]
 
-        self.kqv.outputs["D"] >> self.ropeAppend.inputs["kqv"]
+        self.kqv.outputs["D"] >> self.allGather_kqv.inputs["input"]
+        self.allGather_kqv.outputs["output"] >> self.ropeAppend.inputs["kqv"]
 
         self.ropeAppend.outputs["q"] >> self.redist_p.inputs["input_0"]
         self.redist_p.outputs["output_0"] >> self.decAttn.inputs["Q"]
@@ -167,21 +201,26 @@ class Pipeline():
         self.redist_a.outputs["output_0"] >> self.o.inputs["A"]
 
         self.o.outputs["D"] >> self.copy_o.inputs["input"]
-        self.copy_o.outputs["output_0"] >> self.layerNormFFN.inputs["input"]
-        self.copy_o.outputs["output_1"] >> self.d.inputs["C"]
+        self.copy_o.outputs["output_0"] >> self.allGather_o.inputs["input"]
+        self.allGather_o.outputs["output"] >> self.layerNormFFN.inputs["input"]
 
+        self.copy_o.outputs["output_1"] >> self.d.inputs["C"]
 
         self.layerNormFFN.outputs["output"] >> self.ug.inputs["A"]
 
-        self.ug.outputs["D"] >> self.activation.inputs["input"]
+        self.ug.outputs["D"] >> self.allGather_ug.inputs["input"]
+        self.allGather_ug.outputs["output"] >> self.activation.inputs["input"]
 
         self.activation.outputs["output"] >> self.d.inputs["A"]
 
-
         self.d.outputs["D"] >> self.copy_d.inputs["input"]
-        self.copy_d.outputs["output_0"] >> (self.layerNormAttn.inputs["input"], True)
-        self.copy_d.outputs["output_1"] >> (self.o.inputs["C"], True)
-        self.copy_d.outputs["output_2"] >> self.modelLayerNorm.inputs["input"]
+
+        self.copy_d.outputs["output_0"] >> (self.o.inputs["C"], True)
+        self.copy_d.outputs["output_1"] >> self.allGather_d.inputs["input"]
+
+        self.allGather_d.outputs["output"] >> self.copy_allgather_d.inputs["input"]
+        self.copy_allgather_d.outputs["output_0"] >> (self.layerNormAttn.inputs["input"], True)
+        self.copy_allgather_d.outputs["output_1"] >> self.modelLayerNorm.inputs["input"]
 
         self.modelLayerNorm.outputs["output"] >> self.getLogits.inputs["A"]
 
@@ -200,16 +239,21 @@ class Pipeline():
 
     def init_set_shape(self):
         self.global_input.setShape()
-        self.gen_embedding.setShape(self.hidden_dim, self.vocab_size)
+        self.gen_embedding.setShape(self.hidden_dim, self.vocab_size, self.tp_size)
+        self.allGather_embedding.setShape(self.hidden_dim, self.tp_size)
         self.layerNormAttn.setShape(self.hidden_dim)
-        self.kqv.setShape(self.kqv_heads * self.head_dim, self.hidden_dim).setParameter(1.0, 0.0)
+        self.kqv.setShape(self.kqv_heads * self.head_dim, self.hidden_dim, self.tp_size).setParameter(1.0, 0.0)
+        self.allGather_kqv.setShape(self.kqv_heads * self.head_dim, self.tp_size)
         self.decAttn.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim)
         self.pfAttn.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim)
         self.ropeAppend.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim)
-        self.o.setShape(self.hidden_dim, self.hidden_dim).setParameter(1.0, 1.0)
+        self.o.setShape(self.hidden_dim, self.hidden_dim, self.tp_size).setParameter(1.0, 1.0)
+        self.allGather_o.setShape(self.hidden_dim, self.tp_size)
         self.layerNormFFN.setShape(self.hidden_dim)
-        self.ug.setShape(self.intermediate_dim * 2, self.hidden_dim).setParameter(1.0, 0.0)
-        self.d.setShape(self.hidden_dim, self.intermediate_dim).setParameter(1.0, 1.0)
+        self.ug.setShape(self.intermediate_dim * 2, self.hidden_dim, self.tp_size).setParameter(1.0, 0.0)
+        self.allGather_ug.setShape(self.intermediate_dim * 2, self.tp_size)
+        self.d.setShape(self.hidden_dim, self.intermediate_dim, self.tp_size).setParameter(1.0, 1.0)
+        self.allGather_d.setShape(self.hidden_dim, self.tp_size)
         self.activation.setShape(self.intermediate_dim)
         self.modelLayerNorm.setShape(self.hidden_dim)
         self.getLogits.setShape(self.vocab_size, self.hidden_dim).setParameter(1.0, 0.0)
@@ -218,7 +262,7 @@ class Pipeline():
     
     def init_set_weight(self, weight_path):
         weight_manager = WeightManager()
-        weight_manager.load_from_safe_tensor(weight_path, self.num_devices)
+        weight_manager.load_from_safe_tensor(weight_path, self.num_devices, self.tp_size)
         weight_manager.set_weight(self.operation_list, self.num_devices, self.layer)
         torch.cuda.empty_cache()
     
@@ -236,21 +280,41 @@ class Pipeline():
     
     def config_algorithm(self, device_id=0):
         self.gen_embedding.config_tag("torch", device_id)
+        self.allGather_embedding.config_tag("torch", device_id)
         self.layerNormAttn.config_tag("torch", device_id)
         self.activation.config_tag("torch", device_id)
         self.kqv.config_tag("torch", device_id)
+        self.allGather_kqv.config_tag("torch", device_id)
         self.ropeAppend.config_tag("torch", device_id)
         self.decAttn.config_tag("torch", device_id)
         self.pfAttn.config_tag("torch", device_id)
         self.layerNormFFN.config_tag("torch", device_id)
         self.o.config_tag("torch", device_id)
+        self.allGather_o.config_tag("torch", device_id)
         self.ug.config_tag("torch", device_id)
+        self.allGather_ug.config_tag("torch", device_id)
         self.d.config_tag("torch", device_id)
+        self.allGather_d.config_tag("torch", device_id)
         self.modelLayerNorm.config_tag("torch", device_id)
         self.sample.config_tag("torch", device_id)
         self.getLogits.config_tag("torch", device_id)
 
-    
+    def config_network(self, device_id=0):
+        os.environ["MASTER_ADDR"] = "localhost"
+        os.environ["MASTER_PORT"] = "12355"
+        dist.init_process_group(backend="nccl", rank=device_id, world_size=self.num_devices)
+        group_index = device_id // self.tp_size
+        print("group_index: ", group_index)
+        self.subgroup = dist.new_group(ranks=[i for i in range(group_index * self.tp_size, (group_index + 1) * self.tp_size)])
+        print("subgroup in main: ", self.subgroup)
+
+    def update_network_ops(self):
+        self.allGather_embedding.update(self.subgroup)
+        self.allGather_kqv.update(self.subgroup)
+        self.allGather_ug.update(self.subgroup)
+        self.allGather_o.update(self.subgroup)
+        self.allGather_d.update(self.subgroup)
+
     def update(self, input_ids, decode_flag=False, device_id=0):
         
         self.input_ids = input_ids
@@ -261,13 +325,14 @@ class Pipeline():
             self.config_batch_size(decode_flag, device_id)
             self.update_allocate_buffers(device_id)
             print("finish update_allocate_buffers")
+            self.config_network(device_id)
+            self.update_network_ops()
             self.config_algorithm(device_id)
             self.init_executor(device_id)
         input_tensor = torch.tensor(flattened, dtype=torch.int32, device=f'cuda:{device_id}')
         # get cumulative sum of the number of tokens in each input
         request_length = torch.tensor([len(x) for x in input_ids], dtype=torch.int32, device=f'cuda:{device_id}')
         self.cumsum_input = torch.cat([torch.tensor([0], dtype=torch.int32, device=f'cuda:{device_id}'), torch.cumsum(request_length, dim=0, dtype=torch.int32)])
-
 
         self.global_input.children[device_id].outputs["tokens"].tensor[:input_tensor.shape[0]].copy_(input_tensor)
         self.ropeAppend.update(self.page_size, self.cumsum_input, None, None, None, None, None, decode_flag)
@@ -312,6 +377,9 @@ class Pipeline():
             temp_out = temp_out.cpu()
             new_tokens = [ [temp_out[idx-1].item()] for idx in self.cumsum_input[1:] ]
         return new_tokens
+
+    def terminate(self):
+        dist.destroy_process_group()
 
 if __name__ == "__main__":
     # remove the file performance.db

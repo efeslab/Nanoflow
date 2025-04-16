@@ -82,7 +82,6 @@ class RopeAppendTorchImpl(OperationImpl):
 
             # Update the external KVCache with the new key and value.
             KVCache.put(layer, i, sub_k, v[start:end, :])
-        q = q.reshape(-1, self.num_qo_heads, self.head_dim)
         output.copy_(q)
         
 if platform_config.PLATFORM_CUDA:
@@ -253,7 +252,7 @@ class RopeAppend_Device(Operation_Device):
             (self.parent.num_qo_heads + 2 * self.parent.num_kv_heads) * self.parent.head_dim,
         ))
         # The output "q" has shape [batch_size, num_qo_heads * head_dim]
-        self.outputs["q"].init_shape((0, self.parent.num_qo_heads, self.parent.head_dim))
+        self.outputs["q"].init_shape((0, self.parent.num_qo_heads * self.parent.head_dim))
 
 class RopeAppend_Layer(Operation_Layer):
     def __init__(self, layer, op_device):

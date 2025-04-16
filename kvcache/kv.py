@@ -23,9 +23,9 @@ class KVCacheNone():
     def get(self, layer, idx):
         return self.cache.get((layer, idx), None)
     
-    def get_whole_kv_data(self, layer: int):
+    def get_whole_kv_data(self, device_id, layer: int):
         return None, None
-    def get_whole_kv_data_all_layers(self):
+    def get_whole_kv_data_all_layers(self, device_id):
         return None, None
     def get_indices(self, layer, idx):
         return True
@@ -73,9 +73,9 @@ class KVCacheTorch():
     
     def get_indices(self, layer, idx):
         return self.cache_indices.get((layer, idx), None)
-    def get_whole_kv_data(self, layer: int):
+    def get_whole_kv_data(self, device_id, layer: int):
         return None, None
-    def get_whole_kv_data_all_layers(self):
+    def get_whole_kv_data_all_layers(self, device_id):
         return None, None
 
 class DistKVPool:

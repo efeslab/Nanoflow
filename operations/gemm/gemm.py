@@ -14,21 +14,22 @@ class GEMMTorchImpl(OperationImpl):
     category_tag = "torch"
     impl_tag_profile = "torch"
     def config(self, impl_tag, parameter_map):
-        self.alpha = parameter_map["alpha"]
-        self.bias = parameter_map["bias"]
+        self.alpha = self.op_base.alpha
+        self.bias = self.op_base.bias
         self.beta = 0.0
         if self.bias:
-            self.beta = parameter_map["beta"]
+            self.beta = self.op_base.beta
     
     def run(self, B):
-        D = self.outputs["D"].children[0].tensor
-        A = self.inputs["A"].children[0].tensor
+        D = self.outputs["D"].tensor
+        A = self.inputs["A"].tensor
         
         if self.bias:
-            C = self.inputs["C"].children[0].tensor
+            C = self.inputs["C"].tensor
             D.copy_(A.matmul(B) * self.alpha + C * self.beta)
         else:
             D.copy_(A.matmul(B) * self.alpha)
+
 if platform_config.PLATFORM_CUDA:
     import pybind.build.bind_gemm as bind_gemm
     class GEMMCudaImpl(OperationImpl):
@@ -97,8 +98,9 @@ class GEMM(Operations):
         if platform_config.PLATFORM_CUDA:
             self.add_impl(GEMMCudaImpl)
     
-    def setShape(self, N, K):
-        self.N = N
+    def setShape(self, N, K, tp_size=1, strides=[]):
+        assert N % tp_size == 0, f"N: {N}, tp_size: {tp_size}"
+        self.N = N // tp_size
         self.K = K
         self.weights["B"].shape = (self.K, self.N)
         for op_device in self.children:
@@ -162,13 +164,19 @@ class GEMM(Operations):
         self.conn.commit()
     
     def processWeight(self, global_weight_map, total_devices, total_layers, cached = False):
+        kqv_flag = False
+        if self.name == "KQV" or self.name == "UG":
+            kqv_flag = True
         self.weights["B"].weight_map = [{} for _ in range(total_devices)]
         if not isinstance(self.weight_name, list):
             self.weight_name = [self.weight_name]
         for device_id in range(total_devices):
             if any(['{layer}' in name for name in self.weight_name]):
                 for l in range(total_layers):
-                    self.weights["B"].weight_map[device_id][l] = torch.cat([global_weight_map[device_id][name.format(layer=l)].t() for name in self.weight_name], dim=1).contiguous()
+                    if not kqv_flag:
+                        self.weights["B"].weight_map[device_id][l] = torch.cat([global_weight_map[device_id][name.format(layer=l)].t() for name in self.weight_name], dim=1).contiguous()
+                    else:
+                        self.weights["B"].weight_map[device_id][l] = torch.cat([global_weight_map[device_id][name.format(layer=l)].t() for name in self.weight_name], dim=1)[:, device_id* self.N:(device_id+1)*self.N].contiguous()
             else:
                 weight_tensor = torch.cat([global_weight_map[device_id][name].t() for name in self.weight_name], dim=1).contiguous()
                 for l in range(total_layers):

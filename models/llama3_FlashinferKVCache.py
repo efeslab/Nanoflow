@@ -5,7 +5,6 @@ import os, sys
 sys.path.append("../")
 sys.path.append('../pybind/build')
 os.environ["HF_HOME"] = "/code/hf"
-# os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 from operations.operation_base import Operations
 from operations.activation.silu import Activation
@@ -39,20 +38,6 @@ class Pipeline():
         self.actual_layer_range = [i for i in range(self.layer)]
         self.num_devices = torch.cuda.device_count()
         self.page_size = 64
-        self.configuration = {
-            "num_kv_heads": self.num_kv_heads,
-            "num_qo_heads": self.num_qo_heads,
-            "kqv_heads": self.kqv_heads,
-            "head_dim": self.head_dim,
-            "vocab_size": self.vocab_size,
-            "hidden_dim": self.hidden_dim,
-            "intermediate_dim": self.intermediate_dim,
-            "batch_size": self.batch_size,
-            "layer": self.layer,
-            "actual_layer_range": self.actual_layer_range,
-            "num_devices": self.num_devices,
-            "page_size": self.page_size
-        }
 
     def init(self, weight_path):
         self.init_external_data()
@@ -84,7 +69,6 @@ class Pipeline():
 
         self.ropeAppend      = RopeAppend("RopeAppend")
         self.ropeAppend.externals["KVCache"] = self.batched_kv_cache
-        # self.ropeAppend.externals["k_data"], self.ropeAppend.externals["v_data"] = self.batched_kv_cache.get_whole_kv_data_all_layers()
         self.ropeAppend_devices, self.ropeAppend_layers_per_device = self.ropeAppend.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
 
 
@@ -161,7 +145,6 @@ class Pipeline():
             for operation in self.operation_list:
                 op_layers.extend(operation.op_layers_per_device[i])
             self.operation_device_list.append(op_devices)
-            print(f"op_devices: {op_devices}")
             self.operation_layers_per_device.append(op_layers)
 
     def init_dependency(self):
@@ -327,7 +310,6 @@ class Pipeline():
         bufferAllocator.set_all_batchsize_by_linear_programming()
         
         bufferAllocator.allocate_buffer(device_id)
-        print(f"bufferAllocator.allocation_infos: {bufferAllocator.allocate_infos}")
         print(f"Total allocated: {bufferAllocator.total_allocated / 1024 / 1024} MB in device {device_id}")
 
     def profile(self):

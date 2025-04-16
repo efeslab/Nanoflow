@@ -13,7 +13,6 @@ class BufferAllocator():
         self.alloc_nodes = {}
         self.allocation_graph = []
         self.total_allocated = 0
-        self.allocate_infos = [] # list[(shape, list[(base operator's name, offset)])]
 
     def check_buffer_name_and_size(self):
         # Assert fullName is unique.
@@ -67,6 +66,7 @@ class BufferAllocator():
             if wrapper.is_output_wrapper:
                 assert len(wrapper.next) <= 1, f"{wrapper.fullName} has more than one next connections!\n"
                 for next_wrapper in wrapper.next:
+                    # assert wrapper.shape[1] == next_wrapper.shape[1], f"{wrapper.fullName} and {next_wrapper.fullName} has different shape"
                     # print(f"add equation {wrapper.fullName} = {next_wrapper.fullName}")
                     equations.append(sp.Eq(variables[wrapper.fullName], variables[next_wrapper.fullName]))
 
@@ -104,10 +104,9 @@ class BufferAllocator():
     
     def allocate_buffers_for_components(self, device_id):
         self.total_allocated = 0
-        self.allocate_infos = []
         components = self.get_connected_components()
         for comp in components:
-            # print("component: ", comp)
+            print("component: ", comp)
             # Create a subgraph for the component:
             comp = self.full_graph.subgraph(comp)
             
@@ -129,7 +128,7 @@ class BufferAllocator():
                 return (next_node_name, 0)
 
             root_nodes_name = [name for name, indeg in comp.in_degree() if indeg == 0]
-            # print(f"root_nodes_name: {root_nodes_name}")
+            print(f"root_nodes_name: {root_nodes_name}")
             root_nodes = [self.full_graph.nodes[name]['wrapper'] for name in root_nodes_name]
             # sort these nodes by their next connections
             sorted_root_nodes = sorted(root_nodes, key=sort_key)
@@ -159,7 +158,7 @@ class BufferAllocator():
             while processing_queue:
                 node = processing_queue.pop(0)
                 node.set_whole_buffer(whole_buffer)
-                # print("node: ", node.fullName, "with whole buffer: ", whole_buffer.shape, "tensor", node.tensor.shape,"and offset: ", node.tensor_offset)
+                print("node: ", node.fullName, "with whole buffer: ", whole_buffer.shape, "tensor", node.tensor.shape,"and offset: ", node.tensor_offset)
                 next_nodes = [self.full_graph.nodes[name]["wrapper"] for name in list(self.full_graph[node.fullName])]
                 # print(f"next nodes: {[n for n in next_nodes]}")
                 for next_node in next_nodes:
@@ -193,7 +192,6 @@ class BufferAllocator():
 
     def allocate_buffer(self, device_id, plot = False):
         self.allocate_buffers_for_components(device_id)
-        # print(self.allocate_infos)
         if plot:
             self.draw_dependency_graph()
             self.draw_dependency_subgraphs()

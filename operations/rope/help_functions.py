@@ -8,7 +8,7 @@ def rotate_half(x):
     x2 = x[..., dim // 2 :]
     return torch.cat([-x2, x1], dim=-1)
 
-def apply_rope(self, rope_type, theta, original_max_position_embeddings, low_freq_factor, high_freq_factor, factor, x, output, offset=0):
+def apply_rope(rope_type, theta, original_max_position_embeddings, low_freq_factor, high_freq_factor, factor, x, output, offset=0):
     """
     Applies RoPE to the tensor `x` (of shape [seq_len, head_dim]). For llama3,
     we adjust the inverse frequency vector as described in the paper.

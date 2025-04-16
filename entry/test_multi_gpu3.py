@@ -5,12 +5,14 @@ sys.path.append("../")
 os.environ["CUDA_VISIBLE_DEVICES"] = "2, 3"
 import time
 import torch
+import torch.distributed as dist
 import nvtx
 
 from multiprocessing import Value, Array, Barrier
 
 from transformers import AutoTokenizer
-from models.llama3_FlashinferKVCache import Pipeline
+# from models.llama3_FlashinferKVCache_TP2 import Pipeline
+from models.llama3_KVCacheTorch_TP2 import Pipeline
 
 def worker(rank, world_size, shared_int, shared_batch_size, shared_array, barrier, pipeline, temp_out, shared_command, input_ids):
     """
@@ -26,11 +28,24 @@ def worker(rank, world_size, shared_int, shared_batch_size, shared_array, barrie
         # First barrier: wait until the main process writes a new task.
         barrier.wait()
         match shared_command.value:
+            case 0:
+                os.environ.setdefault("MASTER_ADDR", "localhost")
+                os.environ.setdefault("MASTER_PORT", "12355")
+                
+                # Initialize the process group.
+                dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+                print(f"Process {rank} initialized on GPU {rank}.")
+                local_tensor = torch.full((1, 128), float(rank), device=torch.cuda.current_device())
+                gather_list = [torch.empty_like(local_tensor) for _ in range(world_size)]
+                dist.all_gather(gather_list, local_tensor)
+                all_gathered_tensor = torch.cat(gather_list, dim=0)
+                print(f"Rank {rank}: Gathered tensor (all processes):\n{all_gathered_tensor}")
+
             case 1:
                 pipeline.update(input_ids, decode_flag=False, device_id=rank)
                 # temp_out = torch.zeros(pipeline.batch_size, dtype=torch.int32, device='cuda')
                 # new_tokens = pipeline.run(temp_out)
-                new_tokens = pipeline.run(rank=rank, file_name=f"test_{rank}", filefolder_name=f"test_{rank}_folder")
+                new_tokens = pipeline.run(rank=rank, file_name=f"tp_test_{rank}", filefolder_name=f"tp_test_{rank}_folder")
                 for i, item in enumerate(new_tokens):
                     output_strings[i].append(item[0])
                 # pipeline.update(output_strings)
@@ -46,6 +61,7 @@ def worker(rank, world_size, shared_int, shared_batch_size, shared_array, barrie
                 
             case -1:
                 # Termination signal received.
+                pipeline.terminate()
                 barrier.wait()
                 break
         # Second barrier: wait until all workers finish computation.
@@ -58,16 +74,11 @@ if __name__ == '__main__':
     mp.set_start_method('spawn')
     # print("main Current start method:", mp.get_start_method(allow_none=True))
     
-    # print available GPUs
-    # print("Available GPUs: ", torch.cuda.device_count())
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
-    # input_strings = ["Hi, who are you?"]
-    # input_strings = ["Hi, who are you?", "What's the weather today?"]
     input_strings = [ "Hi, who are you?" for _ in range(16)]
     input_ids = [tokenizer.encode(s) for s in input_strings]
     flattened = [item for sublist in input_ids for item in sublist]
 
-    # print(input_ids)
     pipeline = Pipeline()
     pipeline.init_external_data()
     pipeline.init_operations()
@@ -75,17 +86,13 @@ if __name__ == '__main__':
     pipeline.init_set_shape()
     print("finish init shape")
     pipeline.init_set_weight("/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a")
-    # print("finish init weight")
 
     print("finish update pipeline")
 
-
+    world_size = pipeline.num_devices
+    print(f"Number of GPUs: {world_size}")
     
-    # Use the number of available GPUs (or set a fixed number). Here we use torch.cuda.device_count()
-    # if you have GPUs; otherwise, you could simply set world_size = 4.
-    world_size = 2
-    
-    iterations = 20
+    iterations = 1
 
     # Create a shared integer (for the task value) and a shared array to hold each worker's result.
     shared_command = Value('i', 1)    # 'i' stands for a signed integer.

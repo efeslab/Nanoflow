@@ -23,6 +23,15 @@ class Copy(Operations):
         # link_firstinputs_to_alloutputs(self.inputs["input"], self.outputs)
         self.op_device = Copy_Device
 
+    def checkConnection(self):
+        for name, IOwrapper in self.inputs.items():
+            if len(IOwrapper.prev) == 0:
+                raise Exception(f"Operation {self.name}, Input {name} is not connected")
+        for name, IOwrapper in self.outputs.items():
+            if len(IOwrapper.next) == 0:
+                print(f"Operation {self.name}, Output {name} is not connected")
+                raise Exception(f"Operation {self.name}, Output {name} is not connected")
+
     def check(self):
         pass
         # if len(self.io.prev) == 0:
@@ -62,6 +71,14 @@ class Redist(Operations):
         # link_firstinputs_to_alloutputs(self.inputs["input_0"], self.outputs)
         self.children = []
         self.op_device = Redist_Device
+
+    def checkConnection(self):
+        for name, IOwrapper in self.inputs.items():
+            if len(IOwrapper.prev) == 0:
+                raise Exception(f"Operation {self.name}, Input {name} is not connected")
+        for name, IOwrapper in self.outputs.items():
+            if len(IOwrapper.next) == 0:
+                raise Exception(f"Operation {self.name}, Output {name} is not connected")
 
     def check(self):
         pass
