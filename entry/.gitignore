@@ -1,2 +1,4 @@
-llama3-nokvcache-out
-llama3-kv-out*
+llama3-*
+test_0_folder
+test_1_folder
+tp_test*

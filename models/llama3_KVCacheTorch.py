@@ -10,11 +10,11 @@ from operations.operation_base import Operations
 from operations.activation.silu import Activation
 from operations.embedding.embedding import GenEmbedding
 from operations.globalOp.globalOp import GlobalInput, GlobalOutput
-from operations.gemm.gemm import GEMM
+from operations.gemm.gemm_N_parallel import GEMM_N_Parallel
 from operations.norm.rmsnorm import LayerNorm
 from operations.sampling.max_sampling import Sampling
-from operations.rope.rope import RopeAppend
-from operations.attention.llamaAttention import DecAttn, PFAttn
+from operations.rope.rope_torch import RopeAppendTorch
+from operations.attention.llamaAttention_torch import DecAttnTorch, PFAttnTorch
 from operations.virtualOp.virtual_ops import Copy, Redist
 from kvcache.kv import KVCacheTorch
 from core.weightManager import WeightManager
@@ -26,6 +26,7 @@ from core.executor import Executor
 class Pipeline():
     def __init__(self):
         # Set parameters as instance variables.
+        self.pipeline_name = "Llama3-7B"
         self.num_kv_heads = 8
         self.num_qo_heads = 32
         self.kqv_heads = self.num_qo_heads + 2 * self.num_kv_heads
@@ -34,82 +35,83 @@ class Pipeline():
         self.hidden_dim = 4096
         self.intermediate_dim = 14 * 1024
         self.batch_size = None
-        self.layer = 32
-        self.actual_layer_range = [i for i in range(self.layer)]
+        self.num_layers = 32
         self.num_devices = torch.cuda.device_count()
         self.page_size = 64
 
-    def init(self, weight_path):
+    def init(self, weight_path, cached=False):
         self.init_external_data()
         self.init_operations()
         self.init_dependency()
         self.init_set_shape()
-        self.init_set_weight(weight_path)
+        self.init_set_weight(weight_path, cached)
+        self.init_streams()
+        self.config_streams()
 
     def init_external_data(self):
-        self.kv_cache = KVCacheTorch()
+        self.kv_cache = KVCacheTorch(self.num_kv_heads, self.head_dim)
 
     def init_operations(self):
         self.global_input    = GlobalInput("GlobalInput").first_only()
-        self.global_input_devices, self.global_input_layers_per_device = self.global_input.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.global_input_devices, self.global_input_layers_per_device = self.global_input.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
         self.gen_embedding  = GenEmbedding("GenEmbedding").setWeightName("model.embed_tokens.weight").first_only()
-        self.gen_embedding_devices, self.gen_embedding_layers_per_device = self.gen_embedding.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.gen_embedding_devices, self.gen_embedding_layers_per_device = self.gen_embedding.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
         self.layerNormAttn   = LayerNorm("LayerNormAttn").setWeightName("model.layers.{layer}.input_layernorm.weight")
-        self.layerNormAttn_devices, self.layerNormAttn_layers_per_device = self.layerNormAttn.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.layerNormAttn_devices, self.layerNormAttn_layers_per_device = self.layerNormAttn.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
-        self.kqv             = GEMM("KQV").setWeightName([
+        self.kqv             = GEMM_N_Parallel("KQV").setWeightName([
             "model.layers.{layer}.self_attn.k_proj.weight",
             "model.layers.{layer}.self_attn.v_proj.weight",
             "model.layers.{layer}.self_attn.q_proj.weight"
         ])
-        self.kqv_devices, self.kqv_layers_per_device = self.kqv.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.kqv_devices, self.kqv_layers_per_device = self.kqv.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
-        self.ropeAppend      = RopeAppend("RopeAppend")
+        self.ropeAppend      = RopeAppendTorch("RopeAppend")
         self.ropeAppend.externals["KVCache"] = self.kv_cache
-        self.ropeAppend_devices, self.ropeAppend_layers_per_device = self.ropeAppend.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.ropeAppend_devices, self.ropeAppend_layers_per_device = self.ropeAppend.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
 
-        self.decAttn         = DecAttn("DecAttn")
+        self.decAttn         = DecAttnTorch("DecAttn")
         self.decAttn.externals["KVCache"] = self.kv_cache
-        self.decAttn_devices, self.decAttn_layers_per_device = self.decAttn.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.decAttn_devices, self.decAttn_layers_per_device = self.decAttn.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
-        self.pfAttn          = PFAttn("PFAttn")
+        self.pfAttn          = PFAttnTorch("PFAttn")
         self.pfAttn.externals["KVCache"] = self.kv_cache
-        self.pfAttn_devices, self.pfAttn_layers_per_device = self.pfAttn.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.pfAttn_devices, self.pfAttn_layers_per_device = self.pfAttn.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
-        self.o               = GEMM("O", True).setWeightName("model.layers.{layer}.self_attn.o_proj.weight")
-        self.o_devices, self.o_layers_per_device = self.o.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.o               = GEMM_N_Parallel("O", True).setWeightName("model.layers.{layer}.self_attn.o_proj.weight")
+        self.o_devices, self.o_layers_per_device = self.o.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
         self.layerNormFFN    = LayerNorm("LayerNormFFN").setWeightName("model.layers.{layer}.post_attention_layernorm.weight")
-        self.layerNormFFN_devices, self.layerNormFFN_layers_per_device = self.layerNormFFN.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.layerNormFFN_devices, self.layerNormFFN_layers_per_device = self.layerNormFFN.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
-        self.ug              = GEMM("UG").setWeightName([
+        self.ug              = GEMM_N_Parallel("UG").setWeightName([
             "model.layers.{layer}.mlp.up_proj.weight",
             "model.layers.{layer}.mlp.gate_proj.weight"
         ])
-        self.ug_devices, self.ug_layers_per_device = self.ug.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.ug_devices, self.ug_layers_per_device = self.ug.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
         self.activation      = Activation("Activation")
-        self.activation_devices, self.activation_layers_per_device = self.activation.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.activation_devices, self.activation_layers_per_device = self.activation.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
-        self.d               = GEMM("D", True).setWeightName("model.layers.{layer}.mlp.down_proj.weight")
-        self.d_devices, self.d_layers_per_device = self.d.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.d               = GEMM_N_Parallel("D", True).setWeightName("model.layers.{layer}.mlp.down_proj.weight")
+        self.d_devices, self.d_layers_per_device = self.d.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
 
-        self.getLogits       = GEMM("GetLogits").setWeightName("lm_head.weight").last_only()
-        self.getLogits_devices, self.getLogits_layers_per_device = self.getLogits.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.getLogits       = GEMM_N_Parallel("GetLogits").setWeightName("lm_head.weight").last_only()
+        self.getLogits_devices, self.getLogits_layers_per_device = self.getLogits.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
 
         self.modelLayerNorm  = LayerNorm("ModelLayerNorm").setWeightName("model.norm.weight").last_only()
-        self.modelLayerNorm_devices, self.modelLayerNorm_layers_per_device = self.modelLayerNorm.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.modelLayerNorm_devices, self.modelLayerNorm_layers_per_device = self.modelLayerNorm.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
         self.sample          = Sampling("Sampling").last_only()
-        self.sample_devices, self.sample_layers_per_device = self.sample.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.sample_devices, self.sample_layers_per_device = self.sample.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
         self.global_output   = GlobalOutput("GlobalOutput").last_only()
-        self.global_output_devices, self.global_output_layers_per_device = self.global_output.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.global_output_devices, self.global_output_layers_per_device = self.global_output.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
         self.copy_embedding = Copy("CopyEmbedding", num_outputs=3)
         self.copy_embedding_devices = self.copy_embedding.expand_gpu(self.num_devices)
@@ -170,7 +172,6 @@ class Pipeline():
         self.copy_o.outputs["output_0"] >> self.layerNormFFN.inputs["input"]
         self.copy_o.outputs["output_1"] >> self.d.inputs["C"]
 
-
         self.layerNormFFN.outputs["output"] >> self.ug.inputs["A"]
 
         self.ug.outputs["D"] >> self.activation.inputs["input"]
@@ -195,7 +196,7 @@ class Pipeline():
     
     def init_executor(self, device_id=0):
         assert 0 <= device_id < self.num_devices, "device_id should be in range [0, num_devices)"
-        self.executor = Executor(self.operation_layers_per_device[device_id], self.layer)
+        self.executor = Executor(self.operation_layers_per_device[device_id], self.num_layers)
         self.executor.plan_layer_ordering()
 
     def init_set_shape(self):
@@ -216,12 +217,13 @@ class Pipeline():
         self.sample.setShape(self.vocab_size)
         self.global_output.setShape()
     
-    def init_set_weight(self, weight_path):
-        weight_manager = WeightManager()
-        weight_manager.load_from_safe_tensor(weight_path, self.num_devices)
-        weight_manager.set_weight(self.operation_list, self.num_devices, self.layer)
+    def init_set_weight(self, weight_path, cached):
+        weight_manager = WeightManager(self.pipeline_name, self.num_devices, cached)
+        if not cached:
+            print("load from safe tensor")
+            weight_manager.load_from_safe_tensor(weight_path)
+        weight_manager.set_weight(self.operation_list)
         torch.cuda.empty_cache()
-    
 
     def config_batch_size(self, decode_flag, device_id=0):
         # init the batchsize to None
@@ -233,7 +235,6 @@ class Pipeline():
         if decode_flag:
             self.decAttn_devices[device_id].setBatchSize(self.batch_size)
 
-    
     def config_algorithm(self, device_id=0):
         self.gen_embedding.config_tag("torch", device_id)
         self.layerNormAttn.config_tag("torch", device_id)
@@ -250,6 +251,35 @@ class Pipeline():
         self.sample.config_tag("torch", device_id)
         self.getLogits.config_tag("torch", device_id)
 
+    def init_streams(self):
+        GEMM_STREAM = torch.cuda.Stream()
+        GEMV_STREAM = torch.cuda.Stream()
+        NETWORK_STREAM = torch.cuda.Stream()
+        OTHER_STREAM = torch.cuda.Stream()
+        self.streams = {
+            "GEMM": GEMM_STREAM,
+            "GEMV": GEMV_STREAM,
+            "NETWORK": NETWORK_STREAM,
+            "OTHER": OTHER_STREAM
+        }
+
+    def config_streams(self):
+        self.global_input.set_stream(self.streams["OTHER"])
+        self.gen_embedding.set_stream(self.streams["GEMM"])
+        self.layerNormAttn.set_stream(self.streams["GEMM"])
+        self.activation.set_stream(self.streams["GEMM"])
+        self.kqv.set_stream(self.streams["GEMM"])
+        self.ropeAppend.set_stream(self.streams["GEMM"])
+        self.decAttn.set_stream(self.streams["GEMV"])
+        self.pfAttn.set_stream(self.streams["GEMM"])
+        self.layerNormFFN.set_stream(self.streams["GEMM"])
+        self.o.set_stream(self.streams["GEMM"])
+        self.ug.set_stream(self.streams["GEMM"])
+        self.d.set_stream(self.streams["GEMM"])
+        self.modelLayerNorm.set_stream(self.streams["GEMM"])
+        self.sample.set_stream(self.streams["GEMM"])
+        self.getLogits.set_stream(self.streams["GEMM"])
+        self.global_output.set_stream(self.streams["OTHER"])
     
     def update(self, input_ids, decode_flag=False, device_id=0):
         
@@ -268,11 +298,12 @@ class Pipeline():
         request_length = torch.tensor([len(x) for x in input_ids], dtype=torch.int32, device=f'cuda:{device_id}')
         self.cumsum_input = torch.cat([torch.tensor([0], dtype=torch.int32, device=f'cuda:{device_id}'), torch.cumsum(request_length, dim=0, dtype=torch.int32)])
 
+        self.kv_cache.update(self.cumsum_input)
 
         self.global_input.children[device_id].outputs["tokens"].tensor[:input_tensor.shape[0]].copy_(input_tensor)
-        self.ropeAppend.update(self.page_size, self.cumsum_input, None, None, None, None, None, decode_flag)
-        self.decAttn.update(self.cumsum_input, None, None, None, self.page_size)
-        self.pfAttn.update(self.cumsum_input, None, None, None, self.page_size)
+        self.ropeAppend.update(self.cumsum_input, decode_flag)
+        self.decAttn.update(self.cumsum_input)
+        self.pfAttn.update(self.cumsum_input)
         
     def update_allocate_buffers(self, device_id):
         # Build list of buffers(op_device)
@@ -299,7 +330,7 @@ class Pipeline():
         operation_base = Operations()
         operation_base.search_profile_data()
 
-    def run(self, rank=0, file_name="out-operator_layer_test", filefolder_name="llama3-kv-out-rope_test"):
+    def run(self, rank=0, file_name="out-torch-cycle2", filefolder_name="llama3-torch-cycle2"):
 
         temp_out = torch.zeros(self.batch_size, dtype=torch.int32, device='cuda')
 

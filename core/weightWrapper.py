@@ -1,6 +1,8 @@
 class WeightWrapper:
-    name = None
-    full_name = None
-    weight_map = None
-    shape = None
+    def __init__(self, owner=None):
+        self.owner = owner
+        self.name = None
+        self.full_name = None
+        self.weight_map = None
+        self.shape = None
 

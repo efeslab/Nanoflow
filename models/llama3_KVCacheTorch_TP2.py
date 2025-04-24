@@ -11,12 +11,12 @@ from operations.operation_base import Operations
 from operations.activation.silu import Activation
 from operations.embedding.embedding import GenEmbedding
 from operations.globalOp.globalOp import GlobalInput, GlobalOutput
-from operations.gemm.gemm import GEMM
+from operations.gemm.gemm_N_parallel import GEMM_N_Parallel
 from operations.allgather.allgather import AllGather
 from operations.norm.rmsnorm import LayerNorm
 from operations.sampling.max_sampling import Sampling
-from operations.rope.rope import RopeAppend
-from operations.attention.llamaAttention import DecAttn, PFAttn
+from operations.rope.rope_torch import RopeAppendTorch
+from operations.attention.llamaAttention_torch import DecAttnTorch, PFAttnTorch
 from operations.virtualOp.virtual_ops import Copy, Redist
 from kvcache.kv import KVCacheTorch
 from core.weightManager import WeightManager
@@ -26,6 +26,7 @@ from core.executor import Executor
 class Pipeline():
     def __init__(self):
         # Set parameters as instance variables.
+        self.pipeline_name = "Llama3-7B-TP2"
         self.num_kv_heads = 8
         self.num_qo_heads = 32
         self.kqv_heads = self.num_qo_heads + 2 * self.num_kv_heads
@@ -34,8 +35,7 @@ class Pipeline():
         self.hidden_dim = 4096
         self.intermediate_dim = 14 * 1024
         self.batch_size = None
-        self.layer = 32
-        self.actual_layer_range = [i for i in range(self.layer)]
+        self.num_layers = 32
         self.num_devices = torch.cuda.device_count()
         self.page_size = 64
 
@@ -46,97 +46,97 @@ class Pipeline():
         # create torch.distributed group
         assert self.num_devices % self.tp_size == 0, f"num_devices {self.num_devices} should be divisible by tp_size {self.tp_size}"
 
-    def init(self, weight_path):
+    def init(self, weight_path, cached=False):
         self.init_external_data()
         self.init_operations()
         self.init_dependency()
         self.init_set_shape()
-        self.init_set_weight(weight_path)
+        self.init_set_weight(weight_path, cached)
 
     def init_external_data(self):
-        self.kv_cache = KVCacheTorch()
+        self.kv_cache = KVCacheTorch(self.num_kv_heads, self.head_dim, self.tp_size)
 
     def init_operations(self):
         self.global_input    = GlobalInput("GlobalInput").first_only()
-        self.global_input_devices, self.global_input_layers_per_device = self.global_input.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.global_input_devices, self.global_input_layers_per_device = self.global_input.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
         self.gen_embedding  = GenEmbedding("GenEmbedding").setWeightName("model.embed_tokens.weight").first_only()
-        self.gen_embedding_devices, self.gen_embedding_layers_per_device = self.gen_embedding.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.gen_embedding_devices, self.gen_embedding_layers_per_device = self.gen_embedding.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
         self.allGather_embedding = AllGather("AllGatherEmbedding").first_only()
-        self.allGather_embedding_devices, self.allGather_embedding_layers_per_device = self.allGather_embedding.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.allGather_embedding_devices, self.allGather_embedding_layers_per_device = self.allGather_embedding.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
         self.copy_allgather_embedding = Copy("CopyAllGatherEmbedding", num_outputs=2)
         self.copy_allgather_embedding_devices = self.copy_allgather_embedding.expand_gpu(self.num_devices)
 
         self.layerNormAttn   = LayerNorm("LayerNormAttn").setWeightName("model.layers.{layer}.input_layernorm.weight")
-        self.layerNormAttn_devices, self.layerNormAttn_layers_per_device = self.layerNormAttn.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.layerNormAttn_devices, self.layerNormAttn_layers_per_device = self.layerNormAttn.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
-        self.kqv             = GEMM("KQV").setWeightName([
+        self.kqv             = GEMM_N_Parallel("KQV").setWeightName([
             "model.layers.{layer}.self_attn.k_proj.weight",
             "model.layers.{layer}.self_attn.v_proj.weight",
             "model.layers.{layer}.self_attn.q_proj.weight"
         ])
-        self.kqv_devices, self.kqv_layers_per_device = self.kqv.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.kqv_devices, self.kqv_layers_per_device = self.kqv.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
-        self.allGather_kqv = AllGather("AllGatherKQV")
-        self.allGather_kqv_devices, self.allGather_kqv_layers_per_device = self.allGather_kqv.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
-
-        self.ropeAppend      = RopeAppend("RopeAppend")
+        self.ropeAppend      = RopeAppendTorch("RopeAppend")
         self.ropeAppend.externals["KVCache"] = self.kv_cache
-        self.ropeAppend_devices, self.ropeAppend_layers_per_device = self.ropeAppend.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.ropeAppend_devices, self.ropeAppend_layers_per_device = self.ropeAppend.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
 
-        self.decAttn         = DecAttn("DecAttn")
+        self.decAttn         = DecAttnTorch("DecAttn")
         self.decAttn.externals["KVCache"] = self.kv_cache
-        self.decAttn_devices, self.decAttn_layers_per_device = self.decAttn.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.decAttn_devices, self.decAttn_layers_per_device = self.decAttn.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
-        self.pfAttn          = PFAttn("PFAttn")
+        self.pfAttn          = PFAttnTorch("PFAttn")
         self.pfAttn.externals["KVCache"] = self.kv_cache
-        self.pfAttn_devices, self.pfAttn_layers_per_device = self.pfAttn.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.pfAttn_devices, self.pfAttn_layers_per_device = self.pfAttn.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
-        self.o               = GEMM("O", True).setWeightName("model.layers.{layer}.self_attn.o_proj.weight")
-        self.o_devices, self.o_layers_per_device = self.o.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.allGather_attn = AllGather("AllGatherAttn")
+        self.allGather_attn_devices, self.allGather_attn_layers_per_device = self.allGather_attn.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
+
+        self.o               = GEMM_N_Parallel("O", True).setWeightName("model.layers.{layer}.self_attn.o_proj.weight")
+        self.o_devices, self.o_layers_per_device = self.o.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
         self.allGather_o = AllGather("AllGatherO")
-        self.allGather_o_devices, self.allGather_o_layers_per_device = self.allGather_o.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.allGather_o_devices, self.allGather_o_layers_per_device = self.allGather_o.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
         self.layerNormFFN    = LayerNorm("LayerNormFFN").setWeightName("model.layers.{layer}.post_attention_layernorm.weight")
-        self.layerNormFFN_devices, self.layerNormFFN_layers_per_device = self.layerNormFFN.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.layerNormFFN_devices, self.layerNormFFN_layers_per_device = self.layerNormFFN.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
-        self.ug              = GEMM("UG").setWeightName([
+        self.ug              = GEMM_N_Parallel("UG").setWeightName([
             "model.layers.{layer}.mlp.up_proj.weight",
             "model.layers.{layer}.mlp.gate_proj.weight"
         ])
-        self.ug_devices, self.ug_layers_per_device = self.ug.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
-
-        self.allGather_ug = AllGather("AllGatherUG")
-        self.allGather_ug_devices, self.allGather_ug_layers_per_device = self.allGather_ug.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.ug_devices, self.ug_layers_per_device = self.ug.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
         self.activation      = Activation("Activation")
-        self.activation_devices, self.activation_layers_per_device = self.activation.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.activation_devices, self.activation_layers_per_device = self.activation.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
-        self.d               = GEMM("D", True).setWeightName("model.layers.{layer}.mlp.down_proj.weight")
-        self.d_devices, self.d_layers_per_device = self.d.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.allGather_activation = AllGather("AllGatherActivation")
+        self.allGather_activation_devices, self.allGather_activation_layers_per_device = self.allGather_activation.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
+
+        self.d               = GEMM_N_Parallel("D", True).setWeightName("model.layers.{layer}.mlp.down_proj.weight")
+        self.d_devices, self.d_layers_per_device = self.d.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
         self.allGather_d = AllGather("AllGatherD")
-        self.allGather_d_devices, self.allGather_d_layers_per_device = self.allGather_d.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.allGather_d_devices, self.allGather_d_layers_per_device = self.allGather_d.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
         self.copy_allgather_d = Copy("CopyAllGatherD", num_outputs=2)
         self.copy_allgather_d_devices = self.copy_allgather_d.expand_gpu(self.num_devices)
 
-        self.getLogits       = GEMM("GetLogits").setWeightName("lm_head.weight").last_only()
-        self.getLogits_devices, self.getLogits_layers_per_device = self.getLogits.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.getLogits       = GEMM_N_Parallel("GetLogits").setWeightName("lm_head.weight").last_only()
+        self.getLogits_devices, self.getLogits_layers_per_device = self.getLogits.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
 
         self.modelLayerNorm  = LayerNorm("ModelLayerNorm").setWeightName("model.norm.weight").last_only()
-        self.modelLayerNorm_devices, self.modelLayerNorm_layers_per_device = self.modelLayerNorm.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.modelLayerNorm_devices, self.modelLayerNorm_layers_per_device = self.modelLayerNorm.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
         self.sample          = Sampling("Sampling").last_only()
-        self.sample_devices, self.sample_layers_per_device = self.sample.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.sample_devices, self.sample_layers_per_device = self.sample.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
         self.global_output   = GlobalOutput("GlobalOutput").last_only()
-        self.global_output_devices, self.global_output_layers_per_device = self.global_output.expand_gpu_and_layers(self.num_devices, self.actual_layer_range)
+        self.global_output_devices, self.global_output_layers_per_device = self.global_output.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
         self.copy_embedding = Copy("CopyEmbedding", num_outputs=3)
         self.copy_embedding_devices = self.copy_embedding.expand_gpu(self.num_devices)
@@ -155,9 +155,9 @@ class Pipeline():
 
         # Save operations in an instance variable
         self.operation_list = [
-            self.global_input, self.gen_embedding, self.allGather_embedding, self.layerNormAttn, self.kqv, self.allGather_kqv, self.ropeAppend,
-            self.decAttn, self.pfAttn, self.o, self.allGather_o, self.layerNormFFN, self.ug, self.allGather_ug,
-            self.activation, self.d, self.allGather_d,
+            self.global_input, self.gen_embedding, self.allGather_embedding, self.layerNormAttn, self.kqv, self.ropeAppend,
+            self.decAttn, self.pfAttn, self.allGather_attn, self.o, self.allGather_o, self.layerNormFFN, self.ug,
+            self.activation, self.allGather_activation, self.d, self.allGather_d,
             self.modelLayerNorm, self.getLogits, self.sample, self.global_output
         ]
         self.virtual_operation_list = [self.copy_embedding, self.copy_allgather_embedding, self.copy_o, self.copy_d, self.copy_allgather_d, self.redist_p, self.redist_a]
@@ -189,8 +189,7 @@ class Pipeline():
 
         self.layerNormAttn.outputs["output"] >> self.kqv.inputs["A"]
 
-        self.kqv.outputs["D"] >> self.allGather_kqv.inputs["input"]
-        self.allGather_kqv.outputs["output"] >> self.ropeAppend.inputs["kqv"]
+        self.kqv.outputs["D"] >> self.ropeAppend.inputs["kqv"]
 
         self.ropeAppend.outputs["q"] >> self.redist_p.inputs["input_0"]
         self.redist_p.outputs["output_0"] >> self.decAttn.inputs["Q"]
@@ -198,7 +197,8 @@ class Pipeline():
 
         self.decAttn.outputs["output"] >> self.redist_a.inputs["input_0"]
         self.pfAttn.outputs["output"] >> self.redist_a.inputs["input_1"]
-        self.redist_a.outputs["output_0"] >> self.o.inputs["A"]
+        self.redist_a.outputs["output_0"] >> self.allGather_attn.inputs["input"]
+        self.allGather_attn.outputs["output"] >> self.o.inputs["A"]
 
         self.o.outputs["D"] >> self.copy_o.inputs["input"]
         self.copy_o.outputs["output_0"] >> self.allGather_o.inputs["input"]
@@ -208,10 +208,10 @@ class Pipeline():
 
         self.layerNormFFN.outputs["output"] >> self.ug.inputs["A"]
 
-        self.ug.outputs["D"] >> self.allGather_ug.inputs["input"]
-        self.allGather_ug.outputs["output"] >> self.activation.inputs["input"]
+        self.ug.outputs["D"] >> self.activation.inputs["input"]
 
-        self.activation.outputs["output"] >> self.d.inputs["A"]
+        self.activation.outputs["output"] >> self.allGather_activation.inputs["input"]
+        self.allGather_activation.outputs["output"] >> self.d.inputs["A"]
 
         self.d.outputs["D"] >> self.copy_d.inputs["input"]
 
@@ -231,10 +231,9 @@ class Pipeline():
         for operation in self.operation_list + self.virtual_operation_list:
             operation.checkConnection()
     
-    
     def init_executor(self, device_id=0):
         assert 0 <= device_id < self.num_devices, "device_id should be in range [0, num_devices)"
-        self.executor = Executor(self.operation_layers_per_device[device_id], self.layer)
+        self.executor = Executor(self.operation_layers_per_device[device_id], self.num_layers)
         self.executor.plan_layer_ordering()
 
     def init_set_shape(self):
@@ -243,27 +242,29 @@ class Pipeline():
         self.allGather_embedding.setShape(self.hidden_dim, self.tp_size)
         self.layerNormAttn.setShape(self.hidden_dim)
         self.kqv.setShape(self.kqv_heads * self.head_dim, self.hidden_dim, self.tp_size).setParameter(1.0, 0.0)
-        self.allGather_kqv.setShape(self.kqv_heads * self.head_dim, self.tp_size)
-        self.decAttn.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim)
-        self.pfAttn.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim)
-        self.ropeAppend.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim)
+        self.ropeAppend.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim, self.tp_size)
+        self.decAttn.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim, self.tp_size)
+        self.pfAttn.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim, self.tp_size)
+        self.allGather_attn.setShape(self.num_qo_heads *self.head_dim, self.tp_size)
         self.o.setShape(self.hidden_dim, self.hidden_dim, self.tp_size).setParameter(1.0, 1.0)
         self.allGather_o.setShape(self.hidden_dim, self.tp_size)
         self.layerNormFFN.setShape(self.hidden_dim)
         self.ug.setShape(self.intermediate_dim * 2, self.hidden_dim, self.tp_size).setParameter(1.0, 0.0)
-        self.allGather_ug.setShape(self.intermediate_dim * 2, self.tp_size)
         self.d.setShape(self.hidden_dim, self.intermediate_dim, self.tp_size).setParameter(1.0, 1.0)
         self.allGather_d.setShape(self.hidden_dim, self.tp_size)
-        self.activation.setShape(self.intermediate_dim)
+        self.activation.setShape(self.intermediate_dim, self.tp_size)
+        self.allGather_activation.setShape(self.intermediate_dim, self.tp_size)
         self.modelLayerNorm.setShape(self.hidden_dim)
         self.getLogits.setShape(self.vocab_size, self.hidden_dim).setParameter(1.0, 0.0)
         self.sample.setShape(self.vocab_size)
         self.global_output.setShape()
     
-    def init_set_weight(self, weight_path):
-        weight_manager = WeightManager()
-        weight_manager.load_from_safe_tensor(weight_path, self.num_devices, self.tp_size)
-        weight_manager.set_weight(self.operation_list, self.num_devices, self.layer)
+    def init_set_weight(self, weight_path, cached):
+        weight_manager = WeightManager(self.pipeline_name, self.num_devices, cached)
+        if not cached:
+            print("load from safe tensor")
+            weight_manager.load_from_safe_tensor(weight_path)
+        weight_manager.set_weight(self.operation_list)
         torch.cuda.empty_cache()
     
 
@@ -277,22 +278,22 @@ class Pipeline():
         if decode_flag:
             self.decAttn_devices[device_id].setBatchSize(self.batch_size)
 
-    
+
     def config_algorithm(self, device_id=0):
         self.gen_embedding.config_tag("torch", device_id)
         self.allGather_embedding.config_tag("torch", device_id)
         self.layerNormAttn.config_tag("torch", device_id)
         self.activation.config_tag("torch", device_id)
+        self.allGather_activation.config_tag("torch", device_id)
         self.kqv.config_tag("torch", device_id)
-        self.allGather_kqv.config_tag("torch", device_id)
         self.ropeAppend.config_tag("torch", device_id)
         self.decAttn.config_tag("torch", device_id)
         self.pfAttn.config_tag("torch", device_id)
+        self.allGather_attn.config_tag("torch", device_id)
         self.layerNormFFN.config_tag("torch", device_id)
         self.o.config_tag("torch", device_id)
         self.allGather_o.config_tag("torch", device_id)
         self.ug.config_tag("torch", device_id)
-        self.allGather_ug.config_tag("torch", device_id)
         self.d.config_tag("torch", device_id)
         self.allGather_d.config_tag("torch", device_id)
         self.modelLayerNorm.config_tag("torch", device_id)
@@ -301,22 +302,56 @@ class Pipeline():
 
     def config_network(self, device_id=0):
         os.environ["MASTER_ADDR"] = "localhost"
-        os.environ["MASTER_PORT"] = "12355"
+        os.environ["MASTER_PORT"] = "12546"
         dist.init_process_group(backend="nccl", rank=device_id, world_size=self.num_devices)
         group_index = device_id // self.tp_size
-        print("group_index: ", group_index)
-        self.subgroup = dist.new_group(ranks=[i for i in range(group_index * self.tp_size, (group_index + 1) * self.tp_size)])
-        print("subgroup in main: ", self.subgroup)
+        # print("group_index: ", group_index)
+        self.tp_group = dist.new_group(ranks=[i for i in range(group_index * self.tp_size, (group_index + 1) * self.tp_size)])
+        # print("tp_group in main: ", self.tp_group)
+
+    def init_streams(self):
+        GEMM_STREAM = torch.cuda.Stream()
+        GEMV_STREAM = torch.cuda.Stream()
+        NETWORK_STREAM = torch.cuda.Stream()
+        OTHER_STREAM = torch.cuda.Stream()
+        self.streams = {
+            "GEMM": GEMM_STREAM,
+            "GEMV": GEMV_STREAM,
+            "NETWORK": NETWORK_STREAM,
+            "OTHER": OTHER_STREAM
+        }
+
+    def config_streams(self):
+        self.global_input.set_stream(self.streams["GEMM"])
+        self.gen_embedding.set_stream(self.streams["GEMM"])
+        self.allGather_embedding.set_stream(self.streams["GEMM"])
+        self.layerNormAttn.set_stream(self.streams["GEMM"])
+        self.activation.set_stream(self.streams["GEMM"])
+        self.allGather_activation.set_stream(self.streams["GEMM"])
+        self.kqv.set_stream(self.streams["GEMM"])
+        self.ropeAppend.set_stream(self.streams["GEMM"])
+        self.decAttn.set_stream(self.streams["GEMM"])
+        self.pfAttn.set_stream(self.streams["GEMM"])
+        self.allGather_attn.set_stream(self.streams["GEMM"])
+        self.layerNormFFN.set_stream(self.streams["GEMM"])
+        self.o.set_stream(self.streams["GEMM"])
+        self.allGather_o.set_stream(self.streams["GEMM"])
+        self.ug.set_stream(self.streams["GEMM"])
+        self.d.set_stream(self.streams["GEMM"])
+        self.allGather_d.set_stream(self.streams["GEMM"])
+        self.modelLayerNorm.set_stream(self.streams["GEMM"])
+        self.sample.set_stream(self.streams["GEMM"])
+        self.getLogits.set_stream(self.streams["GEMM"])
+        self.global_output.set_stream(self.streams["GEMM"])
 
     def update_network_ops(self):
-        self.allGather_embedding.update(self.subgroup)
-        self.allGather_kqv.update(self.subgroup)
-        self.allGather_ug.update(self.subgroup)
-        self.allGather_o.update(self.subgroup)
-        self.allGather_d.update(self.subgroup)
+        self.allGather_embedding.update(self.tp_group)
+        self.allGather_attn.update(self.tp_group)
+        self.allGather_activation.update(self.tp_group)
+        self.allGather_o.update(self.tp_group)
+        self.allGather_d.update(self.tp_group)
 
     def update(self, input_ids, decode_flag=False, device_id=0):
-        
         self.input_ids = input_ids
         # concatenate input_ids into a single tensor
         flattened = [item for sublist in input_ids for item in sublist]
@@ -325,19 +360,21 @@ class Pipeline():
             self.config_batch_size(decode_flag, device_id)
             self.update_allocate_buffers(device_id)
             print("finish update_allocate_buffers")
-            self.config_network(device_id)
-            self.update_network_ops()
+            # self.config_network(device_id)
+            # self.update_network_ops()
             self.config_algorithm(device_id)
             self.init_executor(device_id)
         input_tensor = torch.tensor(flattened, dtype=torch.int32, device=f'cuda:{device_id}')
         # get cumulative sum of the number of tokens in each input
         request_length = torch.tensor([len(x) for x in input_ids], dtype=torch.int32, device=f'cuda:{device_id}')
         self.cumsum_input = torch.cat([torch.tensor([0], dtype=torch.int32, device=f'cuda:{device_id}'), torch.cumsum(request_length, dim=0, dtype=torch.int32)])
+        
+        self.kv_cache.update(self.cumsum_input)
 
         self.global_input.children[device_id].outputs["tokens"].tensor[:input_tensor.shape[0]].copy_(input_tensor)
-        self.ropeAppend.update(self.page_size, self.cumsum_input, None, None, None, None, None, decode_flag)
-        self.decAttn.update(self.cumsum_input, None, None, None, self.page_size)
-        self.pfAttn.update(self.cumsum_input, None, None, None, self.page_size)
+        self.ropeAppend.update(self.cumsum_input, decode_flag)
+        self.decAttn.update(self.cumsum_input)
+        self.pfAttn.update(self.cumsum_input)
         
     def update_allocate_buffers(self, device_id):
         # Build list of buffers(op_device)

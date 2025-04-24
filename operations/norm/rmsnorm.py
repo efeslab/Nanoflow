@@ -11,10 +11,11 @@ from operations.impl_base import OperationImpl
 class LayerNormTorchImpl(OperationImpl):
     category_tag = "torch"
     def run(self, x, weight, output, epsilon):
-        # print("using torch")
-        rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + epsilon)
-        normalized_x = x / rms
-        output.copy_(normalized_x.to(torch.float16) * weight)
+        with torch.cuda.stream(self.stream):
+            # print("using torch")
+            rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + epsilon)
+            normalized_x = x / rms
+            output.copy_(normalized_x.to(torch.float16) * weight)
 
 if platform_config.PLATFORM_CUDA:
     import bind_rms_norm
@@ -22,7 +23,7 @@ if platform_config.PLATFORM_CUDA:
         category_tag = "cuda"
         def run(self, x, weight, output, epsilon):
             # print("using cuda")
-            bind_rms_norm.rms_norm(output, x, weight, epsilon)
+            bind_rms_norm.rms_norm(output, x, weight, epsilon, self.stream_handle)
 
 class LayerNorm(Operations):
     def __init__(self, name):
@@ -34,7 +35,7 @@ class LayerNorm(Operations):
             "output": IOWrapper(self, 'output')
         }
         self.weights = {
-            "weight": WeightWrapper(),
+            "weight": WeightWrapper(self),
         }
         self.impl_map = {}
         self.init_impl_map()
@@ -86,8 +87,8 @@ class LayerNorm(Operations):
                     ''', (self.name + f"_{category_tag}", batch_size, average_time))
         self.conn.commit()
     
-    def processWeight(self, global_weight_map, total_devices, total_layers, cached = False):
-        return process_weight_layer(global_weight_map, self.weight_name, self.weights["weight"], total_devices, total_layers, cached)
+    def processWeight(self, global_weight_map, weight_path, cached):
+        return process_weight_layer(global_weight_map, self.weight_name, self.weights["weight"], self.device_list, self.layer_list, weight_path, cached=cached)
 
     
 class LayerNorm_Device(Operation_Device):

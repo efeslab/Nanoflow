@@ -82,7 +82,7 @@ class BufferAllocator():
             if wrapper.owner.batch_size is None:
                 wrapper.owner.batch_size = solution[variables[wrapper.fullName]]
             wrapper.batch_size = solution[variables[wrapper.fullName]]
-            print(f"set {wrapper.fullName} batch size to {wrapper.batch_size} with shape {wrapper.shape}")
+            # print(f"set {wrapper.fullName} batch size to {wrapper.batch_size} with shape {wrapper.shape}")
 
     def draw_dependency_graph(self):
         # Draw full graph.
@@ -106,7 +106,7 @@ class BufferAllocator():
         self.total_allocated = 0
         components = self.get_connected_components()
         for comp in components:
-            print("component: ", comp)
+            # print("component: ", comp)
             # Create a subgraph for the component:
             comp = self.full_graph.subgraph(comp)
             
@@ -128,7 +128,7 @@ class BufferAllocator():
                 return (next_node_name, 0)
 
             root_nodes_name = [name for name, indeg in comp.in_degree() if indeg == 0]
-            print(f"root_nodes_name: {root_nodes_name}")
+            # print(f"root_nodes_name: {root_nodes_name}")
             root_nodes = [self.full_graph.nodes[name]['wrapper'] for name in root_nodes_name]
             # sort these nodes by their next connections
             sorted_root_nodes = sorted(root_nodes, key=sort_key)
@@ -158,7 +158,7 @@ class BufferAllocator():
             while processing_queue:
                 node = processing_queue.pop(0)
                 node.set_whole_buffer(whole_buffer)
-                print("node: ", node.fullName, "with whole buffer: ", whole_buffer.shape, "tensor", node.tensor.shape,"and offset: ", node.tensor_offset)
+                # print("node: ", node.fullName, "with whole buffer: ", whole_buffer.shape, "tensor", node.tensor.shape,"and offset: ", node.tensor_offset)
                 next_nodes = [self.full_graph.nodes[name]["wrapper"] for name in list(self.full_graph[node.fullName])]
                 # print(f"next nodes: {[n for n in next_nodes]}")
                 for next_node in next_nodes:

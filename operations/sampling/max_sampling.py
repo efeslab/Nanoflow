@@ -11,8 +11,9 @@ from operations.impl_base import OperationImpl
 class SamplingTorchImpl(OperationImpl):
     category_tag = "torch"
     def run(self, logits, tokens):
-        # print("using torch")
-        tokens.copy_(torch.argmax(logits, dim=1))
+        with torch.cuda.stream(self.stream):
+            # print("using torch")
+            tokens.copy_(torch.argmax(logits, dim=1))
 
 if platform_config.PLATFORM_CUDA:
     import bind_sample
@@ -20,7 +21,7 @@ if platform_config.PLATFORM_CUDA:
         category_tag = "cuda"
         def run(self, logits, tokens):
             # print("using cuda")
-            bind_sample.SampleMax(logits, tokens)
+            bind_sample.SampleMax(logits, tokens, self.stream_handle)
 
 
 class Sampling(Operations):

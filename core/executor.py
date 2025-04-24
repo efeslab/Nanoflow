@@ -21,6 +21,7 @@ class Executor():
             G.add_node(f"{op.name}", op=op, layer = op.layer)
 
         for op in self.operations_layers_list:
+            op.reset_op_cuda_status()
             layer = op.layer
             # print("op.name", op.name) if layer == 0 else None
             for dep, dep_on_prev_layer in op.prerequisites:
@@ -30,9 +31,13 @@ class Executor():
                     continue
                 if dep_on_prev_layer:
                     if layer > 0:
-                        G.add_edge(f"{dep.name}_{layer - 1}", f"{op.name}")
+                        prev_op_name = f"{dep.name}_{layer - 1}"
+                        G.add_edge(prev_op_name, f"{op.name}")
+                        op.append_prev_op_layer(G.nodes[prev_op_name]['op'])
                 else:
-                    G.add_edge(f"{dep.name}_{layer}", f"{op.name}")
+                    prev_op_name = f"{dep.name}_{layer}"
+                    G.add_edge(prev_op_name, f"{op.name}")
+                    op.append_prev_op_layer(G.nodes[prev_op_name]['op'])
 
         self.ordered_operations = list(nx.topological_sort(G))
         print(self.ordered_operations)
@@ -45,8 +50,11 @@ class Executor():
         for op_name in self.ordered_operations:
             op = self.ordered_graph.nodes[op_name]['op']
             with prof_marker(f"{op.name}"):
+                op.wait_cuda_event()
                 op.run()
+                op.record_cuda_event()
             if op.name == "GlobalOutput_31":
+                torch.cuda.synchronize()
                 output.copy_(op.inputs["tokens"].tensor)
 
     def print_debug(self, filename="out.txt", rank=0, filefolder_name = None, output=None):

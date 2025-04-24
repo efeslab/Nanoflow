@@ -4,7 +4,7 @@ os.environ["HF_HOME"] = "/code/hf"
 from operations.activation.silu import Activation
 from operations.embedding.embedding import GenEmbedding
 from operations.globalOp.globalOp import GlobalInput, GlobalOutput
-from operations.gemm.gemm import GEMM, NPartitionGEMM, KPartitionGEMM
+from operations.gemm.gemm_N_parallel import GEMM, NPartitionGEMM, KPartitionGEMM
 from operations.norm.rmsnorm import LayerNorm
 from operations.sampling.max_sampling import Sampling
 from operations.rope.rope import RopeAppend

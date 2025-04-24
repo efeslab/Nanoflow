@@ -44,11 +44,16 @@ void configGEMM(const std::string& gemm_tag, const std::string& gemm_name, torch
   gemm_map[gemm_name] = gemm_wrapper;
 }
 
-void runGEMM(const std::string& gemm_name, torch::Tensor Input_B) {
+void runGEMM(const std::string& gemm_name, torch::Tensor Input_B, intptr_t stream_handle = 0ULL) {
   // Ensure that tensors are on CUDA and contiguous.
   // TORCH_CHECK(Input_B.is_cuda(), "Input_B must be a CUDA tensor");
   // Input_B = Input_B.contiguous();
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  cudaStream_t stream = nullptr;
+  if (stream_handle == 0ULL) {
+      stream = at::cuda::getCurrentCUDAStream();
+  } else {
+      stream = reinterpret_cast<cudaStream_t>(stream_handle);
+  }
 
   gemm_weight = reinterpret_cast<ElementInputB*>(Input_B.data_ptr());
   BaseGEMMWrapper* gemm_wrapper = gemm_map[gemm_name];

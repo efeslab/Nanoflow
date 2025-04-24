@@ -40,10 +40,15 @@ void updateKVCache(torch::Tensor kv_indptr, torch::Tensor kv_indices, torch::Ten
     );
 }
 
-void splitRopeAppendWorker(torch::Tensor k_data, torch::Tensor v_data, torch::Tensor kqv_input, torch::Tensor q_global, torch::Tensor rev_input_indptr, torch::Tensor per_token_offset, int num_req, int page_size, int num_kv_heads, int num_qo_heads, int head_dim, float rope_scale, float rope_theta, float smooth_a, float smooth_b) {
+void splitRopeAppendWorker(torch::Tensor k_data, torch::Tensor v_data, torch::Tensor kqv_input, torch::Tensor q_global, torch::Tensor rev_input_indptr, torch::Tensor per_token_offset, int num_req, int page_size, int num_kv_heads, int num_qo_heads, int head_dim, float rope_scale, float rope_theta, float smooth_a, float smooth_b, intptr_t stream_handle) {
     // printf("splitRopeAppendWorker called\n");
     // printf("rope_scale: %f, rope_theta: %f, smooth_a: %f, smooth_b: %f\n", rope_scale, rope_theta, smooth_a, smooth_b);
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    cudaStream_t stream = nullptr;
+    if (stream_handle == 0ULL) {
+        stream = at::cuda::getCurrentCUDAStream();
+    } else {
+        stream = reinterpret_cast<cudaStream_t>(stream_handle);
+    }
     // nvtxMarkA("Tensor Check");
     // Validate that tensors are on CUDA
     // TORCH_CHECK(k_data.is_cuda(), "k_data must be a CUDA tensor");

@@ -51,7 +51,7 @@ __global__ void rowMaxKernel(half *d_matrix, int *d_argMax, int cols) {
 }
 
 // Wrapper function to launch the kernel
-void computeRowMax(torch::Tensor matrix, torch::Tensor argMax) {
+void computeRowMax(torch::Tensor matrix, torch::Tensor argMax, intptr_t stream_handle = 0ULL) {
     // Validate input tensors
     // TORCH_CHECK(matrix.is_cuda(), "Input matrix must be a CUDA tensor");
     // TORCH_CHECK(argMax.is_cuda(), "Output argmax must be a CUDA tensor");
@@ -70,7 +70,12 @@ void computeRowMax(torch::Tensor matrix, torch::Tensor argMax) {
     dim3 blockSize(1024);
     dim3 gridSize(rows);
     size_t sharedMemSize = blockSize.x * (sizeof(half) + sizeof(int));
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    cudaStream_t stream = nullptr;
+    if (stream_handle == 0ULL) {
+        stream = at::cuda::getCurrentCUDAStream();
+    } else {
+        stream = reinterpret_cast<cudaStream_t>(stream_handle);
+    }
 
     // Launch the kernel
     if (gridSize.x > 0) {

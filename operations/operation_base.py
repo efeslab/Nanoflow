@@ -24,6 +24,7 @@ class Operations:
         self.tag = "torch"
         self.children = []
         self.isVirtual = False
+        self.stream = None
 
         # Connect to the database
         # self.conn = sqlite3.connect('performance.db')
@@ -39,6 +40,7 @@ class Operations:
         # # ''')
         # self.conn.commit()
         self.impl_map = {}
+        self.op_device = None
         
     def init_impl_map(self):
         self.impl_map = {} 
@@ -74,8 +76,8 @@ class Operations:
         for op_device in self.children:
             op_device.setShapeForIOWrappers()
     
-    def processWeight(self, global_weight_map, total_devices, total_layers, cached = False):
-        return process_weight_none(global_weight_map, self.weight_name, None, total_devices, total_layers, cached)
+    def processWeight(self, global_weight_map, weight_path, cached = False):
+        return process_weight_none(global_weight_map, self.weight_name, None, self.device_list, self.layer_list, weight_path, cached)
     
     def first_only(self):
         self.first_layer_only = True
@@ -104,7 +106,7 @@ class Operations:
             category_tag = parts[0]
             impl_tag = parts[1]
         # self.impl  = self.impl_map[category_tag](self.inputs, self.outputs, self.weights, device_id)
-        self.impl  = self.impl_map[category_tag](self, device_id)
+        self.impl  = self.impl_map[category_tag](self, self.stream, device_id)
         self.config_impl(impl_tag, parameter_map)
         return self
     
@@ -123,6 +125,8 @@ class Operations:
                     tag_list.append(category_tag)
         return tag_list
     
+    def set_stream(self, stream):
+        self.stream = stream
 
     def __str__(self):
         return self.name   
@@ -134,16 +138,19 @@ class Operations:
         
         return self.children
     
-    def expand_gpu_and_layers(self, num_devices, layer_list):
+    def expand_all_gpu_and_layers(self, num_devices, num_layers):
+        self.device_list = list(range(num_devices))
+        if self.first_layer_only:
+            self.layer_list = [0]
+        elif self.last_layer_only:
+            self.layer_list = [num_layers - 1]
+        else:
+            self.layer_list = list(range(num_layers))
         self.op_layers_per_device = []
         for device_id in range(num_devices):
             op_device = self.op_device(self, device_id)
-            if self.first_layer_only:
-                layer_list = [layer_list[0]]
-            elif self.last_layer_only:
-                layer_list = [layer_list[-1]]
-        
-            self.op_layers_per_device.append(op_device.expand_layer(layer_list))
+
+            self.op_layers_per_device.append(op_device.expand_layer(self.layer_list))
             self.children.append(op_device)
         
         return self.children, self.op_layers_per_device
@@ -222,10 +229,16 @@ class Operation_Layer:
         self.externals = op_device.externals
         self.parent = op_device
         self.device_id = op_device.device_id
+        self.prev_op_layer = []
+        self.cuda_event = None
 
     @property
     def impl(self):
         return self.parent.impl
+
+    @property
+    def stream(self):
+        return self.parent.parent.stream
 
     @property
     def prerequisites(self):
@@ -271,3 +284,25 @@ class Operation_Layer:
                         
         return dep
     
+    def reset_op_cuda_status(self):
+        self.prev_op_layer = []
+        self.cuda_event = None
+
+    def append_prev_op_layer(self, op_layer):
+        self.prev_op_layer.append(op_layer)
+    
+    def record_cuda_event(self):
+        if self.cuda_event is None:
+            self.cuda_event = torch.cuda.Event(enable_timing=True)
+        self.cuda_event.record(self.stream)
+
+        return self.cuda_event
+    
+    def wait_cuda_event(self):
+        events = []
+        for op_layer in self.prev_op_layer:
+            if op_layer.cuda_event is not None and self.stream != op_layer.stream:
+                events.append(op_layer.cuda_event)
+        # print("wait_cuda_event: ", self.name, "events: ", events)
+        for event in events:
+            self.stream.wait_event(event)

@@ -17,8 +17,8 @@ from utils.prof_marker import prof_marker
 
 class RopeAppendTorchImpl(OperationImpl):
     category_tag = "torch"
-    def __init__(self, op_base, device_id):
-        super().__init__(op_base, device_id)
+    def __init__(self, op_base, stream, device_id):
+        super().__init__(op_base, stream, device_id)
         self.rope_type = op_base.rope_type
         self.theta = op_base.theta
         self.original_max_position_embeddings = op_base.original_max_position_embeddings
@@ -29,93 +29,63 @@ class RopeAppendTorchImpl(OperationImpl):
         self.num_qo_heads = op_base.num_qo_heads
         self.head_dim = op_base.head_dim
         
-    def run(self, layer, kqv, KVCache, k_data, v_data, output, decode_flag, offset=0):
-        # Determine the number of elements for each slice.
-        layout_strides = [
-            self.num_kv_heads * self.head_dim,
-            self.num_kv_heads * self.head_dim,
-            self.num_qo_heads * self.head_dim,
-        ]
-        # Split kqv into key, query, and value (here assumed to be in the order: k, q, v).
-        # print("kqv shape:", kqv.shape)
-        k, v, q = torch.split(kqv, layout_strides, dim=1)
-        k = k.contiguous()
-        v = v.contiguous()
-        q = q.contiguous()
+    def run(self, layer, kqv, KVCache, output, decode_flag, offset=0):
+        with torch.cuda.stream(self.stream):
+            # Determine the number of elements for each slice.
+            layout_strides = [
+                self.num_kv_heads * self.head_dim,
+                self.num_kv_heads * self.head_dim,
+                self.num_qo_heads * self.head_dim,
+            ]
+            # Split kqv into key, query, and value (here assumed to be in the order: k, q, v).
+            # print("kqv shape:", kqv.shape)
+            k, v, q = torch.split(kqv, layout_strides, dim=1)
+            k = k.contiguous()
+            v = v.contiguous()
+            q = q.contiguous()
 
-        # Process each batch element.
-        for i in range(len(self.op_base.qo_indicies) - 1):
-            start = self.op_base.qo_indicies[i]
-            end = self.op_base.qo_indicies[i + 1]
-            sub_q = q[start:end, :]
-            sub_k = k[start:end, :]
-            if not decode_flag or KVCache.get_indices(layer, i) is None:
-                last_offest = 0
-            else:
-                last_offest = KVCache.get_indices(layer, i)[0]
-            apply_rope(
-                self.rope_type,
-                self.theta,
-                self.original_max_position_embeddings,
-                self.low_freq_factor,
-                self.high_freq_factor,
-                self.factor,
-                sub_q,
-                output=sub_q,
-                offset=last_offest
-            )
-            apply_rope(
-                self.rope_type,
-                self.theta,
-                self.original_max_position_embeddings,
-                self.low_freq_factor,
-                self.high_freq_factor,
-                self.factor,
-                sub_k,
-                output=sub_k,
-                offset=last_offest
-            )
-
-            # Write the updated values back.
-            q[start:end, :] = sub_q
-            k[start:end, :] = sub_k
-
-            # Update the external KVCache with the new key and value.
-            KVCache.put(layer, i, sub_k, v[start:end, :])
-        output.copy_(q)
-        
-if platform_config.PLATFORM_CUDA:
-    import bind_ropeappend
-    class RopeAppendCudaImpl(OperationImpl):
-        category_tag = "cuda"
-        def __init__(self, op_base, device_id):
-            super().__init__(op_base, device_id)
-            # self.page_size = op_base.page_size
-            self.num_kv_heads = op_base.num_kv_heads
-            self.num_qo_heads = op_base.num_qo_heads
-            self.head_dim = op_base.head_dim
-            
-        def run(self, layer,  kqv, KVCache, k_data, v_data, output, decode_flag, offset=0):
-            with prof_marker("RopeAppendCuda: SplitRopeAppend"):
-                bind_ropeappend.splitRopeAppend(
-                    k_data,
-                    v_data,
-                    kqv,
-                    output,
-                    self.op_base.rev_input_indptr,
-                    self.op_base.per_token_offset,
-                    len(self.op_base.qo_indicies) - 1,
-                    self.op_base.page_size,
-                    self.num_kv_heads,
-                    self.num_qo_heads,
-                    self.head_dim,
-                    1.0,
-                    500000.0,
-                    0.0,
-                    0.0
+            # Process each batch element.
+            for i in range(len(self.op_base.qo_indicies) - 1):
+                start = self.op_base.qo_indicies[i]
+                end = self.op_base.qo_indicies[i + 1]
+                sub_q = q[start:end, :]
+                sub_k = k[start:end, :]
+                if not decode_flag or KVCache.get_indices(layer, i) is None:
+                    last_offest = 0
+                else:
+                    last_offest = KVCache.get_indices(layer, i)
+                apply_rope(
+                    self.rope_type,
+                    self.theta,
+                    self.original_max_position_embeddings,
+                    self.low_freq_factor,
+                    self.high_freq_factor,
+                    self.factor,
+                    sub_q,
+                    output=sub_q,
+                    offset=last_offest
+                )
+                apply_rope(
+                    self.rope_type,
+                    self.theta,
+                    self.original_max_position_embeddings,
+                    self.low_freq_factor,
+                    self.high_freq_factor,
+                    self.factor,
+                    sub_k,
+                    output=sub_k,
+                    offset=last_offest
                 )
 
-class RopeAppend(Operations):
+                # Write the updated values back.
+                q[start:end, :] = sub_q
+                k[start:end, :] = sub_k
+
+                # Update the external KVCache with the new key and value.
+                KVCache.put(layer, i, sub_k, v[start:end, :])
+            output.copy_(q)
+        
+class RopeAppendTorch(Operations):
     def __init__(
         self,
         name,
@@ -139,7 +109,7 @@ class RopeAppend(Operations):
         super().__init__(name)
         self.inputs = {"kqv": IOWrapper(self, "kqv")}
         self.outputs = {"q": IOWrapper(self, "q")}
-        self.externals = {"KVCache": None, "k_data": None, "v_data": None}
+        self.externals = {"KVCache": None}
         
         # Save RoPE configuration.
         self.rope_type = rope_type
@@ -151,32 +121,22 @@ class RopeAppend(Operations):
 
         self.impl_map = {}
         self.init_impl_map()
-        self.op_device = RopeAppend_Device
+        self.op_device = RopeAppendTorch_Device
 
     def init_impl_map(self):
         self.add_impl(RopeAppendTorchImpl)
-        if platform_config.PLATFORM_CUDA:
-            self.add_impl(RopeAppendCudaImpl)
 
-    def setShape(self, num_kv_heads, num_qo_heads, head_dim):
-        self.num_kv_heads = num_kv_heads
-        self.num_qo_heads = num_qo_heads
+    def setShape(self, num_kv_heads, num_qo_heads, head_dim, tp_size=1):
+        self.num_kv_heads = num_kv_heads // tp_size
+        self.num_qo_heads = num_qo_heads // tp_size
         self.head_dim = head_dim
         for op_device in self.children:
             op_device.setShapeForIOWrappers()
 
-    def update(self, page_size, qo_indicies, kv_indptr, kv_indices, kv_last_page_len, rev_input_indptr, per_token_offset, decode_flag=False):
+    def update(self, qo_indicies, decode_flag=False):
         """Stores the starting indices for the query/key segments."""
-        self.page_size = page_size
         self.qo_indicies = qo_indicies
-        self.kv_indptr = kv_indptr
-        self.kv_indices = kv_indices
-        self.kv_last_page_len = kv_last_page_len
-        self.rev_input_indptr = rev_input_indptr
-        self.per_token_offset = per_token_offset
         self.decode_flag = decode_flag
-        if self.impl.category_tag == "cuda":
-            bind_ropeappend.updateKVCache(self.kv_indptr, self.kv_indices, self.kv_last_page_len, len(self.kv_last_page_len), self.page_size, self.num_kv_heads, self.num_qo_heads, self.head_dim)
 
     def profile(self):
         input_kqv = torch.randn(2, (self.num_qo_heads + 2 * self.num_kv_heads) * self.head_dim, dtype=torch.float16, device='cuda')
@@ -239,10 +199,10 @@ class RopeAppend(Operations):
                     ''', (self.name + f"_{category_tag}" + f"with_{kv_caches[0].name}", batch_size, average_time))
         self.conn.commit()
     
-class RopeAppend_Device(Operation_Device):
+class RopeAppendTorch_Device(Operation_Device):
     def __init__(self, parent, device):
         super().__init__(parent, device)
-        self.op_layer = RopeAppend_Layer
+        self.op_layer = RopeAppendTorch_Layer
 
     def setShapeForIOWrappers(self):
         # The input tensor "kqv" is assumed to have a flattened layout:
@@ -254,11 +214,10 @@ class RopeAppend_Device(Operation_Device):
         # The output "q" has shape [batch_size, num_qo_heads * head_dim]
         self.outputs["q"].init_shape((0, self.parent.num_qo_heads * self.parent.head_dim))
 
-class RopeAppend_Layer(Operation_Layer):
+class RopeAppendTorch_Layer(Operation_Layer):
     def __init__(self, layer, op_device):
         super().__init__(layer, op_device)
-        self.k_data_ptr, self.v_data_ptr = op_device.externals["KVCache"].get_whole_kv_data(self.device_id, self.layer)
 
     def run(self):
-        self.impl.run(self.layer, self.inputs["kqv"].tensor, self.externals["KVCache"], self.k_data_ptr, self.v_data_ptr, self.outputs["q"].tensor, self.parent.parent.decode_flag, offset=0)
+        self.impl.run(self.layer, self.inputs["kqv"].tensor, self.externals["KVCache"], self.outputs["q"].tensor, self.parent.parent.decode_flag, offset=0)
         

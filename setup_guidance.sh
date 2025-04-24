@@ -16,6 +16,13 @@ cd /code/Nanoflow-python
 git submodule init
 git submodule update
 
+# install nsight
+NSIGHT="NsightSystems-linux-cli-public-2025.1.1.131-3554042.deb"
+if [[ ! -f "$NSIGHT" ]]; then
+  wget https://developer.download.nvidia.com/devtools/nsight-systems/$NSIGHT
+  dpkg -i ./$NSIGHT
+fi
+
 cd ./3rdparty/flashinfer
 git submodule init
 git submodule update

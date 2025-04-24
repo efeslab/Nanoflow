@@ -23,19 +23,27 @@ class KVCacheNone():
     def get(self, layer, idx):
         return self.cache.get((layer, idx), None)
     
+    def update(self, cumsum_input):
+        return None
+
     def get_whole_kv_data(self, device_id, layer: int):
         return None, None
+    
     def get_whole_kv_data_all_layers(self, device_id):
         return None, None
+    
     def get_indices(self, layer, idx):
-        return True
+        return 0
 
 class KVCacheTorch():
-    def __init__(self):
+    def __init__(self, num_kv_heads, head_dim, tp_size=1):
         self.name = 'Torch KV Cache'
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = head_dim
+        self.tp_size = tp_size
         self.cache = {}
         self.cache_indices = {}
-        self.hidden_dim = 1024
+        self.hidden_dim = num_kv_heads * head_dim // tp_size
         self.max_size_per_request = 2048
     
     def put(self, layer, idx, key, value):
@@ -49,28 +57,31 @@ class KVCacheTorch():
 
             # Store the reserved tensors in the cache.
             self.cache[(layer, idx)] = (reserved_key, reserved_value)
-            self.cache_indices[(layer, idx)] = (key.shape[0], value.shape[0])
+            self.cache_indices[(layer, idx)] = key.shape[0]
             # print(f"put the request {layer}, {idx}")
 
         else:
             old_key, old_value = self.cache[(layer, idx)]
-            key_offset, value_offset = self.cache_indices[(layer, idx)]
-            assert key_offset + key.shape[0] <= self.max_size_per_request, "Key size exceeds maximum size"
-            assert value_offset + value.shape[0] <= self.max_size_per_request, "Value size exceeds maximum size"
-            old_key[key_offset:key_offset + key.shape[0]] = key
-            old_value[value_offset:value_offset + value.shape[0]] = value
-            self.cache_indices[(layer, idx)] = (key_offset + key.shape[0], value_offset + value.shape[0])
+            kv_offset = self.cache_indices[(layer, idx)]
+            assert kv_offset + key.shape[0] <= self.max_size_per_request, "Key size exceeds maximum size"
+            assert kv_offset + value.shape[0] <= self.max_size_per_request, "Value size exceeds maximum size"
+            old_key[kv_offset:kv_offset + key.shape[0]] = key
+            old_value[kv_offset:kv_offset + value.shape[0]] = value
+            self.cache_indices[(layer, idx)] = kv_offset + key.shape[0]
             
     def get(self, layer, idx):
         # print(f"find the request {layer}, {idx}")
         if (layer, idx) in self.cache:
             # print(f"{layer, idx} is in kv cache.")
             reserved_key, reserved_value = self.cache[(layer, idx)]
-            key_offset, value_offset = self.cache_indices[(layer, idx)]
-            return reserved_key[:key_offset], reserved_value[:value_offset]
+            kv_offset = self.cache_indices[(layer, idx)]
+            return reserved_key[:kv_offset], reserved_value[:kv_offset]
         # print(f"{layer, idx} is not in kv cache.")
         return None
     
+    def update(self, cumsum_input):
+       return None
+
     def get_indices(self, layer, idx):
         return self.cache_indices.get((layer, idx), None)
     def get_whole_kv_data(self, device_id, layer: int):
@@ -200,9 +211,11 @@ class BatchedDistKVCache():
         self._pool = pool
         num_devices = pool.num_devices
         self.cache = {}
-        self._kv_indptr_devices = [torch.tensor([0], dtype=torch.int32, device=self._pool.k_datas[device_id].device) for device_id in range(num_devices)]
-        self._kv_indices_devices = [torch.tensor([], dtype=torch.int32, device=self._pool.k_datas[device_id].device) for device_id in range(num_devices)]
-        self._kv_last_page_len_devices = [torch.tensor([], dtype=torch.int32, device=self._pool.k_datas[device_id].device) for device_id in range(num_devices)]
+        self.kv_indptr_devices = [torch.tensor([0], dtype=torch.int32, device=self._pool.k_datas[device_id].device) for device_id in range(num_devices)]
+        self.kv_indices_devices = [torch.tensor([], dtype=torch.int32, device=self._pool.k_datas[device_id].device) for device_id in range(num_devices)]
+        self.kv_last_page_len_devices = [torch.tensor([], dtype=torch.int32, device=self._pool.k_datas[device_id].device) for device_id in range(num_devices)]
+        self.rev_input_indptr_devices = [torch.tensor([], dtype=torch.int32, device=self._pool.k_datas[device_id].device) for device_id in range(num_devices)]
+        self.per_token_offset_devices = [torch.tensor([], dtype=torch.int32, device=self._pool.k_datas[device_id].device) for device_id in range(num_devices)]
 
     def get_pool(self):
         return self._pool
@@ -222,16 +235,7 @@ class BatchedDistKVCache():
         # print("after adding num_tokens:", self.cache[(layer, idx)]._seqlen)
 
     def get(self, device_id: int, layer: int, idx: int):
-        # if (layer, idx) not in self.cache:
-        #     self.cache[(layer, idx)] = DistKVCache(self._pool)
-        #     return None, None
-        # else:
         kvcache = self.cache[idx]
-        # print("shape of self._pool.kv_data[kvcache.indicies[:-1], 0]: ", self._pool.kv_data[kvcache.indicies[:-1], 0].shape)
-        # print("kvcache.indicies[:-1]:", kvcache.indicies[:-1])
-        # print("kv cache indicies:", kvcache.indicies)
-        # print("kv cache last page offset:", kvcache.last_page_offset)
-
         ki = torch.cat(
             [
                 # self._pool.kv_data[kvcache.indicies[:-1], 0]
@@ -272,10 +276,24 @@ class BatchedDistKVCache():
 
     def get_seqlen(self, idx: int):
         return self.cache[idx].seqlen
+        
+    def update(self, cumsum_input):
+        device_id = cumsum_input.get_device()
+        rev_input_indptr_list = []
+        per_token_offset_list = []
+        for i in range(len(cumsum_input) - 1):
+            start = cumsum_input[i]
+            end = cumsum_input[i + 1]
+            self.pre_allocate(i, int(end - start))
+            seq_len = self.get_seqlen(i)
+            # append i to the rev_input_indptr for end-start times
+            rev_input_indptr_list.extend([i] * (end - start))
+            # extend the per_token_offset with a list from last_offest to last_offest + (end - start)
+            per_token_offset_list.extend(list(range(seq_len - (end - start), seq_len)))
 
-    def update(self, device_id):
-        # Here we do not materialize data into specific devices,
-        # for distributed assignment.
+        self.rev_input_indptr_devices[device_id] = torch.tensor(rev_input_indptr_list, dtype=torch.int32, device=f'cuda:{device_id}')
+        self.per_token_offset_devices[device_id] = torch.tensor(per_token_offset_list, dtype=torch.int32, device=f'cuda:{device_id}')
+
         kv_indptr_list = [0]
         kv_indices_list = []
         kv_last_page_len_list = []
@@ -283,9 +301,10 @@ class BatchedDistKVCache():
             kv_indptr_list.append(kv_indptr_list[-1] + len(kv.indicies))
             kv_indices_list.extend(kv.indicies)
             kv_last_page_len_list.append(kv.last_page_offset)
-        self._kv_indptr_devices[device_id] = torch.tensor(kv_indptr_list, dtype=torch.int32, device=f"cuda:{device_id}")
-        self._kv_indices_devices[device_id] = torch.tensor(kv_indices_list, dtype=torch.int32, device=f"cuda:{device_id}")
-        self._kv_last_page_len_devices[device_id] = torch.tensor(kv_last_page_len_list, dtype=torch.int32, device=f"cuda:{device_id}")
+        self.kv_indptr_devices[device_id] = torch.tensor(kv_indptr_list, dtype=torch.int32, device=f"cuda:{device_id}")
+        self.kv_indices_devices[device_id] = torch.tensor(kv_indices_list, dtype=torch.int32, device=f"cuda:{device_id}")
+        self.kv_last_page_len_devices[device_id] = torch.tensor(kv_last_page_len_list, dtype=torch.int32, device=f"cuda:{device_id}")
 
-        return self._kv_indptr_devices[device_id], self._kv_indices_devices[device_id], self._kv_last_page_len_devices[device_id]
-        
+    @property
+    def page_size(self):
+        return self._pool.page_size

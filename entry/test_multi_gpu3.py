@@ -2,7 +2,7 @@ import torch.multiprocessing as mp
 
 import sys, os
 sys.path.append("../")
-os.environ["CUDA_VISIBLE_DEVICES"] = "2, 3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "5, 6"
 import time
 import torch
 import torch.distributed as dist
@@ -11,8 +11,8 @@ import nvtx
 from multiprocessing import Value, Array, Barrier
 
 from transformers import AutoTokenizer
-# from models.llama3_FlashinferKVCache_TP2 import Pipeline
-from models.llama3_KVCacheTorch_TP2 import Pipeline
+from models.llama3_FlashinferKVCache_TP2 import Pipeline
+# from models.llama3_KVCacheTorch_TP2 import Pipeline
 
 def worker(rank, world_size, shared_int, shared_batch_size, shared_array, barrier, pipeline, temp_out, shared_command, input_ids):
     """
@@ -21,6 +21,11 @@ def worker(rank, world_size, shared_int, shared_batch_size, shared_array, barrie
     """
     
     torch.cuda.set_device(rank)
+    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
+    pipeline.init_streams()
+    pipeline.config_streams()
+    pipeline.config_network(rank)
+    pipeline.update_network_ops()
     output_strings = []
     for i in input_ids:
         output_strings.append(i)
@@ -28,36 +33,28 @@ def worker(rank, world_size, shared_int, shared_batch_size, shared_array, barrie
         # First barrier: wait until the main process writes a new task.
         barrier.wait()
         match shared_command.value:
-            case 0:
-                os.environ.setdefault("MASTER_ADDR", "localhost")
-                os.environ.setdefault("MASTER_PORT", "12355")
-                
-                # Initialize the process group.
-                dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
-                print(f"Process {rank} initialized on GPU {rank}.")
-                local_tensor = torch.full((1, 128), float(rank), device=torch.cuda.current_device())
-                gather_list = [torch.empty_like(local_tensor) for _ in range(world_size)]
-                dist.all_gather(gather_list, local_tensor)
-                all_gathered_tensor = torch.cat(gather_list, dim=0)
-                print(f"Rank {rank}: Gathered tensor (all processes):\n{all_gathered_tensor}")
-
             case 1:
                 pipeline.update(input_ids, decode_flag=False, device_id=rank)
-                # temp_out = torch.zeros(pipeline.batch_size, dtype=torch.int32, device='cuda')
-                # new_tokens = pipeline.run(temp_out)
-                new_tokens = pipeline.run(rank=rank, file_name=f"tp_test_{rank}", filefolder_name=f"tp_test_{rank}_folder")
-                for i, item in enumerate(new_tokens):
-                    output_strings[i].append(item[0])
-                # pipeline.update(output_strings)
+                output_length=20
 
-                # pipeline.update(new_tokens, decode_flag=True)
+                for i in range(output_length):
+                    print("Cycle: ", i)
+                    # new_tokens = pipeline.run(rank=rank, file_name=f"tp_test_torch_{rank}", filefolder_name=f"tp_test_torch_{rank}_folder")
+                    new_tokens = pipeline.run(rank=rank, file_name=f"tp_test_flashinfer_{rank}", filefolder_name=f"tp_test_flashinfer_{rank}_folder")
+                    for i, item in enumerate(new_tokens):
+                        output_strings[i].append(item[0])
+                    # pipeline.update(output_strings)
+                    print("output_strings: ", output_strings[:1])
+                    pipeline.update(new_tokens, decode_flag=True, device_id=rank)
                 # Read the shared integer.
 
                 flattened = [item for sublist in new_tokens for item in sublist]
                 shared_batch_size.value = len(flattened)
                 # Check for termination signal.
+                output_text = tokenizer.batch_decode(output_strings[:1], skip_special_tokens=True)
+                print(output_text)
 
-                print("output_strings: ", output_strings[:1])
+
                 
             case -1:
                 # Termination signal received.
@@ -85,7 +82,7 @@ if __name__ == '__main__':
     pipeline.init_dependency()
     pipeline.init_set_shape()
     print("finish init shape")
-    pipeline.init_set_weight("/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a")
+    pipeline.init_set_weight("/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a", cached=False)
 
     print("finish update pipeline")
 

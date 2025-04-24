@@ -26,7 +26,7 @@ weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snap
 weight_map_amd_kan = "/work1/kasikci/kanzhu/models/llama3-8b"
 
 pipeline = Pipeline()
-pipeline.init(weight_map_wzr)
+pipeline.init(weight_map_wzr, cached=False)
 
 # torch.cuda.empty_cache()
 # device = torch.cuda.current_device()
@@ -43,6 +43,7 @@ for i in input_ids:
 output_length=20
 
 for i in range(output_length):
+    print("Cycle: ", i)
     with prof_marker(f"running_{i}"):
         new_tokens = pipeline.run()
     with prof_marker("post_run_stage"):
