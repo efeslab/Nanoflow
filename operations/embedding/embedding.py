@@ -93,8 +93,8 @@ class GenEmbedding(Operations):
                     ''', (self.name + f"_{category_tag}", batch_size, average_time))
         self.conn.commit()
     
-    def processWeight(self, global_weight_map, weight_path, cached = False):
-        return process_weight_no_transpose(global_weight_map, self.weight_name, self.weights["embedding"], self.device_list, self.layer_list, weight_path, self.tp_size, cached=cached)
+    def processWeight(self, global_weight_map, cached_weight_map, cached = False):
+        return process_weight_no_transpose(global_weight_map, self.weight_name, self.weights["embedding"], self.device_list, self.layer_list, cached_weight_map, self.tp_size, cached=cached)
     
 class GenEmbedding_Device(Operation_Device):
     def __init__(self, parent, device):
