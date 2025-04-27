@@ -5,7 +5,7 @@ git submodule update
 # install dependencies
 apt update
 apt install python3
-pip3 install cmake
+# pip3 install cmake
 apt install libopenmpi-dev
 apt install wget
 pip install torch
