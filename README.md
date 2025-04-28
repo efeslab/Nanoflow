@@ -92,8 +92,8 @@ apt update && apt install -y git wget curl
 mkdir -p /code
 cd /code
 git clone https://github.com/efeslab/Nanoflow.git
-git checkout autosearch
 cd Nanoflow
+git checkout autosearch
 chmod +x ./installAnaconda.sh
 ./installAnaconda.sh
 # restart the terminal
