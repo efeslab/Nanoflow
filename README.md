@@ -81,15 +81,18 @@ We propose NanoFlow, a novel serving framework that exploits intra-device parall
 ## Installation
 ### Docker setup
 ```bash
-mkdir -p ~/framework-test
-docker run --gpus all --net=host --privileged -v /dev/shm:/dev/shm --name nanoflow -v ~/framework-test:/code -it nvcr.io/nvidia/nvhpc:23.11-devel-cuda_multi-ubuntu22.04
+docker run --gpus all --net=host --privileged -v /dev/shm:/dev/shm --name nanoflow -it nvcr.io/nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04
 ```
 
 > If using Runpod, we recommand using pytorch template 2.2.0.
 
-### Install dependencies
+### Install dependencies inside docker
 ```bash
+apt update && apt install -y git wget curl
+mkdir -p /code
+cd /code
 git clone https://github.com/efeslab/Nanoflow.git
+git checkout autosearch
 cd Nanoflow
 chmod +x ./installAnaconda.sh
 ./installAnaconda.sh
@@ -98,6 +101,9 @@ chmod +x ./installAnaconda.sh
 
 ```bash
 yes | ./setup.sh
+mkdir /code/hf -p
+export HF_HOME=/code/hf
+huggingface-cli login
 ```
 
 ### Serve different models
