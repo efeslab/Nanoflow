@@ -16,6 +16,13 @@ class LayerNormTorchImpl(OperationImpl):
         normalized_x = x / rms
         output.copy_(normalized_x.to(torch.float16) * weight)
 
+if platform_config.PLATFORM_TRITON:
+    from triton_ops.rmsnorm import rms_norm as triton_rms_norm
+    class LayerNormTritonImpl(OperationImpl):
+        category_tag = "triton"
+        def run(self, x, weight, output, epsilon):
+            triton_rms_norm(x, weight, output, epsilon)
+
 if platform_config.PLATFORM_CUDA:
     import bind_rms_norm
     class LayerNormCudaImpl(OperationImpl):
@@ -42,6 +49,8 @@ class LayerNorm(Operations):
 
     def init_impl_map(self):
         self.add_impl(LayerNormTorchImpl)
+        if platform_config.PLATFORM_TRITON:
+            self.add_impl(LayerNormTritonImpl)
         if platform_config.PLATFORM_CUDA:
             self.add_impl(LayerNormCudaImpl)
     

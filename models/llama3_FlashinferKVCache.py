@@ -1,6 +1,5 @@
 import transformers
 import torch
-import nvtx
 import os, sys
 sys.path.append("../")
 sys.path.append('../pybind/build')
@@ -17,6 +16,7 @@ from operations.rope.rope import RopeAppend
 from operations.attention.llamaAttention import DecAttn, PFAttn
 from operations.virtualOp.virtual_ops import Copy, Redist
 from kvcache.kv import DistKVPool, BatchedDistKVCache
+from utils.prof_marker import prof_marker
 from core.weightManager import WeightManager
 from core.bufferAllocate import BufferAllocator
 from core.executor import Executor
@@ -329,7 +329,7 @@ class Pipeline():
         self.executor.execute({}, temp_out)
         # self.executor.print_debug(file_name, rank, filefolder_name=filefolder_name, output=temp_out)
 
-        with nvtx.annotate("after_execute_before_return"):
+        with prof_marker("after_execute_before_return"):
             temp_out = temp_out.cpu()
             new_tokens = [ [temp_out[idx-1].item()] for idx in self.cumsum_input[1:] ]
         return new_tokens

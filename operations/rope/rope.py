@@ -44,6 +44,7 @@ class RopeAppendTorchImpl(OperationImpl):
         q = q.contiguous()
 
         # Process each batch element.
+        # print(self.op_base.qo_indicies)
         for i in range(len(self.op_base.qo_indicies) - 1):
             start = self.op_base.qo_indicies[i]
             end = self.op_base.qo_indicies[i + 1]

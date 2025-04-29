@@ -1,7 +1,8 @@
 import transformers
 import torch
-import nvtx
 import os, sys
+
+from utils.prof_marker import prof_marker
 sys.path.append("../")
 sys.path.append('../pybind/build')
 os.environ["HF_HOME"] = "/code/hf"
@@ -236,23 +237,23 @@ class Pipeline():
     
     def config_algorithm(self, device_id=0):
         self.gen_embedding.config_tag("torch", device_id)
-        self.layerNormAttn.config_tag("torch", device_id)
+        self.layerNormAttn.config_tag("triton", device_id)
         self.activation.config_tag("torch", device_id)
         self.kqv.config_tag("torch", device_id)
         self.ropeAppend.config_tag("torch", device_id)
         self.decAttn.config_tag("torch", device_id)
         self.pfAttn.config_tag("torch", device_id)
-        self.layerNormFFN.config_tag("torch", device_id)
+        self.layerNormFFN.config_tag("triton", device_id)
         self.o.config_tag("torch", device_id)
         self.ug.config_tag("torch", device_id)
         self.d.config_tag("torch", device_id)
-        self.modelLayerNorm.config_tag("torch", device_id)
+        self.modelLayerNorm.config_tag("triton", device_id)
         self.sample.config_tag("torch", device_id)
         self.getLogits.config_tag("torch", device_id)
 
     
     def update(self, input_ids, decode_flag=False, device_id=0):
-        
+        print(input_ids)
         self.input_ids = input_ids
         # concatenate input_ids into a single tensor
         flattened = [item for sublist in input_ids for item in sublist]
@@ -308,7 +309,7 @@ class Pipeline():
         self.executor.execute({}, temp_out)
         # self.executor.print_debug(file_name, rank, filefolder_name=filefolder_name, output=temp_out)
 
-        with nvtx.annotate("after_execute_before_return"):
+        with prof_marker("after_execute_before_return"):
             temp_out = temp_out.cpu()
             new_tokens = [ [temp_out[idx-1].item()] for idx in self.cumsum_input[1:] ]
         return new_tokens
