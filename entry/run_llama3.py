@@ -4,8 +4,16 @@ sys.path.append("../")
 sys.path.append('../pybind/build')
 from utils.prof_marker import prof_marker
 from transformers import AutoTokenizer
+import logging
 
-
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s [%(levelname)s] %(message)s",  
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[
+        logging.StreamHandler(),
+    ]
+)
 
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"

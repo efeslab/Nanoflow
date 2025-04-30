@@ -269,9 +269,24 @@ class Pipeline():
         request_length = torch.tensor([len(x) for x in input_ids], dtype=torch.int32, device=f'cuda:{device_id}')
         self.cumsum_input = torch.cat([torch.tensor([0], dtype=torch.int32, device=f'cuda:{device_id}'), torch.cumsum(request_length, dim=0, dtype=torch.int32)])
 
+        # update rev_input_indptr and per_token_offset
+        rev_input_indptr_list = []
+        per_token_offset_list = []
+        for i in range(len(self.cumsum_input) - 1):
+            start = self.cumsum_input[i]
+            end = self.cumsum_input[i + 1]
+            key_offset, value_offset = self.kv_cache.get_indices(0, i) or (0, 0)
+            assert key_offset == value_offset, "key_offset and value_offset should be equal"
+            # append i to the rev_input_indptr for end-start times
+            rev_input_indptr_list.extend([i] * (end - start))
+            # extend the per_token_offset with a list from last_offest to last_offest + (end - start)
+            per_token_offset_list.extend(list(range(key_offset, int(key_offset + (end - start).item()))))
+
+        self.rev_input_indptr = torch.tensor(rev_input_indptr_list, dtype=torch.int32, device=f'cuda:{device_id}')
+        self.per_token_offset = torch.tensor(per_token_offset_list, dtype=torch.int32, device=f'cuda:{device_id}')
 
         self.global_input.children[device_id].outputs["tokens"].tensor[:input_tensor.shape[0]].copy_(input_tensor)
-        self.ropeAppend.update(self.page_size, self.cumsum_input, None, None, None, None, None, decode_flag)
+        self.ropeAppend.update(self.page_size, self.cumsum_input, None, None, None, self.rev_input_indptr, self.per_token_offset, decode_flag)
         self.decAttn.update(self.cumsum_input, None, None, None, self.page_size)
         self.pfAttn.update(self.cumsum_input, None, None, None, self.page_size)
         

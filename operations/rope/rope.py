@@ -1,5 +1,5 @@
-import platform
-import torch
+import logging
+from typing import Union
 import math
 import time
 
@@ -14,12 +14,27 @@ from kvcache.kv import KVCacheNone, KVCacheTorch, DistKVPool, BatchedDistKVCache
 from utils.prof_marker import prof_marker 
 
 
+def _apply_rotary_emb_torch(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> torch.Tensor:
+    cos = cos.unsqueeze(-2).to(x.dtype)
+    sin = sin.unsqueeze(-2).to(x.dtype)
+    x1 = x[..., ::2]
+    x2 = x[..., 1::2]
+    o1 = x1 * cos - x2 * sin
+    o2 = x2 * cos + x1 * sin
+    return torch.stack((o1, o2), dim=-1).flatten(-2)
 
 class RopeAppendTorchImpl(OperationImpl):
     category_tag = "torch"
     def __init__(self, op_base, device_id):
         super().__init__(op_base, device_id)
         self.rope_type = op_base.rope_type
+        if self.rope_type == "llama3":
+            self.base = 500000.0
+            self.rotary_dim = 128
         self.theta = op_base.theta
         self.original_max_position_embeddings = op_base.original_max_position_embeddings
         self.low_freq_factor = op_base.low_freq_factor
@@ -28,8 +43,59 @@ class RopeAppendTorchImpl(OperationImpl):
         self.num_kv_heads = op_base.num_kv_heads
         self.num_qo_heads = op_base.num_qo_heads
         self.head_dim = op_base.head_dim
+        self.cache = self._compute_cos_sin_cache()
+
+    def _compute_inv_freq(self, base: Union[int, float]) -> torch.Tensor:
+        """Compute the inverse frequency."""
+        inv_freq = 1.0 / (base**(torch.arange(
+            0, self.rotary_dim, 2, dtype=torch.float) / self.rotary_dim))
+        return inv_freq
+
+    def _compute_cos_sin_cache(self) -> torch.Tensor:
+        """Compute the cos and sin cache."""
+        inv_freq = self._compute_inv_freq(self.base)
+        t = torch.arange(self.original_max_position_embeddings, dtype=torch.float)
+
+        freqs = torch.einsum("i,j -> ij", t, inv_freq)
+        cos = freqs.cos()
+        sin = freqs.sin()
+        cache = torch.cat((cos, sin), dim=-1)
+        return cache
+
+    def forward_native(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """PyTorch-native RoPE implementation.
+
+        Args:
+            query (torch.Tensor): The query tensor of shape [seq_len, hidden_dim].
+            key (torch.Tensor): The key tensor of shape [seq_len, hidden_dim].
+        """
+        if self.cache.device != query.device:
+            self.cache = self.cache.to(query.device)
+        positions = self.op_base.per_token_offset
+        num_tokens = positions.shape[0]
+        cos_sin = self.cache.index_select(0, positions)
+        cos, sin = cos_sin.chunk(2, dim=-1)
+
+        query_shape = query.shape
+        query = query.view(num_tokens, -1, self.rotary_dim)
+        query_rot = query[..., :self.rotary_dim]
+        query_pass = query[..., self.rotary_dim:]
+        query_rot = _apply_rotary_emb_torch(query_rot, cos, sin)
+        query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
+
+        key_shape = key.shape
+        key = key.view(num_tokens, -1, self.rotary_dim)
+        key_rot = key[..., :self.rotary_dim]
+        key_pass = key[..., self.rotary_dim:]
+        key_rot = _apply_rotary_emb_torch(key_rot, cos, sin)
+        key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
+        return query, key
         
-    def run(self, layer, kqv, KVCache, k_data, v_data, output, decode_flag, offset=0):
+    def run(self, layer, kqv, KVCache: KVCacheTorch, k_data, v_data, output, decode_flag, offset=0):
         # Determine the number of elements for each slice.
         layout_strides = [
             self.num_kv_heads * self.head_dim,
@@ -44,7 +110,29 @@ class RopeAppendTorchImpl(OperationImpl):
         q = q.contiguous()
 
         # Process each batch element.
-        # print(self.op_base.qo_indicies)
+        q, k = self.forward_native(q, k)
+
+        for i in range(len(self.op_base.qo_indicies) - 1):
+            start = self.op_base.qo_indicies[i]
+            end = self.op_base.qo_indicies[i + 1]
+            # Update the external KVCache with the new key and value.
+            KVCache.put(layer, i, k[start:end, :], v[start:end, :])
+        output.copy_(q)
+    
+    def run_deprecated(self, layer, kqv, KVCache: KVCacheTorch, k_data, v_data, output, decode_flag, offset=0):
+        # Determine the number of elements for each slice.
+        layout_strides = [
+            self.num_kv_heads * self.head_dim,
+            self.num_kv_heads * self.head_dim,
+            self.num_qo_heads * self.head_dim,
+        ]
+        # Split kqv into key, query, and value (here assumed to be in the order: k, q, v).
+        # print("kqv shape:", kqv.shape)
+        k, v, q = torch.split(kqv, layout_strides, dim=1)
+        k = k.contiguous()
+        v = v.contiguous()
+        q = q.contiguous()
+
         for i in range(len(self.op_base.qo_indicies) - 1):
             start = self.op_base.qo_indicies[i]
             end = self.op_base.qo_indicies[i + 1]
@@ -84,7 +172,8 @@ class RopeAppendTorchImpl(OperationImpl):
             # Update the external KVCache with the new key and value.
             KVCache.put(layer, i, sub_k, v[start:end, :])
         output.copy_(q)
-        
+
+
 if platform_config.PLATFORM_CUDA:
     import bind_ropeappend
     class RopeAppendCudaImpl(OperationImpl):
