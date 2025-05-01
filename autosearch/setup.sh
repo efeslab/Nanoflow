@@ -3,7 +3,7 @@ tar xvfz gurobi12.0.1_linux64.tar.gz
 export GUROBI_HOME=$(pwd)/gurobi1201/linux64
 export PATH="${GUROBI_HOME}/bin:${PATH}"
 export LD_LIBRARY_PATH="${GUROBI_HOME}/lib:${LD_LIBRARY_PATH}"
-grbkeyget
+grbgetkey
 curl -Ls https://astral.sh/uv/install.sh | sh
 uv venv 
 source .venv/bin/activate
