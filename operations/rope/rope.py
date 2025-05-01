@@ -1,6 +1,6 @@
 import logging
 from typing import Union
-import math
+import torch
 import time
 
 import platform_config
@@ -43,7 +43,7 @@ class RopeAppendTorchImpl(OperationImpl):
         self.num_kv_heads = op_base.num_kv_heads
         self.num_qo_heads = op_base.num_qo_heads
         self.head_dim = op_base.head_dim
-        self.cache = self._compute_cos_sin_cache()
+        self.cache = self._compute_cos_sin_cache().to(f"cuda:{device_id}")
 
     def _compute_inv_freq(self, base: Union[int, float]) -> torch.Tensor:
         """Compute the inverse frequency."""
@@ -112,11 +112,14 @@ class RopeAppendTorchImpl(OperationImpl):
         # Process each batch element.
         q, k = self.forward_native(q, k)
 
-        for i in range(len(self.op_base.qo_indicies) - 1):
-            start = self.op_base.qo_indicies[i]
-            end = self.op_base.qo_indicies[i + 1]
-            # Update the external KVCache with the new key and value.
-            KVCache.put(layer, i, k[start:end, :], v[start:end, :])
+        KVCache.put_batch(
+            layer,
+            self.op_base.qo_indicies,
+            k,
+            v,
+            self.op_base.rev_input_indptr,
+            self.op_base.per_token_offset,
+        )
         output.copy_(q)
     
     def run_deprecated(self, layer, kqv, KVCache: KVCacheTorch, k_data, v_data, output, decode_flag, offset=0):

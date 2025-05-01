@@ -1,10 +1,17 @@
+"""
+Author: Yi Pan <conlesspan@outlook.com>
+Date: 2025-04-27
+Description: Triton kernels and bindings for RoPE.
+Reference: https://github.com/flashinfer-ai/flashinfer/blob/main/flashinfer/triton/kernels/norm.py
+"""
+
 import torch
 import triton  # type: ignore[import]
 import triton.language as tl  # type: ignore[import]
 from typing import Optional
 
 @triton.jit
-def rms_norm_kernel(
+def _rms_norm_kernel(
     n,
     b,
     x_ptr,
@@ -54,7 +61,6 @@ def rms_norm_kernel(
     rms = tl.rsqrt(tl.sum(square_sum) / n + EPS)
 
     # x[i] = r[i] + x[i] / rms * weight[i]
-    output_dtype = o_row.dtype.element_ty
     for off in range(0, n, BLOCK_SIZE):
         offsets = off + tl.arange(0, BLOCK_SIZE)
         mask = offsets < n
@@ -72,7 +78,7 @@ def rms_norm_kernel(
         # multiplying with the weights to replicate the HF behaviour precisely.
         result = w * (x * rms)
         if HAS_OUT_SCALE:
-            result = result * scale
+            result *= o_scale
         tl.store(o_row + offsets, result, mask=mask)
 
 
@@ -94,7 +100,7 @@ def rms_norm(
     block_size = triton.next_power_of_2(n)
     num_warps = max(8, min(32, block_size // 256))
 
-    rms_norm_kernel[(b,)](
+    _rms_norm_kernel[(b,)](
         n=n,
         b=b,
         x_ptr=x,

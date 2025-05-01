@@ -5,6 +5,7 @@
 #
 ############################################
 
+import logging
 from typing import Sequence
 
 import torch
@@ -12,7 +13,10 @@ import torch
 from torch.profiler import profile, record_function, ProfilerActivity
 import time
 
-class KVCacheNone():
+from triton_ops.kv_copy import copy_kvcache
+
+
+class KVCacheNone:
     def __init__(self):
         self.name = 'No KV Cache'
         self.cache = {}
@@ -30,22 +34,31 @@ class KVCacheNone():
     def get_indices(self, layer, idx):
         return True
 
-class KVCacheTorch():
+
+class KVCacheTorch:
     def __init__(self):
-        self.name = 'Torch KV Cache'
+        self.name = "Torch KV Cache"
         self.cache = {}
         self.cache_indices = {}
         self.hidden_dim = 1024
         self.max_size_per_request = 2048
-    
+
     def put(self, layer, idx, key, value):
         if (layer, idx) not in self.cache:
-            reserved_key = torch.empty((self.max_size_per_request, self.hidden_dim), dtype=key.dtype, device=key.device)
-            reserved_value = torch.empty((self.max_size_per_request, self.hidden_dim), dtype=value.dtype, device=value.device)
-            
+            reserved_key = torch.empty(
+                (self.max_size_per_request, self.hidden_dim),
+                dtype=key.dtype,
+                device=key.device,
+            )
+            reserved_value = torch.empty(
+                (self.max_size_per_request, self.hidden_dim),
+                dtype=value.dtype,
+                device=value.device,
+            )
+
             # Insert the provided key and value at the beginning of the reserved space.
-            reserved_key[:key.shape[0]] = key
-            reserved_value[:value.shape[0]] = value
+            reserved_key[: key.shape[0]] = key
+            reserved_value[: value.shape[0]] = value
 
             # Store the reserved tensors in the cache.
             self.cache[(layer, idx)] = (reserved_key, reserved_value)
@@ -55,12 +68,72 @@ class KVCacheTorch():
         else:
             old_key, old_value = self.cache[(layer, idx)]
             key_offset, value_offset = self.cache_indices[(layer, idx)]
-            assert key_offset + key.shape[0] <= self.max_size_per_request, "Key size exceeds maximum size"
-            assert value_offset + value.shape[0] <= self.max_size_per_request, "Value size exceeds maximum size"
-            old_key[key_offset:key_offset + key.shape[0]] = key
-            old_value[value_offset:value_offset + value.shape[0]] = value
-            self.cache_indices[(layer, idx)] = (key_offset + key.shape[0], value_offset + value.shape[0])
-            
+            assert (
+                key_offset + key.shape[0] <= self.max_size_per_request
+            ), "Key size exceeds maximum size"
+            assert (
+                value_offset + value.shape[0] <= self.max_size_per_request
+            ), "Value size exceeds maximum size"
+            old_key[key_offset : key_offset + key.shape[0]] = key
+            old_value[value_offset : value_offset + value.shape[0]] = value
+            self.cache_indices[(layer, idx)] = (
+                key_offset + key.shape[0],
+                value_offset + value.shape[0],
+            )
+
+    def put_batch(
+        self,
+        layer: int,
+        qo_indices: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        rev_input_indices: torch.Tensor,
+        per_token_offset: torch.Tensor,
+    ) -> None:
+        batch_size = qo_indices.shape[0] - 1
+        key_ptr = [None for _ in range(batch_size)]
+        value_ptr = [None for _ in range(batch_size)]
+        for i in range(batch_size):
+            if (layer, i) not in self.cache:
+                reserved_key = torch.empty(
+                    (self.max_size_per_request, self.hidden_dim),
+                    dtype=key.dtype,
+                    device=key.device,
+                )
+                reserved_value = torch.empty(
+                    (self.max_size_per_request, self.hidden_dim),
+                    dtype=value.dtype,
+                    device=value.device,
+                )
+                seq_len = qo_indices[i + 1] - qo_indices[i]
+                self.cache[(layer, i)] = (reserved_key, reserved_value)
+                self.cache_indices[(layer, i)] = (seq_len, seq_len)
+            key_cache, value_cache = self.cache[(layer, i)]
+            key_ptr[i] = key_cache
+            value_ptr[i] = value_cache
+        
+        seq_len = key.shape[0]
+        for i in range(seq_len):
+            input_idx = rev_input_indices[i]
+            position = per_token_offset[i]
+            logging.debug(f"id {i}: k_cache {hex(key_ptr[input_idx][position].data_ptr())}")
+            logging.debug(f"id {i}: v_cache {hex(value_ptr[input_idx][position].data_ptr())}")
+        key_ptr = [key_ptr[i].data_ptr() for i in range(len(key_ptr))]
+        value_ptr = [value_ptr[i].data_ptr() for i in range(len(value_ptr))]
+
+        key_ptr_tensor = torch.tensor(key_ptr, dtype=torch.uint64, device=key.device)
+        value_ptr_tensor = torch.tensor(
+            value_ptr, dtype=torch.uint64, device=value.device
+        )
+        copy_kvcache(
+            key=key,
+            value=value,
+            key_cache_ptr=key_ptr_tensor,
+            value_cache_ptr=value_ptr_tensor,
+            rev_input_indices=rev_input_indices,
+            per_token_offset=per_token_offset,
+        )
+
     def get(self, layer, idx):
         # print(f"find the request {layer}, {idx}")
         if (layer, idx) in self.cache:
