@@ -27,8 +27,8 @@ def _copy_kvcache_kernel(
     position = tl.load(per_token_offset_ptr + pid)
     k_row = k_ptr + position * d
     v_row = v_ptr + position * d
-    k_cache_row = (tl.load(k_cache_ptr + input_idx) + d * position).to(tl.pointer_type(tl.float16))
-    v_cache_row = (tl.load(v_cache_ptr + input_idx) + d * position).to(tl.pointer_type(tl.float16))
+    k_cache_row = tl.load(k_cache_ptr + input_idx).to(k_ptr.dtype) + d * position
+    v_cache_row = tl.load(v_cache_ptr + input_idx).to(v_ptr.dtype) + d * position
 
     for i in range(0, d, BLOCK_SIZE):
         offsets = i + tl.arange(0, BLOCK_SIZE)
