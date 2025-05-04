@@ -1,7 +1,7 @@
 from typing import List
 
 class OperationImpl:
-    category_tag = None
+    category_tag: str | None = None
     def __init__(self, op_base, device_id):
         self.impl_tag = None
         self.op_base = op_base

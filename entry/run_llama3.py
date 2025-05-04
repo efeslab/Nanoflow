@@ -7,7 +7,7 @@ from transformers import AutoTokenizer
 import logging
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s %(name)s [%(levelname)s] %(message)s",  
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
@@ -19,22 +19,27 @@ logging.basicConfig(
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 # from models.llama3_NoKVCacheTorch import Pipeline
-from models.llama3_KVCacheTorch import Pipeline
+# from models.llama3_KVCacheTorch import Pipeline
+from models.llama3_KVCacheFA import Pipeline
 # from models.llama3_FlashinferKVCache import Pipeline
 
 tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
 # input_strings = ["Hi, who are you?"]
 # input_strings = ["Hi, who are you?", "What's the weather today?"]
-input_strings = [ "Hi, who are you?" for _ in range(16)]
+input_strings = [ "Hi, who are you?" for _ in range(4)]
 # input_strings = [ "The university of washington is located in" for _ in range(16)]
 input_ids = [tokenizer.encode(s) for s in input_strings]
+# for input_id in input_ids:
+#     while len(input_id) < 256:
+#         input_id.append(input_id[-1])
 print(input_ids)
 
 weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
 weight_map_amd_kan = "/work1/kasikci/kanzhu/models/llama3-8b"
+weight_map_yi = "/root/llama3-8b"
 
 pipeline = Pipeline()
-pipeline.init(weight_map_amd_kan)
+pipeline.init(weight_map_yi)
 
 # torch.cuda.empty_cache()
 # device = torch.cuda.current_device()
@@ -48,14 +53,17 @@ for i in input_ids:
     output_strings.append(i)
 #     print("input_ids: ", i)
 
-output_length=5
+output_length=10
 torch.cuda.current_stream().synchronize()
 
 
 with torch.profiler.profile(
+    activities=[
+        torch.profiler.ProfilerActivity.CPU,
+        torch.profiler.ProfilerActivity.CUDA,
+    ],
     record_shapes=True,
     profile_memory=True,
-    with_stack=True,
 ) as prof:
     for i in range(output_length):
         with prof_marker(f"running_{i}"):
@@ -67,7 +75,7 @@ with torch.profiler.profile(
         with prof_marker("update_stage"):
             # pipeline.update(output_strings)
             pipeline.update(new_tokens, decode_flag=True)
-prof.export_chrome_trace("trace.json")
+prof.export_chrome_trace("trace_fuse_copy.json")
 
 output_text = tokenizer.batch_decode(output_strings[:1], skip_special_tokens=True)
 print(output_text)
