@@ -445,11 +445,11 @@ class KVCacheFANoPage:
             )
 
             # Get the offset for the current request
-            offset = per_token_offset[i]
+            offset = self.indices[i] # type: ignore
 
             # Update the cache with the new key and value tensors
-            self.k_cache[layer][i][offset : offset + key_tensor.shape[0]] = key_tensor
-            self.v_cache[layer][i][offset : offset + value_tensor.shape[0]] = value_tensor
+            self.k_cache[layer][i][offset - key_tensor.shape[0] : offset] = key_tensor
+            self.v_cache[layer][i][offset - value_tensor.shape[0] : offset] = value_tensor
 
 class DistKVPool:
     """
