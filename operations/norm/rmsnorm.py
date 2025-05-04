@@ -23,7 +23,8 @@ if platform_config.PLATFORM_CUDA:
         category_tag = "cuda"
         def run(self, x, weight, output, epsilon):
             # print("using cuda")
-            bind_rms_norm.rms_norm(output, x, weight, epsilon, self.stream_handle)
+            if self.batch_size > 0:
+                bind_rms_norm.rms_norm(output, x, weight, epsilon, self.stream_handle)
 
 class LayerNorm(Operations):
     def __init__(self, name):
@@ -49,8 +50,18 @@ class LayerNorm(Operations):
     def setShape(self, hidden_dim):
         self.hidden_dim = hidden_dim
         self.weights["weight"].shape = (self.hidden_dim,)
-        for op_device in self.children:
-            op_device.setShapeForIOWrappers()
+        self.updateChildrenIOShape()
+    
+    def copy_nano(self, index):
+        new_op = LayerNorm(f"{self.name}{index}")
+        new_op.weights = self.weights
+        new_op.expand_all_gpu_and_layers(len(self.device_list), 32)
+        new_op.setShape(self.hidden_dim)
+        new_op.set_stream(self.stream)
+
+        self.nano_ops.append(new_op)
+
+        return new_op
 
     def profile(self):
         # check the similarity of the outputs

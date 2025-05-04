@@ -3,6 +3,10 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import re
 import sympy as sp
+import os
+os.environ['GRB_LICENSE_FILE'] = '/code/Nanoflow-python/gurobi.lic'
+import gurobipy as gp
+from gurobipy import GRB
 from core.IOWrapper import IOWrapper
 from operations.virtualOp.virtual_ops import Copy, Copy_Device, Redist, Redist_Device
 from utils.graph_plot import plot_graph_topological, draw_graphs_subplots
@@ -31,11 +35,13 @@ class BufferAllocator():
             # print(f"add node {wrapper.fullName}")
         for wrapper in self.buffers_list:
             for next_wrapper in wrapper.next:
+                assert next_wrapper.fullName in G.nodes, f"{next_wrapper.fullName} is not in the graph"
                 G.add_edge(wrapper.fullName, next_wrapper.fullName)
                 # print(f"add edge {wrapper.fullName} -> {next_wrapper.fullName}")
         self.full_graph = G
     
     def set_all_batchsize_by_linear_programming(self):
+        # Create a new model
         variables = {}
         equations = []
         for wrapper in self.buffers_list:
@@ -80,8 +86,8 @@ class BufferAllocator():
         # Set the shape for each wrapper
         for wrapper in self.buffers_list:
             if wrapper.owner.batch_size is None:
-                wrapper.owner.batch_size = solution[variables[wrapper.fullName]]
-            wrapper.batch_size = solution[variables[wrapper.fullName]]
+                wrapper.owner.batch_size = int(solution[variables[wrapper.fullName]])
+            wrapper.batch_size = int(solution[variables[wrapper.fullName]])
             # print(f"set {wrapper.fullName} batch size to {wrapper.batch_size} with shape {wrapper.shape}")
 
     def draw_dependency_graph(self):
@@ -106,89 +112,105 @@ class BufferAllocator():
         self.total_allocated = 0
         components = self.get_connected_components()
         for comp in components:
+            model = gp.Model("linear_program")
+            model.setParam("OutputFlag", 0)
+            variables = {}
             # print("component: ", comp)
             # Create a subgraph for the component:
             comp = self.full_graph.subgraph(comp)
-            
             if nx.is_directed_acyclic_graph(comp):
                 sorted_nodes = list(nx.topological_sort(comp))
             else:
                 raise Exception("Component must be a DAG")
             
-            # Define a custom key function
-            def sort_key(node):
-                assert len(node.next) <= 1, f"Node {node.fullName} has more than one next node"
-                next_node_name = node.next[0].fullName if node.next else ""
-                # This regex captures a non-digit prefix and the subsequent numeric part.
-                match = re.match(r'(\D+)(\d+)', next_node_name)
-                if match:
-                    prefix, num = match.groups()
-                    return (prefix, int(num))
-                # Fallback: if no match, return the original string and 0
-                return (next_node_name, 0)
+            collected_copy_ops = []
+            collected_redist_ops = []
+            wrappers = [data['wrapper'] for _, data in comp.nodes(data=True)]
+            for wrapper in wrappers:
+                variables[wrapper.fullName] = model.addVar(name=wrapper.fullName, vtype=GRB.INTEGER, lb=0)
+                if wrapper.owner.isVirtual:
+                    if wrapper.owner.isCopy and wrapper.owner not in collected_copy_ops:
+                        collected_copy_ops.append(wrapper.owner)
+                    elif wrapper.owner.isRedist and wrapper.owner not in collected_redist_ops:
+                        collected_redist_ops.append(wrapper.owner)
+            # print("collected_copy_ops: ", [op.name for op in collected_copy_ops])
+            # print("collected_redist_ops: ", [op.name for op in collected_redist_ops])
+            if len(collected_copy_ops) == 0 and len(collected_redist_ops) == 0:
+                # print("No copy or redist operations found in the component.")
+                shape = wrappers[0].shape
+                dtype = wrappers[0].dtype
+                whole_buffer = torch.zeros(shape, dtype=dtype).cuda(device_id)
+                self.total_allocated += whole_buffer.numel() * whole_buffer.element_size()
+                for wrapper in wrappers:
+                    wrapper.set_whole_buffer(whole_buffer)
+                    wrapper.set_tensor_offset(0)
+                    # print(f"set {wrapper.fullName}, offset: 0")
+                continue
 
-            root_nodes_name = [name for name, indeg in comp.in_degree() if indeg == 0]
-            # print(f"root_nodes_name: {root_nodes_name}")
-            root_nodes = [self.full_graph.nodes[name]['wrapper'] for name in root_nodes_name]
-            # sort these nodes by their next connections
-            sorted_root_nodes = sorted(root_nodes, key=sort_key)
-            # print(f"sorted_root_nodes: {[sorted_root.fullName for sorted_root in sorted_root_nodes]}")
-
-            # allocate_info = []
-            processing_queue = []
-
-            cum_batchsize = 0
-            # accumulate the first dimension of root nodes' shape
-            for root_node in sorted_root_nodes:
-                root_node.set_tensor_offset(cum_batchsize)
-                cum_batchsize += root_node.shape[0]
-                processing_queue.append(root_node)
+            # print("There are copy or redist operations in the component.")
+            for cp_op in collected_copy_ops:
+                for input_wrapper in cp_op.inputs.values():
+                    prev_nodes = comp.predecessors(input_wrapper.fullName)
+                    # print(f"prev_nodes: {prev_nodes}")
+                    for prev_node in prev_nodes:
+                        prev_wrapper = comp.nodes[prev_node]['wrapper']
+                        model.addConstr(variables[input_wrapper.fullName] == variables[prev_wrapper.fullName], name=f"copy_{input_wrapper.fullName}")
+                    next_nodes = comp.successors(input_wrapper.fullName)
+                    for next_node in next_nodes:
+                        next_wrapper = comp.nodes[next_node]['wrapper']
+                        model.addConstr(variables[input_wrapper.fullName] == variables[next_wrapper.fullName], name=f"copy_{input_wrapper.fullName}")
+                for output_wrapper in cp_op.outputs.values():
+                    next_nodes = comp.successors(output_wrapper.fullName)
+                    for next_node in next_nodes:
+                        next_wrapper = comp.nodes[next_node]['wrapper']
+                        model.addConstr(variables[output_wrapper.fullName] == variables[next_wrapper.fullName], name=f"copy_{output_wrapper.fullName}")
+            for rd_op in collected_redist_ops:
+                input_wrappers = list(rd_op.inputs.values())
+                output_wrappers = list(rd_op.outputs.values())
+                model.addConstr(variables[input_wrappers[0].fullName] == variables[output_wrappers[0].fullName], name=f"redist_align_{input_wrappers[0].fullName}")
+                for idx, input_wrapper in enumerate(input_wrappers):
+                    prev_nodes = comp.predecessors(input_wrapper.fullName)
+                    for prev_node in prev_nodes:
+                        prev_wrapper = comp.nodes[prev_node]['wrapper']
+                        model.addConstr(variables[input_wrapper.fullName] == variables[prev_wrapper.fullName], name=f"redist_{input_wrapper.fullName}")
+                    if idx < rd_op.num_inputs - 1:
+                        next_input_wrapper = input_wrappers[idx + 1]
+                        model.addConstr(variables[input_wrapper.fullName] + input_wrapper.batch_size == variables[next_input_wrapper.fullName], name=f"redist_{input_wrapper.fullName}")
+                for idx, output_wrapper in enumerate(output_wrappers):
+                    next_nodes = comp.successors(output_wrapper.fullName)
+                    for next_node in next_nodes:
+                        next_wrapper = comp.nodes[next_node]['wrapper']
+                        model.addConstr(variables[output_wrapper.fullName] == variables[next_wrapper.fullName], name=f"redist_{output_wrapper.fullName}")
+                    if idx < rd_op.num_outputs - 1:
+                        next_output_wrapper = output_wrappers[idx + 1]
+                        model.addConstr(variables[output_wrapper.fullName] + output_wrapper.batch_size == variables[next_output_wrapper.fullName], name=f"redist_{output_wrapper.fullName}")
             
-            shape = (cum_batchsize, *sorted_root_nodes[0].shape[1:])
-            dtype = sorted_root_nodes[0].dtype
+            model.setObjective(gp.quicksum(variables[wrapper.fullName] for wrapper in wrappers), GRB.MINIMIZE)
+            model.optimize()
 
-            # print(f"total_size: {cum_batchsize}")
-            # print(f"shape: {shape}")
+            if model.status == GRB.OPTIMAL:
+                # print(f"Optimal solution found for component {comp}:")
+                # find the maximum value in the solution
+                allocated = int(max([variables[node].X + data["wrapper"].batch_size for node, data in comp.nodes(data=True)]))
+                print(f"Allocated size: {allocated}")
+                wrapper_for_allocation = comp.nodes[sorted_nodes[0]]['wrapper']
+                # print("wrappers[0]: ", wrapper_for_allocation.fullName)
+                shape = (allocated, *wrapper_for_allocation.shape[1:])
+                dtype = wrapper_for_allocation.dtype
+                # print(f"Allocated shape: {shape}, dtype: {dtype}")
+                # allocate the buffer
+                whole_buffer = torch.empty(shape, dtype=dtype).cuda(device_id)
+                self.total_allocated += whole_buffer.numel() * whole_buffer.element_size()
+                # set the buffer for each wrapper
+                for wrapper in wrappers:
+                    wrapper.set_whole_buffer(whole_buffer)
+                    wrapper.set_tensor_offset(int(variables[wrapper.fullName].X))
+                    # print(f"set {wrapper.fullName}, offset: {int(variables[wrapper.fullName].X)}")
+            else:
+                print(f"No optimal solution found for component {comp}.")
+                raise Exception("No optimal solution found for component!")
 
-            whole_buffer = torch.empty(shape, dtype=dtype, device=f"cuda:{device_id}")
-            self.total_allocated += whole_buffer.numel() * whole_buffer.element_size()
-            # print(f"allocated buffer: {whole_buffer.shape} with dtype: {dtype} and device: {device_id}")
 
-            # allocate_info.append(shape)
-            while processing_queue:
-                node = processing_queue.pop(0)
-                node.set_whole_buffer(whole_buffer)
-                # print("node: ", node.fullName, "with whole buffer: ", whole_buffer.shape, "tensor", node.tensor.shape,"and offset: ", node.tensor_offset)
-                next_nodes = [self.full_graph.nodes[name]["wrapper"] for name in list(self.full_graph[node.fullName])]
-                # print(f"next nodes: {[n for n in next_nodes]}")
-                for next_node in next_nodes:
-                    if isinstance(next_node.owner, Redist_Device):
-                        next_node.set_whole_buffer(whole_buffer)
-                        additional_offset = 0
-                        flag = True
-                        if next_node.is_input_wrapper:
-                            for input_wrapper in next_node.owner.inputs.values():
-                                if next_node.fullName == input_wrapper.fullName:
-                                    next_node.set_tensor_offset(node.tensor_offset + additional_offset)
-                                    if additional_offset != 0:
-                                        flag = False
-                                    break
-                                additional_offset += input_wrapper.batch_size
-                        elif next_node.is_output_wrapper:
-                            for output_wrapper in next_node.owner.outputs.values():
-                                if next_node.fullName == output_wrapper.fullName:
-                                    next_node.set_tensor_offset(node.tensor_offset + additional_offset)
-                                    break
-                                # print("additional_offset: ", additional_offset, "output_wrapper: ", output_wrapper.fullName, "batch_size: ", output_wrapper.batch_size)
-                                additional_offset += output_wrapper.batch_size
-
-                        processing_queue.append(next_node) if flag else None
-
-                    else:
-                        next_node.set_whole_buffer(whole_buffer)
-                        next_node.set_tensor_offset(node.tensor_offset)
-                        assert node.batch_size == next_node.batch_size, f"Shape mismatch: {node.fullName} {node.batch_size} vs {next_node.batch_size}"
-                        processing_queue.append(next_node)
 
     def allocate_buffer(self, device_id, plot = False):
         self.allocate_buffers_for_components(device_id)

@@ -19,7 +19,7 @@ int32_t* kv_indices = nullptr;
 int32_t* kv_last_page_len = nullptr;
 
 
-void updateKVCache(torch::Tensor kv_indptr, torch::Tensor kv_indices, torch::Tensor kv_last_page_offset, int num_req, int page_size, int num_kv_heads, int num_qo_heads, int head_dim) {
+void updateKVCache(torch::Tensor kv_indptr, torch::Tensor kv_indices, torch::Tensor kv_last_page_offset, int num_req, int page_size, int num_kv_heads, int head_dim) {
     int32_t* kv_indices_device = reinterpret_cast<int32_t*>(kv_indices.data_ptr<int32_t>());
     int32_t* kv_indptr_device = reinterpret_cast<int32_t*>(kv_indptr.data_ptr<int32_t>());
     int32_t* kv_last_page_len_device = reinterpret_cast<int32_t*>(kv_last_page_offset.data_ptr<int32_t>());
@@ -40,7 +40,7 @@ void updateKVCache(torch::Tensor kv_indptr, torch::Tensor kv_indices, torch::Ten
     );
 }
 
-void splitRopeAppendWorker(torch::Tensor k_data, torch::Tensor v_data, torch::Tensor kqv_input, torch::Tensor q_global, torch::Tensor rev_input_indptr, torch::Tensor per_token_offset, int num_req, int page_size, int num_kv_heads, int num_qo_heads, int head_dim, float rope_scale, float rope_theta, float smooth_a, float smooth_b, intptr_t stream_handle) {
+void splitRopeAppendWorker(torch::Tensor k_data, torch::Tensor v_data, torch::Tensor kqv_input, torch::Tensor q_global, torch::Tensor rev_input_indptr, torch::Tensor per_token_offset, int num_qo_heads, float rope_scale, float rope_theta, float smooth_a, float smooth_b, intptr_t stream_handle) {
     // printf("splitRopeAppendWorker called\n");
     // printf("rope_scale: %f, rope_theta: %f, smooth_a: %f, smooth_b: %f\n", rope_scale, rope_theta, smooth_a, smooth_b);
     cudaStream_t stream = nullptr;

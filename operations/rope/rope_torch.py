@@ -11,7 +11,8 @@ from core.weightWrapper import WeightWrapper
 from core.processWeight import process_weight_none, process_weight_layer
 from operations.impl_base import OperationImpl
 from kvcache.kv import KVCacheNone, KVCacheTorch, DistKVPool, BatchedDistKVCache
-from utils.prof_marker import prof_marker 
+from utils.prof_marker import prof_marker
+from utils.help_functions import tensor_offset_to_req_idx
 
 
 
@@ -28,8 +29,16 @@ class RopeAppendTorchImpl(OperationImpl):
         self.num_kv_heads = op_base.num_kv_heads
         self.num_qo_heads = op_base.num_qo_heads
         self.head_dim = op_base.head_dim
-        
-    def run(self, layer, kqv, KVCache, output, decode_flag, offset=0):
+    
+    def config(self, impl_tag, parameter_map):
+        if impl_tag == "withKVCache":
+            self.use_kv_cache = True
+        elif impl_tag == "withoutKVCache":
+            self.use_kv_cache = False
+        else:
+            raise ValueError(f"Unknown impl_tag: {impl_tag}")
+    
+    def run(self, layer, kqv, KVCache, output, offset=0):
         with torch.cuda.stream(self.stream):
             # Determine the number of elements for each slice.
             layout_strides = [
@@ -44,16 +53,20 @@ class RopeAppendTorchImpl(OperationImpl):
             v = v.contiguous()
             q = q.contiguous()
 
+            qo_indicies = self.op_base.qo_indicies
+            input_req_idx = self.op_base.input_req_idx
+            
             # Process each batch element.
-            for i in range(len(self.op_base.qo_indicies) - 1):
-                start = self.op_base.qo_indicies[i]
-                end = self.op_base.qo_indicies[i + 1]
+            for i, global_index in enumerate(input_req_idx):
+                start = qo_indicies[i]
+                end = qo_indicies[i + 1]
                 sub_q = q[start:end, :]
                 sub_k = k[start:end, :]
-                if not decode_flag or KVCache.get_indices(layer, i) is None:
-                    last_offest = 0
-                else:
-                    last_offest = KVCache.get_indices(layer, i)
+                
+                last_offset = 0
+                if self.use_kv_cache:
+                    last_offset = KVCache.get_indices(layer, global_index)
+
                 apply_rope(
                     self.rope_type,
                     self.theta,
@@ -63,7 +76,7 @@ class RopeAppendTorchImpl(OperationImpl):
                     self.factor,
                     sub_q,
                     output=sub_q,
-                    offset=last_offest
+                    offset=last_offset
                 )
                 apply_rope(
                     self.rope_type,
@@ -74,7 +87,7 @@ class RopeAppendTorchImpl(OperationImpl):
                     self.factor,
                     sub_k,
                     output=sub_k,
-                    offset=last_offest
+                    offset=last_offset
                 )
 
                 # Write the updated values back.
@@ -82,7 +95,7 @@ class RopeAppendTorchImpl(OperationImpl):
                 k[start:end, :] = sub_k
 
                 # Update the external KVCache with the new key and value.
-                KVCache.put(layer, i, sub_k, v[start:end, :])
+                KVCache.put(layer, global_index, sub_k, v[start:end, :])
             output.copy_(q)
         
 class RopeAppendTorch(Operations):
@@ -130,13 +143,30 @@ class RopeAppendTorch(Operations):
         self.num_kv_heads = num_kv_heads // tp_size
         self.num_qo_heads = num_qo_heads // tp_size
         self.head_dim = head_dim
-        for op_device in self.children:
-            op_device.setShapeForIOWrappers()
+        self.updateChildrenIOShape()
 
-    def update(self, qo_indicies, decode_flag=False):
-        """Stores the starting indices for the query/key segments."""
-        self.qo_indicies = qo_indicies
-        self.decode_flag = decode_flag
+    def update(self, qo_indicies, decode_batchsize, device_id):
+        if self.isNanoSplit:
+            for nano_op in self.nano_ops:
+                nano_op.update(qo_indicies, decode_batchsize, device_id)
+        else:
+            """Stores the starting indices for the query/key segments."""
+            io_device = self.children[device_id].inputs["kqv"]
+            start_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset)
+            end_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset + io_device.batch_size)
+
+            self.qo_indicies = torch.tensor(qo_indicies[start_req_idx:end_req_idx + 1]) - io_device.tensor_offset
+            self.input_req_idx = self.externals["KVCache"].input_req_idx[start_req_idx:end_req_idx]
+
+    def copy_nano(self, index):
+        new_op = RopeAppendTorch(f"{self.name}{index}", self.rope_type, self.theta, self.factor, self.low_freq_factor, self.high_freq_factor, self.original_max_position_embeddings)
+        new_op.externals = self.externals
+        new_op.expand_all_gpu_and_layers(len(self.device_list), 32)
+        new_op.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim)
+        new_op.set_stream(self.stream)
+        self.nano_ops.append(new_op)
+
+        return new_op
 
     def profile(self):
         input_kqv = torch.randn(2, (self.num_qo_heads + 2 * self.num_kv_heads) * self.head_dim, dtype=torch.float16, device='cuda')
@@ -219,5 +249,5 @@ class RopeAppendTorch_Layer(Operation_Layer):
         super().__init__(layer, op_device)
 
     def run(self):
-        self.impl.run(self.layer, self.inputs["kqv"].tensor, self.externals["KVCache"], self.outputs["q"].tensor, self.parent.parent.decode_flag, offset=0)
+        self.impl.run(self.layer, self.inputs["kqv"].tensor, self.externals["KVCache"], self.outputs["q"].tensor, offset=0)
         

@@ -8,6 +8,8 @@ from core.weightWrapper import WeightWrapper
 from core.processWeight import process_weight_none, process_weight_layer
 from operations.impl_base import OperationImpl
 from kvcache.kv import KVCacheNone, KVCacheTorch, DistKVPool, BatchedDistKVCache
+from utils.help_functions import tensor_offset_to_req_idx
+
 
 class DecAttnTorchImpl(OperationImpl):
     category_tag = "torch"
@@ -17,7 +19,7 @@ class DecAttnTorchImpl(OperationImpl):
         self.num_kv_heads = op_base.num_kv_heads
         self.head_dim = op_base.head_dim
 
-    def run(self, layer, qo_indicies, Q, KVCache, output
+    def run(self, layer, Q, KVCache, output
     ):
         with torch.cuda.stream(self.stream):
             if Q.shape[0] == 0:
@@ -25,7 +27,11 @@ class DecAttnTorchImpl(OperationImpl):
             scale = 1.0 / (self.head_dim ** 0.5)
             # Compute group size: how many query heads correspond to one key/value head.
             group_size = self.num_qo_heads // self.num_kv_heads
-            for i in range(len(qo_indicies) - 1):
+
+            qo_indicies = self.op_base.qo_indicies
+            input_req_idx = self.op_base.input_req_idx
+
+            for i, global_index in enumerate(input_req_idx):
                 # Retrieve the query slice for this batch element.
                 start = qo_indicies[i]
                 end = qo_indicies[i + 1]
@@ -33,7 +39,7 @@ class DecAttnTorchImpl(OperationImpl):
                 sub_q = Q[start:end, :]  # shape: [n_q, num_qo_heads * head_dim]
                 sub_q = sub_q.view(-1, self.num_qo_heads, self.head_dim)
                 
-                sub_k, sub_v = KVCache.get(layer, i) # [n_k, num_kv_heads * head_dim]
+                sub_k, sub_v = KVCache.get(layer, global_index) # [n_k, num_kv_heads * head_dim]
                 n_k = sub_k.shape[0]
 
                 sub_k = sub_k.view(n_k, self.num_kv_heads, self.head_dim)
@@ -79,11 +85,15 @@ class DecAttnTorch(Operations):
         self.num_qo_heads = num_qo_heads // tp_size
         self.head_dim = head_dim
         self.q_dim = num_qo_heads * head_dim
-        for op_device in self.children:
-            op_device.setShapeForIOWrappers()
+        self.updateChildrenIOShape()
     
-    def update(self, qo_indicies):
+    def update(self, qo_indicies, device_id):
         self.qo_indicies = qo_indicies
+        io_device = self.children[device_id].inputs["Q"]
+        start_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset)
+        end_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset + io_device.batch_size)
+
+        self.input_req_idx = self.externals["KVCache"].input_req_idx[start_req_idx:end_req_idx]
     
     def profile(self):
         pass
@@ -104,7 +114,7 @@ class DecAttnTorch_Layer(Operation_Layer):
     def run(self):
         Q = self.inputs["Q"].tensor
         # self.operator_device.parent.impl.run(Q, self.kv_tuple, self.outputs["output"].tensor)
-        self.impl.run(self.layer, self.parent.parent.qo_indicies,  Q, self.parent.externals["KVCache"], self.outputs["output"].tensor)
+        self.impl.run(self.layer, Q, self.parent.externals["KVCache"], self.outputs["output"].tensor)
     
 class PFAttnTorchImpl(OperationImpl):
     category_tag = "torch"
@@ -123,7 +133,10 @@ class PFAttnTorchImpl(OperationImpl):
             # Compute group size: how many query heads correspond to one key/value head.
             group_size = self.num_qo_heads // self.num_kv_heads
 
-            for i in range(len(qo_indicies) - 1):
+            qo_indicies = self.op_base.qo_indicies
+            input_req_idx = self.op_base.input_req_idx
+
+            for i, global_index in enumerate(input_req_idx):
                 # Retrieve the query slice for this batch element.
                 start = qo_indicies[i]
                 end = qo_indicies[i + 1]
@@ -132,7 +145,7 @@ class PFAttnTorchImpl(OperationImpl):
                 sub_q = Q[start:end, :]  # shape: [n_q, num_qo_heads * head_dim]
                 sub_q = sub_q.view(-1, self.num_qo_heads, self.head_dim)
 
-                sub_k, sub_v = KVCache.get(layer, i)
+                sub_k, sub_v = KVCache.get(layer, global_index)
                 n_k = sub_k.shape[0]
 
                 sub_k = sub_k.view(n_k, self.num_kv_heads, self.head_dim)
@@ -194,18 +207,16 @@ class PFAttnTorch(Operations):
         self.num_qo_heads = num_qo_heads // tp_size
         self.head_dim = head_dim
         self.q_dim = num_qo_heads * head_dim
-        for op_device in self.children:
-            op_device.setShapeForIOWrappers()
+        self.updateChildrenIOShape()
     
-    def update(self, qo_indicies):
-        """Stores the query offset indices for each batch element.  
-        qo_indicies should be a list (or tensor) of length (batch_size + 1) such that for each batch index i,  
-        the query slice is Q[qo_indicies[i]:qo_indicies[i+1], :].
-        """
-        self.qo_indicies = qo_indicies
+    def update(self, qo_indicies, device_id):
+        io_device = self.children[device_id].inputs["Q"]
+        start_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset)
+        end_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset + io_device.batch_size)
 
-        # print("qo_indicies: ", qo_indicies)
-        # print("qo_indicies dtype: ", qo_indicies.dtype) 
+        self.qo_indicies = torch.tensor(qo_indicies[start_req_idx:end_req_idx + 1]) - io_device.tensor_offset
+        self.input_req_idx = self.externals["KVCache"].input_req_idx[start_req_idx:end_req_idx]
+    
 
     def profile(self):
         input_q = torch.randn(2, self.q_dim, dtype=torch.float16, device='cuda')

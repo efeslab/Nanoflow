@@ -24,7 +24,8 @@ if platform_config.PLATFORM_CUDA:
         category_tag = "cuda"
         def run(self, tokens, embedding, output):
             # print("using cuda")
-            bind_genEmbedding.genEmbedding(tokens, embedding, output, self.stream_handle)
+            if self.batch_size > 0:
+                bind_genEmbedding.genEmbedding(tokens, embedding, output, self.stream_handle)
             
 class GenEmbedding(Operations):
     
@@ -53,8 +54,7 @@ class GenEmbedding(Operations):
         self.vocab_size = vocab_size
         self.tp_size = tp_size
         self.weights["embedding"].shape = (self.vocab_size, self.N)
-        for op_device in self.children:
-            op_device.setShapeForIOWrappers()
+        self.updateChildrenIOShape()
     
     
     def profile(self):

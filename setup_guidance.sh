@@ -6,9 +6,12 @@ chmod +x ./Anaconda3-2024.02-1-Linux-x86_64.sh
 ./Anaconda3-2024.02-1-Linux-x86_64.sh
 source ~/.bashrc
 
+conda install -c gurobi gurobi
+
 pip install torch
 pip install cmake
 pip install nvtx
+pip install loguru
 pip install transformers
 apt install pybind11-dev
 

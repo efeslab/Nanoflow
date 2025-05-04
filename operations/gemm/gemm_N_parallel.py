@@ -9,7 +9,7 @@ from core.IOWrapper import IOWrapper
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none, process_weight_layer
 
-from operations.gemm.gemm_impls import GEMMTorchImpl, GEMMCudaImpl
+from operations.gemm.gemm_impls import GEMMTorchImpl, GEMMTritonImpl, GEMMCudaImpl
 
 class GEMM_N_Parallel(Operations):
     def __init__(self, name, bias = False):
@@ -50,6 +50,7 @@ class GEMM_N_Parallel(Operations):
 
     def init_impl_map(self):
         self.add_impl(GEMMTorchImpl)
+        self.add_impl(GEMMTritonImpl)
         if platform_config.PLATFORM_CUDA:
             self.add_impl(GEMMCudaImpl)
     
@@ -59,10 +60,20 @@ class GEMM_N_Parallel(Operations):
         self.K = K
         print("name", self.name, "N:", self.N, "K:", self.K)
         self.weights["B"].shape = (self.K, self.N)
-        for op_device in self.children:
-            op_device.setShapeForIOWrappers()
+        self.updateChildrenIOShape()
         return self
     
+    def copy_nano(self, index):
+        new_op = GEMM_N_Parallel(f"{self.name}{index}", self.bias)
+        new_op.weights = self.weights
+        new_op.expand_all_gpu_and_layers(len(self.device_list), 32)
+        new_op.setShape(self.N, self.K, self.tp_size).setParameter(self.alpha, self.beta)
+        new_op.set_stream(self.stream)
+        
+        self.nano_ops.append(new_op)
+
+        return new_op
+
     def profile(self):
         # print("Get into profile", self.name)
         parameters_map = {
@@ -156,9 +167,6 @@ class GEMM_N_Parallel_Device(Operation_Device):
         self.op_layer = GEMM_N_Parallel_Layer
 
     def setShapeForIOWrappers(self):
-        # if self.parent.name == "O":
-        #     self.inputs["A"].init_shape((0, 32, 128))
-        # else:
         self.inputs["A"].init_shape((0, self.parent.K))
         if self.parent.bias:
             self.inputs["C"].init_shape((0, self.parent.N))

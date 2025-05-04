@@ -6,8 +6,8 @@ from utils.graph_plot import plot_graph_topological, draw_graphs_subplots
 
 class Executor():
     def __init__(self, operations_layers_list, layer):
-        # self.operations_list = operations_list
-        self.operations_layers_list = operations_layers_list
+        self.operations_layers_list = [op_layer for op_layer in operations_layers_list if op_layer.batch_size > 0]
+        # self.operations_layers_list = operations_layers_list
         self.layer = layer
         self.ordered_operations = []
     
@@ -16,15 +16,16 @@ class Executor():
     
     
     def plan_layer_ordering(self):
+        # print("plan_layer_ordering")
         G = nx.DiGraph()
         for op in self.operations_layers_list:
             G.add_node(f"{op.name}", op=op, layer = op.layer)
+            op.reset_op_cuda_status()
 
         for op in self.operations_layers_list:
-            op.reset_op_cuda_status()
             layer = op.layer
             # print("op.name", op.name) if layer == 0 else None
-            for dep, dep_on_prev_layer in op.prerequisites:
+            for dep, dep_on_prev_layer, dep_on_next_layer in op.prerequisites:
                 # print("dep", dep.name) if layer == 0 else None
                 # print("dep_on_prev_layer", dep_on_prev_layer) if layer == 0 else None
                 if (self.not_this_layer(dep, layer)):
@@ -32,12 +33,28 @@ class Executor():
                 if dep_on_prev_layer:
                     if layer > 0:
                         prev_op_name = f"{dep.name}_{layer - 1}"
-                        G.add_edge(prev_op_name, f"{op.name}")
-                        op.append_prev_op_layer(G.nodes[prev_op_name]['op'])
+                        # check if the previous layer op exists
+                        if G.has_node(prev_op_name):
+                            G.add_edge(prev_op_name, f"{op.name}")
+                            op.append_prev_op_layer(G.nodes[prev_op_name]['op'])
+                            G.nodes[prev_op_name]['op'].set_is_depended_on(op)
+                            # print("op.name", op.name, "prev_op_name", prev_op_name)
+                elif dep_on_next_layer:
+                    if layer < self.layer - 1:
+                        prev_op_name = f"{dep.name}_{layer + 1}"
+                        # check if the next layer op exists
+                        if G.has_node(prev_op_name):
+                            G.add_edge(prev_op_name, f"{op.name}")
+                            op.append_prev_op_layer(G.nodes[prev_op_name]['op'])
+                            G.nodes[prev_op_name]['op'].set_is_depended_on(op)
+                            # print("op.name", op.name, "prev_op_name", prev_op_name)
                 else:
                     prev_op_name = f"{dep.name}_{layer}"
-                    G.add_edge(prev_op_name, f"{op.name}")
-                    op.append_prev_op_layer(G.nodes[prev_op_name]['op'])
+                    if G.has_node(prev_op_name):
+                        G.add_edge(prev_op_name, f"{op.name}")
+                        op.append_prev_op_layer(G.nodes[prev_op_name]['op'])
+                        G.nodes[prev_op_name]['op'].set_is_depended_on(op)
+                        # print("op.name", op.name, "prev_op_name", prev_op_name)
 
         self.ordered_operations = list(nx.topological_sort(G))
         print(self.ordered_operations)

@@ -40,8 +40,7 @@ class AllGather(Operations):
     def setShape(self, N, tp_size):
         self.N = N
         self.tp_size = tp_size
-        for op_device in self.children:
-            op_device.setShapeForIOWrappers()
+        self.updateChildrenIOShape()
     
     def update(self, subgroup):
         self.subgroup = subgroup

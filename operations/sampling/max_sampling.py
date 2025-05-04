@@ -44,8 +44,7 @@ class Sampling(Operations):
     
     def setShape(self, vocab_size):
         self.vocab_size = vocab_size
-        for op_device in self.children:
-            op_device.setShapeForIOWrappers()
+        self.updateChildrenIOShape()
         
     def profile(self):
         maxvals = torch.zeros(2, dtype=torch.float16, device='cuda')

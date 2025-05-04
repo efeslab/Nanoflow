@@ -38,8 +38,7 @@ class AllReduce(Operations):
     def setShape(self, N, tp_size):
         self.N = N
         self.tp_size = tp_size
-        for op_device in self.children:
-            op_device.setShapeForIOWrappers()
+        self.updateChildrenIOShape()
 
 class AllReduce_Device(Operation_Device):
     def __init__(self, parent, device):

@@ -60,8 +60,7 @@ class GEMM_K_Parallel(Operations):
         self.K = K // tp_size
         print("name", self.name, "N:", self.N, "K:", self.K)
         self.weights["B"].shape = (self.K, self.N)
-        for op_device in self.children:
-            op_device.setShapeForIOWrappers()
+        self.updateChildrenIOShape()
         return self
     
     def profile(self):

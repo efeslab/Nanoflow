@@ -22,7 +22,8 @@ if config.PLATFORM_CUDA:
     class SiluMultiplyCudaImpl(OperationImpl):
         category_tag = "cuda"
         def run(self, x, output):
-            bind_silu_multiply.silu_multiply(x, output, self.stream_handle)
+            if self.batch_size > 0:
+                bind_silu_multiply.silu_multiply(x, output, self.stream_handle)
 
 class Activation(Operations):
     def __init__(self, name):
@@ -45,9 +46,18 @@ class Activation(Operations):
         
     def setShape(self, N, tp_size=1):
         self.N = N // tp_size
-        for op_device in self.children:
-            op_device.setShapeForIOWrappers()
+        self.updateChildrenIOShape()
     
+    def copy_nano(self, index):
+        new_op = Activation(f"{self.name}{index}")
+        new_op.expand_all_gpu_and_layers(len(self.device_list), 32)
+        new_op.setShape(self.N)
+        new_op.set_stream(self.stream)
+
+        self.nano_ops.append(new_op)
+
+        return new_op
+
     def profile(self):
         # check the similarity of the outputs
         x = torch.randn(2, self.N * 2, dtype=torch.float16, device='cuda')

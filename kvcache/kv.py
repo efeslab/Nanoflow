@@ -10,6 +10,7 @@ from typing import Sequence
 import torch
 # from pybindUtil import toGPU, toGPUTensor
 from torch.profiler import profile, record_function, ProfilerActivity
+from utils.prof_marker import prof_marker
 import time
 
 class KVCacheNone():
@@ -23,7 +24,8 @@ class KVCacheNone():
     def get(self, layer, idx):
         return self.cache.get((layer, idx), None)
     
-    def update(self, cumsum_input):
+    def update(self, cumsum_input, input_req_idx, decode_batchsize, device_id):
+        self.input_req_idx = input_req_idx
         return None
 
     def get_whole_kv_data(self, device_id, layer: int):
@@ -79,11 +81,12 @@ class KVCacheTorch():
         # print(f"{layer, idx} is not in kv cache.")
         return None
     
-    def update(self, cumsum_input):
+    def update(self, cumsum_input, input_req_idx, decode_batchsize, device_id):
+       self.input_req_idx = input_req_idx
        return None
 
     def get_indices(self, layer, idx):
-        return self.cache_indices.get((layer, idx), None)
+        return self.cache_indices.get((layer, idx), 0)
     def get_whole_kv_data(self, device_id, layer: int):
         return None, None
     def get_whole_kv_data_all_layers(self, device_id):
@@ -277,33 +280,56 @@ class BatchedDistKVCache():
     def get_seqlen(self, idx: int):
         return self.cache[idx].seqlen
         
-    def update(self, cumsum_input):
-        device_id = cumsum_input.get_device()
-        rev_input_indptr_list = []
-        per_token_offset_list = []
-        for i in range(len(cumsum_input) - 1):
-            start = cumsum_input[i]
-            end = cumsum_input[i + 1]
-            self.pre_allocate(i, int(end - start))
-            seq_len = self.get_seqlen(i)
+    def update(self, cumsum_input, input_req_idx, decode_batchsize, device_id):
+        total_tokens = cumsum_input[-1]
+        rev_input_indptr_tensor = torch.empty(total_tokens, dtype=torch.int32)
+        per_token_offset_tensor = torch.empty(total_tokens, dtype=torch.int32)
+
+        rev_input_indptr_tensor[0:decode_batchsize] = torch.arange(decode_batchsize, dtype=torch.int32)
+        for temp_idx in range(decode_batchsize):
+            global_req_idx = input_req_idx[temp_idx]
+            self.pre_allocate(global_req_idx, 1)
+            seq_len = self.get_seqlen(global_req_idx)
+            per_token_offset_tensor[temp_idx] = seq_len - 1
+
+        for temp_idx in range(decode_batchsize, len(cumsum_input) - 1):
+            global_req_idx = input_req_idx[temp_idx]
+            start = cumsum_input[temp_idx]
+            end = cumsum_input[temp_idx + 1]
+            count = end - start
+            self.pre_allocate(global_req_idx, count)
+            seq_len = self.get_seqlen(global_req_idx)
             # append i to the rev_input_indptr for end-start times
-            rev_input_indptr_list.extend([i] * (end - start))
+            rev_input_indptr_tensor[start:end] = temp_idx
             # extend the per_token_offset with a list from last_offest to last_offest + (end - start)
-            per_token_offset_list.extend(list(range(seq_len - (end - start), seq_len)))
+            per_token_offset_tensor[start:end] = torch.arange(seq_len - count, seq_len, dtype=torch.int32)
 
-        self.rev_input_indptr_devices[device_id] = torch.tensor(rev_input_indptr_list, dtype=torch.int32, device=f'cuda:{device_id}')
-        self.per_token_offset_devices[device_id] = torch.tensor(per_token_offset_list, dtype=torch.int32, device=f'cuda:{device_id}')
+        self.rev_input_indptr_devices[device_id] = rev_input_indptr_tensor.to(f"cuda:{device_id}")
+        self.per_token_offset_devices[device_id] = per_token_offset_tensor.to(f"cuda:{device_id}")
 
-        kv_indptr_list = [0]
-        kv_indices_list = []
-        kv_last_page_len_list = []
-        for _, kv in self.cache.items():
-            kv_indptr_list.append(kv_indptr_list[-1] + len(kv.indicies))
-            kv_indices_list.extend(kv.indicies)
-            kv_last_page_len_list.append(kv.last_page_offset)
-        self.kv_indptr_devices[device_id] = torch.tensor(kv_indptr_list, dtype=torch.int32, device=f"cuda:{device_id}")
-        self.kv_indices_devices[device_id] = torch.tensor(kv_indices_list, dtype=torch.int32, device=f"cuda:{device_id}")
-        self.kv_last_page_len_devices[device_id] = torch.tensor(kv_last_page_len_list, dtype=torch.int32, device=f"cuda:{device_id}")
+        num_reqs = len(input_req_idx)
+        kv_counts = [len(self.cache[req_idx].indicies) for req_idx in input_req_idx]
+        total_kv_tokens = sum(kv_counts)
+        kv_indptr_tensor = torch.empty(num_reqs + 1, dtype=torch.int32)
+        kv_indices_tensor = torch.empty(total_kv_tokens, dtype=torch.int32)
+        kv_last_page_len_tensor = torch.empty(num_reqs, dtype=torch.int32)
+
+        cur_offset = 0
+        kv_indptr_tensor[0] = 0
+        for i, global_req_idx in enumerate(input_req_idx):
+            if global_req_idx not in self.cache:
+                raise ValueError(f"Request {global_req_idx} not found in cache")
+            kv = self.cache[global_req_idx]
+            count = len(kv.indicies)
+            
+            kv_indices_tensor[cur_offset : cur_offset + count] = torch.tensor(kv.indicies, dtype=torch.int32)
+            kv_indptr_tensor[i + 1] = cur_offset + count
+            kv_last_page_len_tensor[i] = kv.last_page_offset
+            cur_offset += count
+        
+        self.kv_indptr_devices[device_id] = kv_indptr_tensor.to(f"cuda:{device_id}")
+        self.kv_indices_devices[device_id] = kv_indices_tensor.to(f"cuda:{device_id}")
+        self.kv_last_page_len_devices[device_id] = kv_last_page_len_tensor.to(f"cuda:{device_id}")
 
     @property
     def page_size(self):

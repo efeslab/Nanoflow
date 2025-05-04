@@ -11,7 +11,8 @@ from core.weightWrapper import WeightWrapper
 from core.processWeight import process_weight_none, process_weight_layer
 from operations.impl_base import OperationImpl
 from kvcache.kv import KVCacheNone, KVCacheTorch, DistKVPool, BatchedDistKVCache
-from utils.prof_marker import prof_marker 
+from utils.prof_marker import prof_marker
+from utils.help_functions import tensor_offset_to_req_idx
 
         
 if platform_config.PLATFORM_CUDA:
@@ -25,7 +26,7 @@ if platform_config.PLATFORM_CUDA:
             self.num_qo_heads = op_base.num_qo_heads
             self.head_dim = op_base.head_dim
             
-        def run(self, layer,  kqv, k_data, v_data, output):
+        def run(self, layer, kqv, k_data, v_data, output):
             with prof_marker("RopeAppendCuda: SplitRopeAppend"):
                 bind_ropeappend.splitRopeAppend(
                     k_data,
@@ -34,11 +35,7 @@ if platform_config.PLATFORM_CUDA:
                     output,
                     self.op_base.rev_input_indptr,
                     self.op_base.per_token_offset,
-                    len(self.op_base.qo_indicies) - 1,
-                    self.op_base.page_size,
-                    self.num_kv_heads,
                     self.num_qo_heads,
-                    self.head_dim,
                     1.0,
                     500000.0,
                     0.0,
@@ -92,22 +89,36 @@ class RopeAppendFlashinfer(Operations):
         self.num_kv_heads = num_kv_heads // tp_size
         self.num_qo_heads = num_qo_heads // tp_size
         self.head_dim = head_dim
-        for op_device in self.children:
-            op_device.setShapeForIOWrappers()
+        self.updateChildrenIOShape()
 
-    def update(self, qo_indicies, decode_flag=False):
-        """Stores the starting indices for the query/key segments."""
-        device_id = qo_indicies.get_device()
-        self.qo_indicies = qo_indicies
-        self.kv_indptr =  self.externals["KVCache"].kv_indptr_devices[device_id]
-        self.kv_indices = self.externals["KVCache"].kv_indices_devices[device_id]
-        self.kv_last_page_len = self.externals["KVCache"].kv_last_page_len_devices[device_id]
-        self.rev_input_indptr = self.externals["KVCache"].rev_input_indptr_devices[device_id]
-        self.per_token_offset = self.externals["KVCache"].per_token_offset_devices[device_id]
-        self.page_size = self.externals["KVCache"].page_size
-        self.decode_flag = decode_flag
+    def update(self, qo_indicies, decode_batchsize, device_id):
+        if self.isNanoSplit:
+            for nano_op in self.nano_ops:
+                nano_op.update(qo_indicies, decode_batchsize, device_id)
+        else:
+            """Stores the starting indices for the query/key segments."""
+            io_device = self.children[device_id].inputs["kqv"]
+            self.qo_indicies = qo_indicies
+            self.kv_indptr =  self.externals["KVCache"].kv_indptr_devices[device_id]
+            self.kv_indices = self.externals["KVCache"].kv_indices_devices[device_id]
+            self.kv_last_page_len = self.externals["KVCache"].kv_last_page_len_devices[device_id]
 
-        bind_ropeappend.updateKVCache(self.kv_indptr, self.kv_indices, self.kv_last_page_len, len(self.kv_last_page_len), self.page_size, self.num_kv_heads, self.num_qo_heads, self.head_dim)
+            self.rev_input_indptr = self.externals["KVCache"].rev_input_indptr_devices[device_id][io_device.tensor_offset: io_device.tensor_offset + io_device.batch_size]
+            self.per_token_offset = self.externals["KVCache"].per_token_offset_devices[device_id][io_device.tensor_offset: io_device.tensor_offset + io_device.batch_size]
+            self.page_size = self.externals["KVCache"].page_size
+            self.decode_batchsize = decode_batchsize
+
+            bind_ropeappend.updateKVCache(self.kv_indptr, self.kv_indices, self.kv_last_page_len, len(self.kv_last_page_len), self.page_size, self.num_kv_heads, self.head_dim)
+
+    def copy_nano(self, index):
+        new_op = RopeAppendFlashinfer(f"{self.name}{index}", self.rope_type, self.theta, self.factor, self.low_freq_factor, self.high_freq_factor, self.original_max_position_embeddings)
+        new_op.externals = self.externals
+        new_op.expand_all_gpu_and_layers(len(self.device_list), 32)
+        new_op.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim)
+        new_op.set_stream(self.stream)
+        self.nano_ops.append(new_op)
+
+        return new_op
 
     def profile(self):
         input_kqv = torch.randn(2, (self.num_qo_heads + 2 * self.num_kv_heads) * self.head_dim, dtype=torch.float16, device='cuda')

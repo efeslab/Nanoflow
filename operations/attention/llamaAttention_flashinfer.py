@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 import time
 
 from operations.operation_base import Operations, Operation_Device, Operation_Layer
@@ -9,7 +10,7 @@ from core.weightWrapper import WeightWrapper
 from core.processWeight import process_weight_none, process_weight_layer
 from operations.impl_base import OperationImpl
 from kvcache.kv import KVCacheNone, KVCacheTorch, DistKVPool, BatchedDistKVCache
-
+from utils.help_functions import tensor_offset_to_req_idx
 
 if platform_config.PLATFORM_CUDA:
     import flashinfer
@@ -113,15 +114,18 @@ class DecAttnFlashinfer(Operations):
         self.num_qo_heads = num_qo_heads // tp_size
         self.head_dim = head_dim
         self.q_dim = num_qo_heads * head_dim
-        for op_device in self.children:
-            op_device.setShapeForIOWrappers()
+        self.updateChildrenIOShape()
     
-    def update(self, qo_indicies):
-        device_id = qo_indicies.get_device()
+    def update(self, qo_indicies, device_id):
         self.qo_indicies = qo_indicies
-        self.kv_indptr =  self.externals["KVCache"].kv_indptr_devices[device_id]
+        io_device = self.children[device_id].inputs["Q"]
+        start_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset)
+        end_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset + io_device.batch_size)
+
+        self.kv_indptr =  self.externals["KVCache"].kv_indptr_devices[device_id][start_req_idx: end_req_idx + 1]
         self.kv_indices = self.externals["KVCache"].kv_indices_devices[device_id]
-        self.kv_last_page_len = self.externals["KVCache"].kv_last_page_len_devices[device_id]
+        self.kv_last_page_len = self.externals["KVCache"].kv_last_page_len_devices[device_id][start_req_idx: end_req_idx]
+
         self.page_size = self.externals["KVCache"].page_size
         if self.impl.category_tag == "batched_cuda":
             self.impl.plan(self.kv_indptr, self.kv_indices, self.kv_last_page_len, self.page_size)
@@ -264,24 +268,27 @@ class PFAttnFlashinfer(Operations):
         self.num_qo_heads = num_qo_heads // tp_size
         self.head_dim = head_dim
         self.q_dim = num_qo_heads * head_dim
-        for op_device in self.children:
-            op_device.setShapeForIOWrappers()
+        self.updateChildrenIOShape()
     
-    def update(self, qo_indicies,
+    def update(self, qo_indicies, device_id,
              causal=True, logits_soft_cap=0.0, pos_encoding_mode="NONE"):
         """Stores the query offset indices for each batch element.  
         qo_indicies should be a list (or tensor) of length (batch_size + 1) such that for each batch index i,  
         the query slice is Q[qo_indicies[i]:qo_indicies[i+1], :].
         """
-        device_id = qo_indicies.get_device()
-        self.qo_indicies = qo_indicies
-        self.kv_indptr =  self.externals["KVCache"].kv_indptr_devices[device_id]
+        io_device = self.children[device_id].inputs["Q"]
+        start_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset)
+        end_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset + io_device.batch_size)
+
+        self.qo_indicies = torch.tensor(qo_indicies[start_req_idx: end_req_idx + 1], dtype=torch.int32, device=f"cuda:{device_id}") - io_device.tensor_offset
+        self.kv_indptr =  self.externals["KVCache"].kv_indptr_devices[device_id][start_req_idx: end_req_idx + 1]
         self.kv_indices = self.externals["KVCache"].kv_indices_devices[device_id]
-        self.kv_last_page_len = self.externals["KVCache"].kv_last_page_len_devices[device_id]
+        self.kv_last_page_len = self.externals["KVCache"].kv_last_page_len_devices[device_id][start_req_idx: end_req_idx]
+
         self.page_size = self.externals["KVCache"].page_size
         if self.impl.category_tag == "batched_cuda":
-            # Only plan for the batched CUDA implementation.
-            self.impl.plan(qo_indicies, self.kv_indptr, self.kv_indices, self.kv_last_page_len, self.page_size,
+            # Only plan for the batched CUDA implementation. 
+            self.impl.plan(self.qo_indicies, self.kv_indptr, self.kv_indices, self.kv_last_page_len, self.page_size,
                 causal=causal, logits_soft_cap=logits_soft_cap, pos_encoding_mode=pos_encoding_mode)
         # print("qo_indicies: ", qo_indicies)
         # print("qo_indicies dtype: ", qo_indicies.dtype) 
