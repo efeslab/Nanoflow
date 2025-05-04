@@ -424,8 +424,9 @@ class KVCacheFANoPage:
             raise ValueError("Cache not initialized. Call update() first.")
         batch_size = qo_indices.shape[0] - 1
         assert batch_size == self.batch_size, "Batch size mismatch."
-        assert self.indices is not None, "Cache not initialized. Call update() first."
-        self.indices += qo_indices.diff()
+        if layer == 0:
+            assert self.indices is not None, "Cache not initialized. Call update() first."
+            self.indices += qo_indices.diff()
         for i in range(batch_size):
             # Get the start and end indices for the current request
             start_idx = qo_indices[i]

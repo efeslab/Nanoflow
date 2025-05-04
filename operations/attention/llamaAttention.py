@@ -57,6 +57,21 @@ class DecAttnTorchImpl(OperationImpl):
             # Write the computed output into the operator's output tensor.
             output[start:end, :].copy_(out)
         
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            assert isinstance(Q, torch.Tensor)
+            assert isinstance(qo_indicies, torch.Tensor)
+            assert isinstance(output, torch.Tensor)
+
+            q = Q.view(-1, int(self.num_qo_heads * self.head_dim))  # type: ignore
+            k_list: list[torch.Tensor] = []
+            v_list: list[torch.Tensor] = []
+            for i in range(len(qo_indicies) - 1):
+                sub_k, sub_v = KVCache.get(layer, i)  # type: ignore
+                k_list.append(sub_k.view(-1, self.num_kv_heads * self.head_dim))  # type: ignore
+                v_list.append(sub_v.view(-1, self.num_kv_heads * self.head_dim))  # type: ignore
+            k = torch.cat(k_list, dim=0)
+            v = torch.cat(v_list, dim=0)
+            logging.debug(f"q.shape {q.shape}\nq {q}\nk.shape {k.shape}\nk {k}\nv.shape {v.shape}\nv {v}\no.shape {output.shape}\no {output}")
 
 class DecAttnFANoPageImpl(OperationImpl):
     r"""FlashAttention implementation of the DecAttn operator.
@@ -129,6 +144,20 @@ class DecAttnFANoPageImpl(OperationImpl):
         )
         assert isinstance(o, torch.Tensor)
         o = o.view(-1, self.num_qo_heads * self.head_dim)
+
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            q = q.view(-1, self.num_qo_heads * self.head_dim)
+            k_list: list[torch.Tensor] = []
+            v_list: list[torch.Tensor] = []
+            cache_seqlens = KVCache.get_whole_indices().tolist()  # type: ignore
+            for i, seq_len in enumerate(cache_seqlens):  # type: ignore
+                k_list.append(k_cache[i].view(-1, self.num_kv_heads * self.head_dim)[:seq_len])  # type: ignore
+                v_list.append(v_cache[i].view(-1, self.num_kv_heads * self.head_dim)[:seq_len])  # type: ignore
+            k = torch.cat(k_list, dim=0)
+            v = torch.cat(v_list, dim=0)
+            logging.debug(f"q.shape {q.shape}\nq {q}\nk.shape {k.shape}\nk {k}\nv.shape {v.shape}\nv {v}\no.shape {o.shape}\no {o}")
+        output.copy_(o)
+    
         
 
 if platform_config.PLATFORM_CUDA:
@@ -229,6 +258,7 @@ class DecAttn(Operations):
 
     def init_impl_map(self):
         self.add_impl(DecAttnTorchImpl)
+        self.add_impl(DecAttnFANoPageImpl)
         if platform_config.PLATFORM_CUDA:
             self.add_impl(DecAttnCudaImpl)
             self.add_impl(DecAttnBatchedCudaImpl)
@@ -327,9 +357,27 @@ class PFAttnTorchImpl(OperationImpl):
             out = torch.einsum("qhk,khd->qhd", attn_weights, sub_v)
 
             out = out.reshape(-1, self.num_qo_heads * self.head_dim)
+
+
             # Write the computed output into th e operator's output tensor.
             output[start:end, :].copy_(out)
         
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            assert isinstance(Q, torch.Tensor)
+            assert isinstance(qo_indicies, torch.Tensor)
+            assert isinstance(output, torch.Tensor)
+
+            q = Q.view(-1, int(self.num_qo_heads * self.head_dim))  # type: ignore
+            k_list: list[torch.Tensor] = []
+            v_list: list[torch.Tensor] = []
+            for i in range(len(qo_indicies) - 1):
+                start = qo_indicies[i]
+                end = qo_indicies[i + 1]
+                k_list.append(sub_k[start:end, :].view(-1, self.num_kv_heads * self.head_dim))  # type: ignore
+                v_list.append(sub_v[start:end, :].view(-1, self.num_kv_heads * self.head_dim))  # type: ignore
+            k = torch.cat(k_list, dim=0)
+            v = torch.cat(v_list, dim=0)
+            logging.debug(f"q.shape {q.shape}\nq {q}\nk.shape {k.shape}\nk {k}\nv.shape {v.shape}\nv {v}\no.shape {output.shape}\no {output}")
 
 class PFAttnFANoPageImpl(OperationImpl):
     r"""FlashAttention implementation of the PFAttn operator.
@@ -403,6 +451,11 @@ class PFAttnFANoPageImpl(OperationImpl):
         )
         assert isinstance(o, torch.Tensor)
         o = o.view(-1, self.num_qo_heads * self.head_dim)
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            q = q.view(-1, self.num_qo_heads * self.head_dim)
+            k = k.view(-1, self.num_kv_heads * self.head_dim)
+            v = v.view(-1, self.num_kv_heads * self.head_dim)
+            logging.debug(f"q.shape {q.shape}\nq {q}\nk.shape {k.shape}\nk {k}\nv.shape {v.shape}\nv {v}\no.shape {o.shape}\no {o}")
         output.copy_(o)
 
 
