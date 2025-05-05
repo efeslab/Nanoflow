@@ -93,6 +93,7 @@ class KVCacheTorch:
         batch_size = qo_indices.shape[0] - 1
         key_ptr = [None for _ in range(batch_size)]
         value_ptr = [None for _ in range(batch_size)]
+        seq_lens = qo_indices.diff()
         for i in range(batch_size):
             if (layer, i) not in self.cache:
                 reserved_key = torch.empty(
@@ -105,19 +106,23 @@ class KVCacheTorch:
                     dtype=value.dtype,
                     device=value.device,
                 )
-                seq_len = qo_indices[i + 1] - qo_indices[i]
                 self.cache[(layer, i)] = (reserved_key, reserved_value)
-                self.cache_indices[(layer, i)] = (seq_len, seq_len)
+                self.cache_indices[(layer, i)] = (0, 0)
             key_cache, value_cache = self.cache[(layer, i)]
             key_ptr[i] = key_cache
             value_ptr[i] = value_cache
+            self.cache_indices[(layer, i)] = (
+                self.cache_indices[(layer, i)][0] + seq_lens[i],
+                self.cache_indices[(layer, i)][1] + seq_lens[i],
+            )
         
-        seq_len = key.shape[0]
-        for i in range(seq_len):
-            input_idx = rev_input_indices[i]
-            position = per_token_offset[i]
-            logging.debug(f"id {i}: k_cache {hex(key_ptr[input_idx][position].data_ptr())}")
-            logging.debug(f"id {i}: v_cache {hex(value_ptr[input_idx][position].data_ptr())}")
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            seq_len = key.shape[0]
+            for i in range(seq_len):
+                input_idx = rev_input_indices[i]
+                position = per_token_offset[i]
+                logging.debug(f"id {i}: k_cache {hex(key_ptr[input_idx][position].data_ptr())}")
+                logging.debug(f"id {i}: v_cache {hex(value_ptr[input_idx][position].data_ptr())}")
         key_ptr = [key_ptr[i].data_ptr() for i in range(len(key_ptr))]
         value_ptr = [value_ptr[i].data_ptr() for i in range(len(value_ptr))]
 

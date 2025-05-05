@@ -25,11 +25,13 @@ def _copy_kvcache_kernel(
     pid = tl.program_id(axis=0)
     input_idx = tl.load(rev_input_indices_ptr + pid)
     position = tl.load(per_token_offset_ptr + pid)
-    k_row = k_ptr + position * d
-    v_row = v_ptr + position * d
+    k_row = k_ptr + d * pid
+    v_row = v_ptr + d * pid
     k_cache_row = tl.load(k_cache_ptr + input_idx).to(k_ptr.dtype) + d * position
     v_cache_row = tl.load(v_cache_ptr + input_idx).to(v_ptr.dtype) + d * position
 
+    # print("k_row: ", k_row)
+    # print("k_cache_row: ", k_row)
     for i in range(0, d, BLOCK_SIZE):
         offsets = i + tl.arange(0, BLOCK_SIZE)
         mask = offsets < d
