@@ -7,7 +7,7 @@ from transformers import AutoTokenizer
 import logging
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s %(name)s [%(levelname)s] %(message)s",  
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
@@ -16,7 +16,7 @@ logging.basicConfig(
 )
 
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 # from models.llama3_NoKVCacheTorch import Pipeline
 # from models.llama3_KVCacheTorch import Pipeline
@@ -26,7 +26,13 @@ from models.llama3_KVCacheFA import Pipeline
 tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
 # input_strings = ["Hi, who are you?"]
 # input_strings = ["Hi, who are you?", "What's the weather today?"]
-input_strings = [ "Hi, who are you?" for _ in range(4)]
+# input_strings = [
+#                     "Hi, who are you?", 
+#                     "What's the weather today?",
+#                     "The university of washington is located in seattle",
+#                     "I am a student at the university of washington"
+# ]
+input_strings = ["Hi, who are you?"] * 1
 # input_strings = [ "The university of washington is located in" for _ in range(16)]
 input_ids = [tokenizer.encode(s) for s in input_strings]
 # for input_id in input_ids:
@@ -56,13 +62,13 @@ for i in input_ids:
 output_length=10
 torch.cuda.current_stream().synchronize()
 
-
 with torch.profiler.profile(
     activities=[
         torch.profiler.ProfilerActivity.CPU,
         torch.profiler.ProfilerActivity.CUDA,
     ],
     record_shapes=True,
+    # with_stack=True,
     profile_memory=True,
 ) as prof:
     for i in range(output_length):
@@ -75,7 +81,7 @@ with torch.profiler.profile(
         with prof_marker("update_stage"):
             # pipeline.update(output_strings)
             pipeline.update(new_tokens, decode_flag=True)
-prof.export_chrome_trace("trace_fuse_copy.json")
+prof.export_chrome_trace("trace_fa_fused_copy.json")
 
 output_text = tokenizer.batch_decode(output_strings[:1], skip_special_tokens=True)
 print(output_text)
