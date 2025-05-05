@@ -13,7 +13,7 @@ import torch
 from torch.profiler import profile, record_function, ProfilerActivity
 import time
 
-from triton_ops.kv_copy import copy_kvcache
+from triton_ops.kv_copy import copy_fa_nopage_kvcache, copy_torch_kvcache
 
 
 class KVCacheNone:
@@ -123,6 +123,7 @@ class KVCacheTorch:
                 position = per_token_offset[i]
                 logging.debug(f"id {i}: k_cache {hex(key_ptr[input_idx][position].data_ptr())}")
                 logging.debug(f"id {i}: v_cache {hex(value_ptr[input_idx][position].data_ptr())}")
+
         key_ptr = [key_ptr[i].data_ptr() for i in range(len(key_ptr))]
         value_ptr = [value_ptr[i].data_ptr() for i in range(len(value_ptr))]
 
@@ -130,7 +131,7 @@ class KVCacheTorch:
         value_ptr_tensor = torch.tensor(
             value_ptr, dtype=torch.uint64, device=value.device
         )
-        copy_kvcache(
+        copy_torch_kvcache(
             key=key,
             value=value,
             key_cache_ptr=key_ptr_tensor,
@@ -416,7 +417,7 @@ class KVCacheFANoPage:
         return self.k_cache[layer], self.v_cache[layer]
 
 
-    def put_batch(
+    def _put_batch(
         self,
         layer: int,
         qo_indices: torch.Tensor,
@@ -425,6 +426,32 @@ class KVCacheFANoPage:
         rev_input_indices: torch.Tensor,
         per_token_offset: torch.Tensor,
     ) -> None:
+        r"""Put a batch of key and value tensors into the KV cache.
+
+        Parameters
+        ----------
+        layer : int
+            The layer ID to put the cache for.
+        qo_indices : torch.Tensor
+            The indices of the queries in the batch.
+            Shape: [batch_size + 1,]
+        key : torch.Tensor
+            The key tensor to put into the cache.
+            Shape: [batch_size, key_dim]
+        value : torch.Tensor
+            The value tensor to put into the cache.
+            Shape: [batch_size, value_dim]
+        rev_input_indices : torch.Tensor
+            The reverse input indices for the batch.
+            Shape: [batch_size,]
+        per_token_offset : torch.Tensor
+            The per token offset for the batch.
+            Shape: [batch_size,]
+
+        Notes
+        -----
+        Deprecated. Use `put_batch()` instead for better performance.
+        """
         if self.k_cache is None or self.v_cache is None or self.batch_size is None:
             raise ValueError("Cache not initialized. Call update() first.")
         batch_size = qo_indices.shape[0] - 1
@@ -455,6 +482,54 @@ class KVCacheFANoPage:
             # Update the cache with the new key and value tensors
             self.k_cache[layer][i][offset - key_tensor.shape[0] : offset] = key_tensor
             self.v_cache[layer][i][offset - value_tensor.shape[0] : offset] = value_tensor
+    
+    def put_batch(
+        self,
+        layer: int,
+        qo_indices: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        rev_input_indices: torch.Tensor,
+        per_token_offset: torch.Tensor,
+    ) -> None:
+        r"""Put a batch of key and value tensors into the KV cache.
+
+        Parameters
+        ----------
+        layer : int
+            The layer ID to put the cache for.
+        qo_indices : torch.Tensor
+            The indices of the queries in the batch.
+            Shape: [batch_size + 1,]
+        key : torch.Tensor
+            The key tensor to put into the cache.
+            Shape: [batch_size, key_dim]
+        value : torch.Tensor
+            The value tensor to put into the cache.
+            Shape: [batch_size, value_dim]
+        rev_input_indices : torch.Tensor
+            The reverse input indices for the batch.
+            Shape: [batch_size,]
+        per_token_offset : torch.Tensor
+            The per token offset for the batch.
+            Shape: [batch_size,]
+        """
+        if self.k_cache is None or self.v_cache is None or self.batch_size is None:
+            raise ValueError("Cache not initialized. Call update() first.")
+        if layer == 0:
+            assert self.indices is not None, "Cache not initialized. Call update() first."
+            self.indices += qo_indices.diff()
+        kv_cache_shape = (self.batch_size, self.max_size_per_request, self.num_heads * self.head_dim)
+        key_cache = self.k_cache[layer].view(kv_cache_shape)
+        value_cache = self.v_cache[layer].view(kv_cache_shape)
+        copy_fa_nopage_kvcache(
+            key=key,
+            value=value,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            rev_input_indices=rev_input_indices,
+            per_token_offset=per_token_offset,
+        )
 
 class DistKVPool:
     """
