@@ -57,7 +57,7 @@ class Executor():
                         # print("op.name", op.name, "prev_op_name", prev_op_name)
 
         self.ordered_operations = list(nx.topological_sort(G))
-        print(self.ordered_operations)
+        # print(self.ordered_operations)
         self.ordered_graph = G
     
     def draw_ordered_graph(self):
@@ -87,20 +87,24 @@ class Executor():
                     f.write(str(inputs.tensor))
                     f.write("\n")
                     f.write(str(inputs.tensor.shape))
-                    torch.save(inputs.tensor.cpu(), f"./{filefolder_name}/{op.name}_{inputs.name}")
+                    # torch.save(inputs.tensor.cpu(), f"./{filefolder_name}/{op.name}_{inputs.name}")
 
                 for weights in op.weights.values():
                     f.write(f"[{op.name}_{weights.name}]\n")
                     f.write(str(weights.weight_map[rank][op.layer]))
                     f.write("\n")
                     f.write(str(weights.weight_map[rank][op.layer].shape))
-                    torch.save(weights.weight_map[rank][op.layer].cpu(), f"./{filefolder_name}/{op.name}_{weights.name}")
+                    # torch.save(weights.weight_map[rank][op.layer].cpu(), f"./{filefolder_name}/{op.name}_{weights.name}")
 
                 f.flush()
 
-                op.run()
+                with prof_marker(f"{op.name}"):
+                    op.wait_cuda_event()
+                    op.run()
+                    op.record_cuda_event()
 
                 if op.name == "GlobalOutput_31":
+                    torch.cuda.synchronize()
                     output.copy_(op.inputs["tokens"].tensor)
                 for outputs in op.outputs.values():
                     f.write(f"[{op.name}_{outputs.name}]\n")
@@ -108,7 +112,7 @@ class Executor():
                     f.write("\n")
                     f.write(str(outputs.tensor.shape))
                     f.write("\n")
-                    torch.save(outputs.tensor.cpu(), f"./{filefolder_name}/{op.name}_{outputs.name}")
+                    # torch.save(outputs.tensor.cpu(), f"./{filefolder_name}/{op.name}_{outputs.name}")
 
                 f.flush()
             f.close()

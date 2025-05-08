@@ -2,7 +2,8 @@ import torch.multiprocessing as mp
 
 import sys, os
 sys.path.append("../")
-os.environ["CUDA_VISIBLE_DEVICES"] = "5, 6"
+os.environ["HF_HOME"] = "/code/hf"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1"
 import time
 import torch
 import torch.distributed as dist
@@ -11,8 +12,10 @@ import nvtx
 from multiprocessing import Value, Array, Barrier
 
 from transformers import AutoTokenizer
-from models.llama3_FlashinferKVCache_TP2 import Pipeline
-# from models.llama3_KVCacheTorch_TP2 import Pipeline
+# from models.llama3_FlashinferKVCache_TP2 import Pipeline
+from models.llama3_KVCacheTorch_TP2 import Pipeline
+# from models.llama3_KVCacheTorch_TP8 import Pipeline
+# from models.llama3_70B_KVCacheTorch_TP8 import Pipeline
 
 def worker(rank, world_size, shared_int, shared_batch_size, shared_array, barrier, pipeline, temp_out, shared_command, input_ids):
     """
@@ -21,7 +24,7 @@ def worker(rank, world_size, shared_int, shared_batch_size, shared_array, barrie
     """
     
     torch.cuda.set_device(rank)
-    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
+    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-70B-Instruct")
     pipeline.init_streams()
     pipeline.config_streams()
     pipeline.config_network(rank)
@@ -37,23 +40,23 @@ def worker(rank, world_size, shared_int, shared_batch_size, shared_array, barrie
             case 1:
                 input0 = input_ids[0:2]
                 pipeline.update(input0, 0, device_id=rank)
-                new_tokens = pipeline.run(rank=rank, file_name=f"tp_test_flashinfer_{rank}", filefolder_name=f"tp_test_flashinfer_{rank}_folder")
+                new_tokens = pipeline.run(rank=rank, file_name=f"8B_test_flashinfer_{rank}", filefolder_name=f"8B_test_flashinfer_{rank}_folder")
                 for req_idx, new_token in new_tokens:
                     output_strings[req_idx].extend(new_token)
                 decode_batchsize = len(new_tokens)
                 assert decode_batchsize == 2
 
-                new_tokens.extend(input_ids[2:4])
+                # new_tokens.extend(input_ids[2:4])
 
-                output_length=20
-                for i in range(output_length):
-                    print("Cycle: ", i)
-                    pipeline.update(new_tokens, decode_batchsize, device_id=rank)
+                # output_length=20
+                # for i in range(output_length):
+                #     print("Cycle: ", i)
+                #     pipeline.update(new_tokens, decode_batchsize, device_id=rank)
 
-                    new_tokens = pipeline.run(rank=rank, file_name=f"tp_test_flashinfer_{rank}", filefolder_name=f"tp_test_flashinfer_{rank}_folder")
-                    for req_idx, new_token in new_tokens:
-                        output_strings[req_idx].extend(new_token)
-                    decode_batchsize = len(new_tokens)
+                #     new_tokens = pipeline.run(rank=rank, file_name=f"70B_test_flashinfer_{rank}", filefolder_name=f"70B_test_flashinfer_{rank}_folder")
+                #     for req_idx, new_token in new_tokens:
+                #         output_strings[req_idx].extend(new_token)
+                #     decode_batchsize = len(new_tokens)
 
                 # flattened = [item for sublist in new_tokens for item in sublist]
                 # shared_batch_size.value = len(flattened)
@@ -74,12 +77,11 @@ def worker(rank, world_size, shared_int, shared_batch_size, shared_array, barrie
     # Worker exits gracefully.
     
 if __name__ == '__main__':
-    # print("main Current start method:", mp.get_start_method(allow_none=True))
     mp.set_start_method('spawn')
-    # print("main Current start method:", mp.get_start_method(allow_none=True))
     
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
-    input_strings = [ "Hi, who are you?" for _ in range(16)]
+    # tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-70B-Instruct")
+    input_strings = [ "Hi, who are you?" for _ in range(4)]
     input_ids = [(idx, tokenizer.encode(s)) for idx, s in enumerate(input_strings)]
 
     pipeline = Pipeline()
@@ -88,7 +90,9 @@ if __name__ == '__main__':
     pipeline.init_dependency()
     pipeline.init_set_shape()
     print("finish init shape")
-    pipeline.init_set_weight("/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a", cached=True)
+    weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
+    # weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
+    pipeline.init_set_weight(weight_map_wzr, cached=True)
 
     print("finish update pipeline")
 

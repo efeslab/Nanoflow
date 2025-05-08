@@ -4,6 +4,8 @@ import argparse
 sys.path.append("../")
 sys.path.append("../utils")
 sys.path.append('../pybind/build')
+
+os.environ["HF_HOME"] = "/code/hf"
 from utils.prof_marker import prof_marker
 from utils.frontend import requestManager
 from transformers import AutoTokenizer
@@ -54,6 +56,7 @@ prefill_context = "Large Language Models (LLMs) have rapidly evolved from simple
 prefill_input_ids = [tokenizer.encode(prefill_context)[:640] for _ in range(1000)]
 
 weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
+# weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
 weight_map_amd_kan = "/work1/kasikci/kanzhu/models/llama3-8b"
 
 pipeline = Pipeline()

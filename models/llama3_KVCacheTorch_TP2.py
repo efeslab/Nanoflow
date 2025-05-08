@@ -316,7 +316,7 @@ class Pipeline():
 
     def config_network(self, device_id=0):
         os.environ["MASTER_ADDR"] = "localhost"
-        os.environ["MASTER_PORT"] = "12546"
+        os.environ["MASTER_PORT"] = "12547"
         dist.init_process_group(backend="nccl", rank=device_id, world_size=self.num_devices)
         group_index = device_id // self.tp_size
         # print("group_index: ", group_index)

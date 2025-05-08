@@ -192,7 +192,7 @@ class BufferAllocator():
                 # print(f"Optimal solution found for component {comp}:")
                 # find the maximum value in the solution
                 allocated = int(max([variables[node].X + data["wrapper"].batch_size for node, data in comp.nodes(data=True)]))
-                print(f"Allocated size: {allocated}")
+                # print(f"Allocated size: {allocated}")
                 wrapper_for_allocation = comp.nodes[sorted_nodes[0]]['wrapper']
                 # print("wrappers[0]: ", wrapper_for_allocation.fullName)
                 shape = (allocated, *wrapper_for_allocation.shape[1:])
@@ -209,6 +209,8 @@ class BufferAllocator():
             else:
                 print(f"No optimal solution found for component {comp}.")
                 raise Exception("No optimal solution found for component!")
+        print(f"Total allocated size: {self.total_allocated}")
+        print("Allocation finished.")
 
 
 

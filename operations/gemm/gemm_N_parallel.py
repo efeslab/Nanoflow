@@ -139,7 +139,7 @@ class GEMM_N_Parallel(Operations):
             for device_id in self.device_list:
                 weight_wrapper.weight_map[device_id] = {}
                 for l in self.layer_list:
-                    weight_wrapper.weight_map[device_id][l] = cached_weight_map[(device_id, f"{self.name}_{l}")].to(f'cuda:{device_id}')
+                    weight_wrapper.weight_map[device_id][l] = cached_weight_map[f"{self.name}_device_{device_id}_layer_{l}"].to(f'cuda:{device_id}')
                     assert weight_wrapper.weight_map[device_id][l].shape == weight_wrapper.shape, f"name = {self.weight_name}, expected shape = {weight_wrapper.shape}, layer = {l}, real shape = {weight_wrapper.weight_map[device_id][l].shape}"
     
         elif not cached:
@@ -154,7 +154,7 @@ class GEMM_N_Parallel(Operations):
                         weights_list.append(global_weight_map[name.format(layer=l)][scope].to(f'cuda:{device_id}').t())
                     weight_wrapper.weight_map[device_id][l] = torch.cat(weights_list, dim=1).contiguous()
 
-                    cached_weight_map[(device_id, f"{self.name}_{l}")] = weight_wrapper.weight_map[device_id][l].to("cpu")
+                    cached_weight_map[f"{self.name}_device_{device_id}_layer_{l}"] = weight_wrapper.weight_map[device_id][l].to("cpu")
                     assert weight_wrapper.weight_map[device_id][l].shape == weight_wrapper.shape, f"name = {self.weight_name}, expected shape = {weight_wrapper.shape}, layer = {l}, real shape = {weight_wrapper.weight_map[device_id][l].shape}"
         # torch.cuda.empty_cache()
         # device = torch.cuda.current_device()
