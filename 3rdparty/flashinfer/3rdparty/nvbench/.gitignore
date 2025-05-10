@@ -1,0 +1,10 @@
+build*/
+.aws
+.vscode
+.cache
+.config
+.idea
+cmake-build-*
+*~
+compile_commands.json
+CMakeUserPresets.json
