@@ -10,9 +10,10 @@ from operations.impl_base import OperationImpl
 
 class LayerNormTorchImpl(OperationImpl):
     category_tag = "torch"
-    def run(self, x, weight, output, epsilon):
+    def run(self, input, weight, output, epsilon):
         with torch.cuda.stream(self.stream):
             # print("using torch")
+            x = input.to(torch.float32)
             rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + epsilon)
             normalized_x = x / rms
             output.copy_(normalized_x.to(torch.float16) * weight)

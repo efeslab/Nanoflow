@@ -16,10 +16,10 @@ from operations.gemm.gemm_N_parallel import GEMM_N_Parallel
 from operations.gemm.gemm_K_parallel import GEMM_K_Parallel
 from operations.norm.rmsnorm import LayerNorm
 from operations.sampling.max_sampling import Sampling
-from operations.rope.rope_flashinfer import RopeAppendFlashinfer
-from operations.attention.llamaAttention_flashinfer import DecAttnFlashinfer, PFAttnFlashinfer
+from operations.rope.rope_torch import RopeAppendTorch
+from operations.attention.llamaAttention_torch import DecAttnTorch, PFAttnTorch
 from operations.virtualOp.virtual_ops import Copy, Redist
-from kvcache.kv import DistKVPool, BatchedDistKVCache
+from kvcache.kv import KVCacheTorch
 from core.weightManager import WeightManager
 from core.bufferAllocate import BufferAllocator
 from core.executor import Executor
@@ -31,22 +31,22 @@ from utils.prof_marker import prof_marker
 class Pipeline():
     def __init__(self):
         # Set parameters as instance variables.
-        self.pipeline_name = "Llama3-8B-TP2"
+        self.pipeline_name = "Llama3-70B-TP8"
         self.num_kv_heads = 8
-        self.num_qo_heads = 32
+        self.num_qo_heads = 64
         self.kqv_heads = self.num_qo_heads + 2 * self.num_kv_heads
         self.head_dim = 128
         self.vocab_size = 128256
-        self.hidden_dim = 4096
-        self.intermediate_dim = 14 * 1024
+        self.hidden_dim = 8192
+        self.intermediate_dim = 28 * 1024
         self.batch_size = None
-        self.num_layers = 32
+        self.num_layers = 80
         self.num_devices = torch.cuda.device_count()
         self.page_size = 64
 
         self.pp_size = 1
         self.dp_size = 1
-        self.tp_size = 2
+        self.tp_size = 8
         assert self.pp_size * self.dp_size * self.tp_size == self.num_devices, f"num_devices {self.num_devices} should be equal to pp_size * dp_size * tp_size {self.pp_size * self.dp_size * self.tp_size}"
         # create torch.distributed group
         assert self.num_devices % self.tp_size == 0, f"num_devices {self.num_devices} should be divisible by tp_size {self.tp_size}"
@@ -73,8 +73,7 @@ class Pipeline():
         }
 
     def init_external_data(self):
-        self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads // self.tp_size, self.head_dim, 4096*2, self.page_size, self.num_devices)
-        self.kv_cache = BatchedDistKVCache(self.kv_pool)
+        self.kv_cache = KVCacheTorch(self.num_kv_heads, self.head_dim, self.tp_size)
 
     def init_operations(self):
         self.global_input    = GlobalInput("GlobalInput").first_only()
@@ -96,16 +95,16 @@ class Pipeline():
         ])
         self.kqv_devices, self.kqv_layers_per_device = self.kqv.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
-        self.ropeAppend      = RopeAppendFlashinfer("RopeAppend")
+        self.ropeAppend      = RopeAppendTorch("RopeAppend")
         self.ropeAppend.externals["KVCache"] = self.kv_cache
         self.ropeAppend_devices, self.ropeAppend_layers_per_device = self.ropeAppend.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
 
-        self.decAttn         = DecAttnFlashinfer("DecAttn")
+        self.decAttn         = DecAttnTorch("DecAttn")
         self.decAttn.externals["KVCache"] = self.kv_cache
         self.decAttn_devices, self.decAttn_layers_per_device = self.decAttn.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
-        self.pfAttn          = PFAttnFlashinfer("PFAttn")
+        self.pfAttn          = PFAttnTorch("PFAttn")
         self.pfAttn.externals["KVCache"] = self.kv_cache
         self.pfAttn_devices, self.pfAttn_layers_per_device = self.pfAttn.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
@@ -295,30 +294,29 @@ class Pipeline():
         self.decAttn_devices[device_id].setBatchSize(decode_batchsize)
 
     def config_algorithm(self, device_id=0):
-        gemm_tag = "cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto"
-        self.gen_embedding.config_tag("cuda", device_id)
+        self.gen_embedding.config_tag("torch", device_id)
         self.allGather_embedding.config_tag("torch", device_id)
-        self.layerNormAttn.config_tag("cuda", device_id)
-        self.activation.config_tag("cuda", device_id)
+        self.layerNormAttn.config_tag("torch", device_id)
+        self.activation.config_tag("torch", device_id)
         self.allGather_activation.config_tag("torch", device_id)
-        self.kqv.config_tag(gemm_tag, device_id)
-        self.ropeAppend.config_tag("cuda", device_id)
-        self.decAttn.config_tag("batched_cuda", device_id)
-        self.pfAttn.config_tag("batched_cuda", device_id)
+        self.kqv.config_tag("torch", device_id)
+        self.ropeAppend.config_tag("torch:withKVCache", device_id)
+        self.decAttn.config_tag("torch", device_id)
+        self.pfAttn.config_tag("torch", device_id)
         self.allGather_attn.config_tag("torch", device_id)
-        self.layerNormFFN.config_tag("cuda", device_id)
-        self.o.config_tag(gemm_tag, device_id)
+        self.layerNormFFN.config_tag("torch", device_id)
+        self.o.config_tag("torch", device_id)
         self.allGather_o.config_tag("torch", device_id)
-        self.ug.config_tag(gemm_tag, device_id)
-        self.d.config_tag(gemm_tag, device_id)
+        self.ug.config_tag("torch", device_id)
+        self.d.config_tag("torch", device_id)
         self.allGather_d.config_tag("torch", device_id)
-        self.modelLayerNorm.config_tag("cuda", device_id)
-        self.sample.config_tag("cuda", device_id)
-        self.getLogits.config_tag(gemm_tag, device_id)
-    
+        self.modelLayerNorm.config_tag("torch", device_id)
+        self.sample.config_tag("torch", device_id)
+        self.getLogits.config_tag("torch", device_id)
+
     def config_network(self, device_id=0):
         os.environ["MASTER_ADDR"] = "localhost"
-        os.environ["MASTER_PORT"] = "12546"
+        os.environ["MASTER_PORT"] = "12547"
         dist.init_process_group(backend="nccl", rank=device_id, world_size=self.num_devices)
         group_index = device_id // self.tp_size
         # print("group_index: ", group_index)
@@ -423,7 +421,7 @@ class Pipeline():
         operation_base = Operations()
         operation_base.search_profile_data()
 
-    def run(self, rank=0, file_name="out-tp-test", filefolder_name="llama3-kv-out-tp-test"):
+    def run(self, rank=0, file_name="out-operator_layer_test", filefolder_name="llama3-kv-out-rope_test"):
 
         temp_out = torch.zeros(self.batch_size, dtype=torch.int32, device='cuda')
 

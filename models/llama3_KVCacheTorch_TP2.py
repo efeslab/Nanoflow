@@ -31,7 +31,7 @@ from utils.prof_marker import prof_marker
 class Pipeline():
     def __init__(self):
         # Set parameters as instance variables.
-        self.pipeline_name = "Llama3-7B-TP2"
+        self.pipeline_name = "Llama3-8B-TP2"
         self.num_kv_heads = 8
         self.num_qo_heads = 32
         self.kqv_heads = self.num_qo_heads + 2 * self.num_kv_heads

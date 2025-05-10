@@ -70,7 +70,7 @@ class Executor():
                 op.wait_cuda_event()
                 op.run()
                 op.record_cuda_event()
-            if op.name == "GlobalOutput_31":
+            if "GlobalOutput" in op.name:
                 torch.cuda.synchronize()
                 output.copy_(op.inputs["tokens"].tensor)
 
@@ -87,14 +87,14 @@ class Executor():
                     f.write(str(inputs.tensor))
                     f.write("\n")
                     f.write(str(inputs.tensor.shape))
-                    # torch.save(inputs.tensor.cpu(), f"./{filefolder_name}/{op.name}_{inputs.name}")
+                    torch.save(inputs.tensor.cpu(), f"./{filefolder_name}/{op.name}_{inputs.name}")
 
                 for weights in op.weights.values():
                     f.write(f"[{op.name}_{weights.name}]\n")
                     f.write(str(weights.weight_map[rank][op.layer]))
                     f.write("\n")
                     f.write(str(weights.weight_map[rank][op.layer].shape))
-                    # torch.save(weights.weight_map[rank][op.layer].cpu(), f"./{filefolder_name}/{op.name}_{weights.name}")
+                    torch.save(weights.weight_map[rank][op.layer].cpu(), f"./{filefolder_name}/{op.name}_{weights.name}")
 
                 f.flush()
 
@@ -103,7 +103,7 @@ class Executor():
                     op.run()
                     op.record_cuda_event()
 
-                if op.name == "GlobalOutput_31":
+                if "GlobalOutput" in op.name:
                     torch.cuda.synchronize()
                     output.copy_(op.inputs["tokens"].tensor)
                 for outputs in op.outputs.values():
@@ -112,7 +112,7 @@ class Executor():
                     f.write("\n")
                     f.write(str(outputs.tensor.shape))
                     f.write("\n")
-                    # torch.save(outputs.tensor.cpu(), f"./{filefolder_name}/{op.name}_{outputs.name}")
+                    torch.save(outputs.tensor.cpu(), f"./{filefolder_name}/{op.name}_{outputs.name}")
 
                 f.flush()
             f.close()

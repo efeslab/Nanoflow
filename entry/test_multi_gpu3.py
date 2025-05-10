@@ -1,70 +1,38 @@
-import torch.multiprocessing as mp
-
-import sys, os
-sys.path.append("../")
-os.environ["HF_HOME"] = "/code/hf"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1"
-import time
-import torch
-import torch.distributed as dist
-import nvtx
-
-from multiprocessing import Value, Array, Barrier
-
-from transformers import AutoTokenizer
-# from models.llama3_FlashinferKVCache_TP2 import Pipeline
-from models.llama3_KVCacheTorch_TP2 import Pipeline
-# from models.llama3_KVCacheTorch_TP8 import Pipeline
-# from models.llama3_70B_KVCacheTorch_TP8 import Pipeline
-
-def worker(rank, world_size, shared_int, shared_batch_size, shared_array, barrier, pipeline, temp_out, shared_command, input_ids):
+def worker(rank, world_size, shared_int, shared_batch_size, shared_array, barrier, pipeline, command, input_ids):
     """
     Worker process: wait for a new task value from the main process,
     then compute (rank + shared_int) and store the result in shared_array[rank].
     """
-    
-    torch.cuda.set_device(rank)
-    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-70B-Instruct")
+    from torch.cuda import set_device
+    set_device(rank)
     pipeline.init_streams()
     pipeline.config_streams()
     pipeline.config_network(rank)
     pipeline.update_network_ops()
-    output_strings = {}
-    for idx, tensor in input_ids:
-        output_strings[idx] = tensor
     
+    new_tokens = None
+
     while True:
         # First barrier: wait until the main process writes a new task.
         barrier.wait()
-        match shared_command.value:
+        match command.value:
             case 1:
                 input0 = input_ids[0:2]
                 pipeline.update(input0, 0, device_id=rank)
-                new_tokens = pipeline.run(rank=rank, file_name=f"8B_test_flashinfer_{rank}", filefolder_name=f"8B_test_flashinfer_{rank}_folder")
-                for req_idx, new_token in new_tokens:
-                    output_strings[req_idx].extend(new_token)
+                new_tokens = pipeline.run(rank=rank, file_name=f"./test_data/70B_test_flashinfer_{rank}", filefolder_name=f"./test_data/70B_test_flashinfer_{rank}_folder")
                 decode_batchsize = len(new_tokens)
-                assert decode_batchsize == 2
-
-                # new_tokens.extend(input_ids[2:4])
-
-                # output_length=20
-                # for i in range(output_length):
-                #     print("Cycle: ", i)
-                #     pipeline.update(new_tokens, decode_batchsize, device_id=rank)
-
-                #     new_tokens = pipeline.run(rank=rank, file_name=f"70B_test_flashinfer_{rank}", filefolder_name=f"70B_test_flashinfer_{rank}_folder")
-                #     for req_idx, new_token in new_tokens:
-                #         output_strings[req_idx].extend(new_token)
-                #     decode_batchsize = len(new_tokens)
-
-                # flattened = [item for sublist in new_tokens for item in sublist]
-                # shared_batch_size.value = len(flattened)
-                # Check for termination signal.
-                output_text = tokenizer.batch_decode(list(output_strings.values()), skip_special_tokens=True)
-                print(output_text)
-
-
+                print("new_tokens: ", new_tokens)
+                if rank == 0:
+                    for req_idx, new_token in new_tokens:
+                        shared_array[req_idx] = new_token[0]
+                new_tokens.extend(input_ids[2:4])
+            case 2:
+                pipeline.update(new_tokens, decode_batchsize=2, device_id=rank)
+                new_tokens = pipeline.run(rank=rank, file_name=f"70B_test_flashinfer_{rank}", filefolder_name=f"70B_test_flashinfer_{rank}_folder")
+                print("new_tokens: ", new_tokens)
+                if rank == 0:
+                    for req_idx, new_token in new_tokens:
+                        shared_array[req_idx] = new_token[0]
                 
             case -1:
                 # Termination signal received.
@@ -75,14 +43,33 @@ def worker(rank, world_size, shared_int, shared_batch_size, shared_array, barrie
         barrier.wait()
     
     # Worker exits gracefully.
-    
+
 if __name__ == '__main__':
+    import torch.multiprocessing as mp
+
+    import time
+    import sys, os
+    sys.path.append("../")
+    os.environ["HF_HOME"] = "/code/hf"
+    # os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1"
+    # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+
+    from multiprocessing import Value, Array, Barrier
+    from transformers import AutoTokenizer
+    # from models.llama3_FlashinferKVCache_TP2 import Pipeline
+    # from models.llama3_KVCacheTorch_TP2 import Pipeline
+    from models.llama3_70B_KVCacheTorch_TP8 import Pipeline
+    
     mp.set_start_method('spawn')
     
-    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
-    # tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-70B-Instruct")
+    # tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
+    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-70B-Instruct")
     input_strings = [ "Hi, who are you?" for _ in range(4)]
     input_ids = [(idx, tokenizer.encode(s)) for idx, s in enumerate(input_strings)]
+
+    output_strings = {}
+    for idx, ids in input_ids:
+        output_strings[idx] = ids
 
     pipeline = Pipeline()
     pipeline.init_external_data()
@@ -90,85 +77,72 @@ if __name__ == '__main__':
     pipeline.init_dependency()
     pipeline.init_set_shape()
     print("finish init shape")
-    weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
-    # weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
+    # weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
+    weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
     pipeline.init_set_weight(weight_map_wzr, cached=True)
 
     print("finish update pipeline")
 
     world_size = pipeline.num_devices
     print(f"Number of GPUs: {world_size}")
-    
-    iterations = 1
 
     # Create a shared integer (for the task value) and a shared array to hold each worker's result.
-    shared_command = Value('i', 1)    # 'i' stands for a signed integer.
+    command = Value('i', 1)    # 'i' stands for a signed integer.
     shared_int = Value('i', 0)    # 'i' stands for a signed integer.
     shared_batch_size = Value('i', 0)    # 'i' stands for a signed integer.
-    shared_array = Array('i', world_size)  # An array of integers with length equal to world_size.
-    
-    temp_out = torch.zeros(shared_batch_size.value, dtype=torch.int32, device='cuda')
+    shared_array = Array('i', 4)  # An array of integers with length equal to world_size.
+
     # Create a Barrier for world_size workers plus the main process.
     barrier = Barrier(world_size + 1)
     
     # Spawn one worker per GPU (or per unit of parallelism).
     processes = []
     for rank in range(world_size):
-        args = (rank, world_size, shared_int, shared_batch_size, shared_array, barrier, pipeline, temp_out, shared_command, input_ids)
+        start_time = time.time()
+        args = (rank, world_size, shared_int, shared_batch_size, shared_array, barrier, pipeline, command, input_ids)
         p = mp.Process(target=worker, args=args)
 
         print(f"Starting process {rank} on GPU {rank}")
         p.start()
         processes.append(p)
+        print(f"Process {rank} started on GPU {rank} in {time.time() - start_time:.2f} seconds")
     
     print("Waiting for all processes to start...")
-    shared_command.value = 1
+    command.value = 1
     barrier.wait()
     barrier.wait()
 
-    # start_time = time.time()
+    # get the shared array values
+    print(f"Shared array values: {list(shared_array)}")
+    for i in range(2):
+        output_strings[i].append(shared_array[i])
 
-
-    # pipeline.
-
-    # torch.cuda.empty_cache()
-    # device = torch.cuda.current_device()
-    # reserved_memory = torch.cuda.memory_reserved(device)
-    # print(f"Reserved memory: {reserved_memory / 1024 / 1024} MB")
-    # pipeline.config()
-
-
+    iterations = 20
     #     print("input_ids: ", i)
     # For each iteration, update the shared integer, synchronize with the workers,
     # and let them compute and write their results.
-    # for i in range(iterations):
-    #     # Set the shared task value.
-    #     with shared_int.get_lock():
-    #         shared_int.value = i
-        
-    #     # First barrier: signal to all workers that a new task is available.
-    #     barrier.wait()
-        
-    #     # Second barrier: wait for all workers to finish processing.
-    #     barrier.wait()
+    command.value = 2
+    for i in range(iterations):
+        print(f"Iteration {i + 1}/{iterations}")
+        # Set the shared task value.
+        barrier.wait()
 
-    #     temp_out = torch.zeros(shared_batch_size.value, dtype=torch.int32, device='cuda')
-        
-        # (Optional) Main process could inspect shared_array here if desired.
-        # For example, expected value at index j is: j + i.
-        # results = list(shared_array)
+        barrier.wait()
+        for i in range(4):
+            output_strings[i].append(shared_array[i])
     
     # Signal termination: write -1 into the shared integer.
-    with shared_command.get_lock():
-        shared_command.value = -1
+    command.value = -1
     
     # Execute the final two barrier waits so that all workers exit cleanly.
     barrier.wait()  # First barrier of termination iteration.
     barrier.wait()  # Second barrier of termination iteration.
     
-    # total_time = time.time() - start_time
-    # print("Total time for {} iterations: {:.4f} seconds".format(iterations, total_time))
-    
     # Wait for all worker processes to finish.
     for p in processes:
         p.join()
+
+    print("All processes have finished.")
+
+    output_text = tokenizer.batch_decode(list(output_strings.values()), skip_special_tokens=True)
+    print(output_text)
