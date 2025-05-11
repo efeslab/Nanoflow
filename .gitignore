@@ -42,3 +42,4 @@ Anaconda3-20*
 *.pftrace
 *.gz
 **/build/*
+cached_weights

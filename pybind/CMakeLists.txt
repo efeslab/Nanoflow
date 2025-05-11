@@ -12,7 +12,7 @@ if(CMAKE_CUDA_ARCHITECTURES STREQUAL "90")
 endif()
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=0)
+# add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=0)
 
 #set(CMAKE_C_COMPILER "/usr/bin/gcc-11")
 #set(CMAKE_CXX_COMPILER "/usr/bin/g++-11")
@@ -81,6 +81,18 @@ add_library(gemm_lib STATIC ${GEMM_SRC})
 target_include_directories(gemm_lib PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_include_directories(gemm_lib PRIVATE ${PARENT_DIR}/3rdparty/cutlass/include)
 target_include_directories(gemm_lib PRIVATE ${PARENT_DIR}/3rdparty/cutlass/tools/util/include)
+
+# -------------- Build FP16 loader -----------------#
+find_package(Torch REQUIRED)            # only headers
+find_library(URING_LIB uring REQUIRED)
+find_library(TORCH_PYTHON_LIBRARY torch_python PATH "${TORCH_INSTALL_PREFIX}/lib")
+
+pybind11_add_module(
+  fast_uring
+  src/fast_uring.cpp)
+
+target_include_directories(fast_uring PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(fast_uring PRIVATE Python::Python ${TORCH_LIBRARIES} ${TORCH_PYTHON_LIBRARY} ${URING_LIB})
 
 # Helper function to create Python modules
 function(add_pybind_module TARGET_NAME)

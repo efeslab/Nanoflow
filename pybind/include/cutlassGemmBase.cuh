@@ -48,7 +48,6 @@ struct BaseGEMMWrapper : public OperatorWrapper{
 	virtual double totalCompute() = 0;
 	virtual float gflops(double runtime_ms) = 0;
 	virtual bool checkResult() = 0;
-	virtual ~BaseGEMMWrapper() = default;
 	// I/O/Weight Setup
 	virtual void set_weight(ElementInputB* data_b) = 0;
 	virtual bool set_weight(vortexWeight& weight) = 0;

@@ -13,15 +13,17 @@ from operations.impl_base import OperationImpl
 class SiluMultiplyTorchImpl(OperationImpl):
     category_tag = "torch"
     def run(self, x, output):
-        A, B = torch.split(x, x.shape[-1] // 2, dim=-1)
-        output.copy_(A * torch.nn.functional.silu(B))
+        with torch.cuda.stream(self.stream):
+            A, B = torch.split(x, x.shape[-1] // 2, dim=-1)
+            output.copy_(A * torch.nn.functional.silu(B))
 
 if config.PLATFORM_CUDA:
     import bind_silu_multiply
     class SiluMultiplyCudaImpl(OperationImpl):
         category_tag = "cuda"
         def run(self, x, output):
-            bind_silu_multiply.silu_multiply(x, output)
+            if self.batch_size > 0:
+                bind_silu_multiply.silu_multiply(x, output, self.stream_handle)
 
 class Activation(Operations):
     def __init__(self, name):
@@ -42,11 +44,20 @@ class Activation(Operations):
         if config.PLATFORM_CUDA:
             self.add_impl(SiluMultiplyCudaImpl)
         
-    def setShape(self, N):
-        self.N = N
-        for op_device in self.children:
-            op_device.setShapeForIOWrappers()
+    def setShape(self, N, tp_size=1):
+        self.N = N // tp_size
+        self.updateChildrenIOShape()
     
+    def copy_nano(self, index):
+        new_op = Activation(f"{self.name}{index}")
+        new_op.expand_all_gpu_and_layers(len(self.device_list), 32)
+        new_op.setShape(self.N)
+        new_op.set_stream(self.stream)
+
+        self.nano_ops.append(new_op)
+
+        return new_op
+
     def profile(self):
         # check the similarity of the outputs
         x = torch.randn(2, self.N * 2, dtype=torch.float16, device='cuda')

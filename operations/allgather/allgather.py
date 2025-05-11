@@ -4,24 +4,22 @@ import torch.distributed as dist
 import platform_config
 from operations.operation_base import Operations, Operation_Device, Operation_Layer
 from core.IOWrapper import IOWrapper
-from core.weightWrapper import WeightWrapper    
-from core.processWeight import process_weight_none, process_weight_layer
 from operations.impl_base import OperationImpl
 
 
 class AllGatherTorchImpl(OperationImpl):
     category_tag = "torch"
-    def __init__(self, op_base, device_id):
-        super().__init__(op_base, device_id)
+    def __init__(self, op_base, stream, device_id):
+        super().__init__(op_base, stream, device_id)
         self.tp_size = op_base.tp_size
         self.subgroup = op_base.subgroup
-        print(f"subgroup: {self.subgroup}")
     
     def run(self, input, output):
-        gather_list = [torch.empty_like(input) for _ in range(self.tp_size)]
-        gather_list_in_sequence = []
-        dist.all_gather(gather_list, input, group=self.subgroup)
-        output.copy_(torch.cat(gather_list, dim=1))
+        with torch.cuda.stream(self.stream):
+            gather_list = [torch.empty_like(input) for _ in range(self.tp_size)]
+            dist.all_gather(gather_list, input, group=self.subgroup)
+            out = torch.cat(gather_list, dim=1)
+            output.copy_(out)
 
 class AllGather(Operations):
     def __init__(self, name):
@@ -42,14 +40,10 @@ class AllGather(Operations):
     def setShape(self, N, tp_size):
         self.N = N
         self.tp_size = tp_size
-        for op_device in self.children:
-            op_device.setShapeForIOWrappers()
+        self.updateChildrenIOShape()
     
     def update(self, subgroup):
         self.subgroup = subgroup
-    
-    def processWeight(self, global_weight_map, total_layers, cached=False):
-        pass
 
 class AllGather_Device(Operation_Device):
     def __init__(self, parent, device):

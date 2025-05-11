@@ -31,7 +31,7 @@ __global__ void silu_and_multiply_kernel(half *input, half *output, int M, int N
     }
 }
 
-void silu_and_multiply(torch::Tensor input, torch::Tensor output) {
+void silu_and_multiply(torch::Tensor input, torch::Tensor output, intptr_t stream_handle = 0ULL) {
     // Validate the input and output tensors
     TORCH_CHECK(input.dtype() == torch::kHalf, "Input tensor must be of half data type");
     TORCH_CHECK(output.dtype() == torch::kHalf, "Output tensor must be of half data type");
@@ -50,8 +50,13 @@ void silu_and_multiply(torch::Tensor input, torch::Tensor output) {
     // Define block and grid sizes
     dim3 blockSize(16, 16);
     dim3 gridSize((N + blockSize.x - 1) / blockSize.x, (M + blockSize.y - 1) / blockSize.y);
-
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    // Determine CUDA stream
+    cudaStream_t stream = nullptr;
+    if (stream_handle == 0ULL) {
+        stream = at::cuda::getCurrentCUDAStream();
+    } else {
+        stream = reinterpret_cast<cudaStream_t>(stream_handle);
+    }
     // Launch the kernel
     silu_and_multiply_kernel<<<gridSize, blockSize, 0, stream>>>(d_input, d_output, M, N);
 }

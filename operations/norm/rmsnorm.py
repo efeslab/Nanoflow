@@ -10,11 +10,13 @@ from operations.impl_base import OperationImpl
 
 class LayerNormTorchImpl(OperationImpl):
     category_tag = "torch"
-    def run(self, x, weight, output, epsilon):
-        # print("using torch")
-        rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + epsilon)
-        normalized_x = x / rms
-        output.copy_(normalized_x.to(torch.float16) * weight)
+    def run(self, input, weight, output, epsilon):
+        with torch.cuda.stream(self.stream):
+            # print("using torch")
+            x = input.to(torch.float32)
+            rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + epsilon)
+            normalized_x = x / rms
+            output.copy_(normalized_x.to(torch.float16) * weight)
 
 if platform_config.PLATFORM_TRITON:
     from triton_ops.rmsnorm import rms_norm as triton_rms_norm
@@ -29,7 +31,8 @@ if platform_config.PLATFORM_CUDA:
         category_tag = "cuda"
         def run(self, x, weight, output, epsilon):
             # print("using cuda")
-            bind_rms_norm.rms_norm(output, x, weight, epsilon)
+            if self.batch_size > 0:
+                bind_rms_norm.rms_norm(output, x, weight, epsilon, self.stream_handle)
 
 class LayerNorm(Operations):
     def __init__(self, name):
@@ -41,7 +44,7 @@ class LayerNorm(Operations):
             "output": IOWrapper(self, 'output')
         }
         self.weights = {
-            "weight": WeightWrapper(),
+            "weight": WeightWrapper(self),
         }
         self.impl_map = {}
         self.init_impl_map()
@@ -57,8 +60,18 @@ class LayerNorm(Operations):
     def setShape(self, hidden_dim):
         self.hidden_dim = hidden_dim
         self.weights["weight"].shape = (self.hidden_dim,)
-        for op_device in self.children:
-            op_device.setShapeForIOWrappers()
+        self.updateChildrenIOShape()
+    
+    def copy_nano(self, index):
+        new_op = LayerNorm(f"{self.name}{index}")
+        new_op.weights = self.weights
+        new_op.expand_all_gpu_and_layers(len(self.device_list), 32)
+        new_op.setShape(self.hidden_dim)
+        new_op.set_stream(self.stream)
+
+        self.nano_ops.append(new_op)
+
+        return new_op
 
     def profile(self):
         # check the similarity of the outputs
@@ -95,8 +108,8 @@ class LayerNorm(Operations):
                     ''', (self.name + f"_{category_tag}", batch_size, average_time))
         self.conn.commit()
     
-    def processWeight(self, global_weight_map, total_devices, total_layers, cached = False):
-        return process_weight_layer(global_weight_map, self.weight_name, self.weights["weight"], total_devices, total_layers, cached)
+    def processWeight(self, global_weight_map, weight_path, cached):
+        return process_weight_layer(global_weight_map, self.weight_name, self.weights["weight"], self.device_list, self.layer_list, weight_path, cached=cached)
 
     
 class LayerNorm_Device(Operation_Device):

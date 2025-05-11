@@ -1,45 +1,80 @@
+import torch, os
 import tqdm
 import os
 import safetensors
+import json
+import time
+import fast_uring
+
 class WeightManager():
-    def load_tensors(tensor_path):
-        original_tensors ={}
+    def __init__(self, pipeline_name, num_devices, cached = False):
+        self.pipeline_name = pipeline_name
+        self.cached = cached
+        self.cached_weight_path = f"../cached_weights/{pipeline_name}"
+        self.weight_map = {}
+        self.cached_weight_map = {}
+        self.cached_weight_metadata = {}
+
+        if cached:
+            print("load weight from disk")
+            file = os.path.join(self.cached_weight_path, f"{self.pipeline_name}.bin")
+            start_load_time = time.time()
+            # use torch.load to load the tensor
+            ten = fast_uring.load_fp16(file, threads=32)
+            t1 = time.time()
+            mb_s = ten.numel()*2 / 1e6 / (t1 - start_load_time)
+            print(f"Loaded {mb_s:,.1f} MB/s with {ten.numel():,} elements")
+            meta_data = json.load(open(os.path.join(self.cached_weight_path, f"{self.pipeline_name}_metadata.json"), "r"))
+            for name, metadata in meta_data.items():
+                offset = metadata["offset"]
+                shape = metadata["shape"]
+                dtype = metadata["dtype"]
+                size = metadata["size"]
+                # print(f"load tensor {name} with shape {shape} and offset {offset}")
+                self.cached_weight_map[name] = ten[offset:offset + size].view(shape)
+            
+            print(f"load weight time: {time.time() - start_load_time:.2f}s")
+        else:
+            os.makedirs(self.cached_weight_path, exist_ok=True)
+    
+    def load_from_safe_tensor(self, tensor_path):
         for file in tqdm.tqdm(os.listdir(tensor_path)):
             if file.endswith(".safetensors"):
                 tensors = safetensors.safe_open(os.path.join(tensor_path, file), 'pt')
                 for name in tensors.keys():
                     tensor = tensors.get_tensor(name)
-                    original_tensors[name] = tensor
-        return original_tensors
-
-
-    def __init__(self):
-        pass
+                    self.weight_map[name] = tensor.half() # make all the tensor fp16
+                    # print(f"load tensor {name} from {file} with shape {tensor.shape}")
     
-    def load_from_safe_tensor(self, tensor_path, num_devices, tp_size=1):
-        self.weight_map = WeightManager.load_tensors(tensor_path)
-        self.weights_per_device = [{} for _ in range(num_devices)]
-        for device_id in range(num_devices):
-            offset = device_id % tp_size
-            # make all the tensor fp16
-            for key in self.weight_map.keys():
-                # if the key contains "self_attn", the key is a string.
-                if "o_proj" in key or "down_proj" in key:
-                    assert self.weight_map[key].shape[0] % tp_size == 0, f"key: {key}, shape: {self.weight_map[key].shape}, tp_size: {tp_size}"
-                    stride = self.weight_map[key].shape[0] // tp_size
-                    start = offset * stride
-                    end = start + stride
-                    self.weights_per_device[device_id][key] = self.weight_map[key][start:end].half().to(f'cuda:{device_id}')
-                elif "embed_tokens" in key:
-                    assert self.weight_map[key].shape[1] % tp_size == 0, f"key: {key}, shape: {self.weight_map[key].shape}, tp_size: {tp_size}"
-                    stride = self.weight_map[key].shape[1] // tp_size
-                    start = offset * stride
-                    end = start + stride
-                    self.weights_per_device[device_id][key] = self.weight_map[key][:, start:end].half().to(f'cuda:{device_id}')
-                else:
-                    # self.weight_map[key] = self.weight_map[key].half().to('cuda')
-                    self.weights_per_device[device_id][key] = self.weight_map[key].half().to(f'cuda:{device_id}')
-    
-    def set_weight(self, operation_list, total_devices, total_layers):
+    def set_weight(self, operation_list):
+        print("set weight start")
+        start_time = time.time()
         for op in operation_list:
-            op.processWeight(self.weights_per_device, total_devices, total_layers)
+            op.processWeight(self.weight_map, self.cached_weight_map, cached=self.cached)
+        if not self.cached:
+            print("save weight to disk")
+            total_el = 0
+            offsets = []
+            for weight_name, weight_tensor in self.cached_weight_map.items():
+                t = weight_tensor.contiguous()
+                
+                offsets.append(total_el)
+                self.cached_weight_metadata[weight_name] = {
+                    "offset": total_el,
+                    "shape": t.shape,
+                    "dtype": str(t.dtype),
+                    "size": t.numel(),
+                }
+                total_el += t.numel()
+            
+            flat = torch.empty(total_el, dtype=torch.float16)
+            for t, offset in zip(self.cached_weight_map.values(), offsets):
+                flat[offset:offset + t.numel()].copy_(t.contiguous().view(-1))
+
+            with open(os.path.join(self.cached_weight_path, f"{self.pipeline_name}.bin"), "wb") as f:
+                f.write(flat.numpy().tobytes())
+
+            json.dump(self.cached_weight_metadata, open(os.path.join(self.cached_weight_path, f"{self.pipeline_name}_metadata.json"), "w"))
+            # breakpoint()
+        
+        print(f"set weight time: {time.time() - start_time:.2f}s")

@@ -14,8 +14,9 @@ from operations.impl_base import OperationImpl
 class GenEmbeddingTorchImpl(OperationImpl):
     category_tag = "torch"
     def run(self, tokens, embedding, output):
-        # print("using torch")
-        output.copy_(embedding[tokens])
+        with torch.cuda.stream(self.stream):
+            # print("using torch")
+            output.copy_(embedding[tokens])
 
 if platform_config.PLATFORM_CUDA:
     import bind_genEmbedding
@@ -23,7 +24,8 @@ if platform_config.PLATFORM_CUDA:
         category_tag = "cuda"
         def run(self, tokens, embedding, output):
             # print("using cuda")
-            bind_genEmbedding.genEmbedding(tokens, embedding, output)
+            if self.batch_size > 0:
+                bind_genEmbedding.genEmbedding(tokens, embedding, output, self.stream_handle)
             
 class GenEmbedding(Operations):
     
@@ -36,7 +38,7 @@ class GenEmbedding(Operations):
             "output": IOWrapper(self, 'output')
         }
         self.weights = {
-            "embedding": WeightWrapper()
+            "embedding": WeightWrapper(self)
         }
         self.impl_map = {}
         self.init_impl_map()
@@ -50,9 +52,9 @@ class GenEmbedding(Operations):
     def setShape(self, hidden_dim, vocab_size, tp_size=1):
         self.N = hidden_dim // tp_size
         self.vocab_size = vocab_size
+        self.tp_size = tp_size
         self.weights["embedding"].shape = (self.vocab_size, self.N)
-        for op_device in self.children:
-            op_device.setShapeForIOWrappers()
+        self.updateChildrenIOShape()
     
     
     def profile(self):
@@ -91,8 +93,8 @@ class GenEmbedding(Operations):
                     ''', (self.name + f"_{category_tag}", batch_size, average_time))
         self.conn.commit()
     
-    def processWeight(self, global_weight_map, total_devices, total_layers, cached = False):
-        return process_weight_no_transpose(global_weight_map, self.weight_name, self.weights["embedding"], total_devices, total_layers, cached)
+    def processWeight(self, global_weight_map, cached_weight_map, cached = False):
+        return process_weight_no_transpose(global_weight_map, self.weight_name, self.weights["embedding"], self.device_list, self.layer_list, cached_weight_map, self.tp_size, cached=cached)
     
 class GenEmbedding_Device(Operation_Device):
     def __init__(self, parent, device):

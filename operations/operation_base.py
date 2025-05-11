@@ -23,7 +23,11 @@ class Operations:
         self.weight_name = None
         self.tag = "torch"
         self.children = []
+        self.isNanoSplit = False
+        self.nano_ops = []
+        self.nano_op_batchsizes = []
         self.isVirtual = False
+        self.stream = None
 
         # Connect to the database
         # self.conn = sqlite3.connect('performance.db')
@@ -39,6 +43,7 @@ class Operations:
         # # ''')
         # self.conn.commit()
         self.impl_map = {}
+        self.op_device = None
         
     def init_impl_map(self):
         self.impl_map = {} 
@@ -71,11 +76,14 @@ class Operations:
         return self
 
     def setShape(self):
+        self.updateChildrenIOShape()
+    
+    def updateChildrenIOShape(self):
         for op_device in self.children:
             op_device.setShapeForIOWrappers()
-    
-    def processWeight(self, global_weight_map, total_devices, total_layers, cached = False):
-        return process_weight_none(global_weight_map, self.weight_name, None, total_devices, total_layers, cached)
+
+    def processWeight(self, global_weight_map, weight_path, cached = False):
+        return process_weight_none(global_weight_map, self.weight_name, None, self.device_list, self.layer_list, weight_path, cached)
     
     def first_only(self):
         self.first_layer_only = True
@@ -94,19 +102,27 @@ class Operations:
             print(row)
             
     def config_tag(self, tag, device_id, parameter_map = {}):
-        self.tag = tag
-        parts = tag.split(":", 1)
-        category_tag = ""
-        impl_tag = ""
-        if len(parts) == 1:
-            category_tag = parts[0]
+        if self.isNanoSplit:
+            for nano_op in self.nano_ops:
+                nano_op.config_tag(tag, device_id, parameter_map)
+            return self
         else:
-            category_tag = parts[0]
-            impl_tag = parts[1]
-        # self.impl  = self.impl_map[category_tag](self.inputs, self.outputs, self.weights, device_id)
-        self.impl  = self.impl_map[category_tag](self, device_id)
-        self.config_impl(impl_tag, parameter_map)
-        return self
+            self.tag = tag
+            self.device_id = device_id
+            self.parameter_map = parameter_map
+            parts = tag.split(":", 1)
+            category_tag = ""
+            impl_tag = ""
+            if len(parts) == 1:
+                category_tag = parts[0]
+            else:
+                category_tag = parts[0]
+                impl_tag = parts[1]
+            # self.impl  = self.impl_map[category_tag](self.inputs, self.outputs, self.weights, device_id)
+            self.impl  = self.impl_map[category_tag](self, self.stream, device_id)
+            self.config_impl(impl_tag, parameter_map)
+            # print("name: ", self.name, "category_tag: ", category_tag, "impl_tag: ", impl_tag, "impl: ", self.impl)
+            return self
     
     def config_impl(self, impl_tag, parameter_map):
         self.impl.config(impl_tag, parameter_map)
@@ -123,6 +139,12 @@ class Operations:
                     tag_list.append(category_tag)
         return tag_list
     
+    def set_stream(self, stream):
+        self.stream = stream
+
+    def append_dependency(self, extra_dep):
+        for idx, child in enumerate(self.children):
+            child.append_dependency((extra_dep[0].children[idx], extra_dep[1], extra_dep[2]))
 
     def __str__(self):
         return self.name   
@@ -134,16 +156,19 @@ class Operations:
         
         return self.children
     
-    def expand_gpu_and_layers(self, num_devices, layer_list):
+    def expand_all_gpu_and_layers(self, num_devices, num_layers):
+        self.device_list = list(range(num_devices))
+        if self.first_layer_only:
+            self.layer_list = [0]
+        elif self.last_layer_only:
+            self.layer_list = [num_layers - 1]
+        else:
+            self.layer_list = list(range(num_layers))
         self.op_layers_per_device = []
         for device_id in range(num_devices):
             op_device = self.op_device(self, device_id)
-            if self.first_layer_only:
-                layer_list = [layer_list[0]]
-            elif self.last_layer_only:
-                layer_list = [layer_list[-1]]
-        
-            self.op_layers_per_device.append(op_device.expand_layer(layer_list))
+
+            self.op_layers_per_device.append(op_device.expand_layer(self.layer_list))
             self.children.append(op_device)
         
         return self.children, self.op_layers_per_device
@@ -155,6 +180,7 @@ class Operation_Device:
         self.device_id = device_id
         self.weights = parent.weights
         self.externals = self.parent.externals
+        self.extra_dep = []
         self.children = []
         self.batch_size = None
         self.inputs = {}
@@ -181,6 +207,10 @@ class Operation_Device:
             base_wrapper.append_child(dev_wrapper)
             self.outputs[key] = dev_wrapper
     
+    def append_dependency(self, dep):
+        if dep not in self.extra_dep:
+            self.extra_dep.append(dep)
+
     @property
     def impl(self):
         return self.parent.impl
@@ -222,52 +252,101 @@ class Operation_Layer:
         self.externals = op_device.externals
         self.parent = op_device
         self.device_id = op_device.device_id
+        self.prev_op_layer = []
+        self.cuda_event = None
+        self.is_depended_on = False
 
     @property
     def impl(self):
         return self.parent.impl
 
     @property
+    def stream(self):
+        return self.parent.parent.stream
+
+    @property
+    def batch_size(self):
+        return self.parent.batch_size
+
+    @property
     def prerequisites(self):
         dep = []
+        dep.extend(self.parent.extra_dep)
+        # print("init dep: ", self.name, "dep: ", [dep[0].name for dep in dep])
         prev = []
         depend_on_prev = []
+        depend_on_next = []
         for _, input_wrapper in self.parent.inputs.items():
             prev.extend(input_wrapper.prev)
             depend_on_prev.extend(input_wrapper.prev_depend_on_prev_layer)
-
+            depend_on_next.extend(input_wrapper.prev_depend_on_next_layer)
         while len(prev) > 0:
+            assert len(prev) == len(depend_on_prev) == len(depend_on_next), f"Operation '{self.name}' has different number of prev and depend_on_prev connections!\n"
             dep_wrapper = prev.pop()
             prev_layer = depend_on_prev.pop()
+            next_layer = depend_on_next.pop()
+            # if "Rope" in self.name:  
+            #     print("dep_wrapper.owner.name: ", dep_wrapper.owner.name)
+            #     print("dep_wrapper.name: ", dep_wrapper.name)
             if dep_wrapper.owner.isVirtual == False:
-                dep.append((dep_wrapper.owner, prev_layer))
+                flag = False
+                for _, input_wrapper in self.parent.inputs.items():
+                    if dep_wrapper.is_intersect(input_wrapper):
+                        flag = True
+                        break
+                    # print("dep_wrapper.name: ", dep_wrapper.name)
+                dep.append((dep_wrapper.owner, prev_layer, next_layer)) if flag else None
             elif dep_wrapper.owner.isCopy:
-                assert len(dep_wrapper.prev) == 1, f"Copy operation '{dep_wrapper.name}' has more than one prev connections!\n"
-                prev.append(dep_wrapper.prev[0])
-                depend_on_prev.append(prev_layer or dep_wrapper.prev_depend_on_prev_layer[0])
+                for idx, wrapper in enumerate(dep_wrapper.prev):
+                    prev.append(wrapper)
+                    depend_on_prev.append(prev_layer or dep_wrapper.prev_depend_on_prev_layer[idx])
+                    depend_on_next.append(next_layer or dep_wrapper.prev_depend_on_next_layer[idx])
             elif dep_wrapper.owner.isRedist:
                 if dep_wrapper.is_input_wrapper:
-                    assert len(dep_wrapper.prev) == 1, f"Redist operation '{dep_wrapper.name}' has more than one prev connections!\n"
-                    prev.append(dep_wrapper.prev[0])
-                    depend_on_prev.append(prev_layer or dep_wrapper.prev_depend_on_prev_layer[0])
+                    for idx, wrapper in enumerate(dep_wrapper.prev):
+                        prev.append(wrapper)
+                        depend_on_prev.append(prev_layer or dep_wrapper.prev_depend_on_prev_layer[idx])
+                        depend_on_next.append(next_layer or dep_wrapper.prev_depend_on_next_layer[idx])
                 elif dep_wrapper.is_output_wrapper:
-                    input_wrapper_begin_id = None
-                    input_wrapper_end_id = None
-                    tensor_offset = dep_wrapper.tensor_offset
-                    tensor_end = tensor_offset + dep_wrapper.batch_size
                     for idx, input_wrapper in enumerate(dep_wrapper.owner.inputs.values()):
-                        if input_wrapper_begin_id is None and input_wrapper.tensor_offset + input_wrapper.batch_size > tensor_offset:
-                            input_wrapper_begin_id = idx
-                        if input_wrapper_end_id is None and input_wrapper.tensor_offset + input_wrapper.batch_size >= tensor_end:
-                            input_wrapper_end_id = idx
-                            break
-
-                    if input_wrapper_begin_id is None:
-                        continue
-
-                    for idx in range(input_wrapper_begin_id, input_wrapper_end_id + 1):
-                        prev.append(dep_wrapper.owner.inputs[f"input_{idx}"])
-                        depend_on_prev.append(prev_layer)
-                        
+                        # if "Rope" in self.name: 
+                        #     print("input_wrapper.name: ", input_wrapper.name)
+                        #     print("input_wrapper.tensor_offset: ", input_wrapper.tensor_offset)
+                        #     print("input_wrapper.batch_size: ", input_wrapper.batch_size)
+                        #     print("dep_wrapper.tensor_offset: ", dep_wrapper.tensor_offset)
+                        #     print("dep_wrapper.batch_size: ", dep_wrapper.batch_size)
+                        if input_wrapper.is_intersect(dep_wrapper):
+                            # if "Rope" in self.name: 
+                            #     print("added")
+                            prev.append(input_wrapper)
+                            depend_on_prev.append(prev_layer)
+                            depend_on_next.append(next_layer)
+        # print("prerequisites: ", self.name, "dep: ", [dep[0].name for dep in dep])
         return dep
     
+    def reset_op_cuda_status(self):
+        self.prev_op_layer = []
+        self.is_depended_on = False
+        self.cuda_event = None
+
+    def append_prev_op_layer(self, op_layer):
+        self.prev_op_layer.append(op_layer)
+    
+    def set_is_depended_on(self, op_layer):
+        if self.stream != op_layer.stream:
+            self.is_depended_on = True
+
+    def record_cuda_event(self):
+        if self.is_depended_on:
+            if self.cuda_event is None:
+                self.cuda_event = torch.cuda.Event(enable_timing=True)
+            self.cuda_event.record(self.stream)
+            # print("record_cuda_event: ", self.name, "cuda_event: ", self.cuda_event)
+    
+    def wait_cuda_event(self):
+        events = []
+        for op_layer in self.prev_op_layer:
+            if op_layer.cuda_event is not None and self.stream != op_layer.stream:
+                events.append(op_layer.cuda_event)
+        for event in events:
+            self.stream.wait_event(event)

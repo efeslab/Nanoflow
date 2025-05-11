@@ -1,0 +1,279 @@
+import torch
+import time
+
+from operations.operation_base import Operations, Operation_Device, Operation_Layer
+from utils.prof_marker import prof_marker
+from core.IOWrapper import IOWrapper
+from core.weightWrapper import WeightWrapper    
+from core.processWeight import process_weight_none, process_weight_layer
+from operations.impl_base import OperationImpl
+from kvcache.kv import KVCacheNone, KVCacheTorch, DistKVPool, BatchedDistKVCache
+from utils.help_functions import tensor_offset_to_req_idx
+
+
+class DecAttnTorchImpl(OperationImpl):
+    category_tag = "torch"
+    def __init__(self, op_base, stream, device_id):
+        super().__init__(op_base, stream, device_id)
+        self.num_qo_heads = op_base.num_qo_heads
+        self.num_kv_heads = op_base.num_kv_heads
+        self.head_dim = op_base.head_dim
+
+    def run(self, layer, Q, KVCache, output
+    ):
+        with torch.cuda.stream(self.stream):
+            if Q.shape[0] == 0:
+                return
+            scale = 1.0 / (self.head_dim ** 0.5)
+            # Compute group size: how many query heads correspond to one key/value head.
+            group_size = self.num_qo_heads // self.num_kv_heads
+
+            qo_indicies = self.op_base.qo_indicies
+            input_req_idx = self.op_base.input_req_idx
+
+            for i, global_index in enumerate(input_req_idx):
+                # Retrieve the query slice for this batch element.
+                start = qo_indicies[i]
+                end = qo_indicies[i + 1]
+
+                sub_q = Q[start:end, :]  # shape: [n_q, num_qo_heads * head_dim]
+                sub_q = sub_q.view(-1, self.num_qo_heads, self.head_dim)
+                
+                sub_k, sub_v = KVCache.get(layer, global_index) # [n_k, num_kv_heads * head_dim]
+                n_k = sub_k.shape[0]
+
+                sub_k = sub_k.view(n_k, self.num_kv_heads, self.head_dim)
+                sub_v = sub_v.view(n_k, self.num_kv_heads, self.head_dim)
+
+                sub_k = sub_k.repeat_interleave(group_size, dim=1)
+                sub_v = sub_v.repeat_interleave(group_size, dim=1)
+
+                scores = torch.einsum("qhd,khd->qhk", sub_q, sub_k) * scale
+
+                attn_weights = torch.softmax(scores, dim=-1)
+                
+                # Compute attention output as the weighted sum over the value vectors.
+                # Resulting shape: [n_q, num_qo_heads, head_dim]
+                out = torch.einsum("qhk,khd->qhd", attn_weights, sub_v)
+                # Flatten heads back to shape: [n_q, num_qo_heads * head_dim]
+                out = out.reshape(-1, self.num_qo_heads * self.head_dim)
+                # Write the computed output into the operator's output tensor.
+                output[start:end, :].copy_(out)
+
+class DecAttnTorch(Operations):
+    def __init__(self, name):
+        super().__init__(name)
+        self.inputs = {
+            "Q": IOWrapper(self, 'Q')
+        }
+        self.outputs = {
+            "output": IOWrapper(self, 'output')
+        }
+        self.externals = {
+            "KVCache": None
+        }
+        self.impl_map = {}
+        self.init_impl_map()
+        self.batched_decode_wrapper = None
+        self.op_device = DecAttnTorch_Device
+
+    def init_impl_map(self):
+        self.add_impl(DecAttnTorchImpl)
+    
+    def setShape(self, num_kv_heads, num_qo_heads, head_dim, tp_size=1):
+        self.num_kv_heads = num_kv_heads // tp_size
+        self.num_qo_heads = num_qo_heads // tp_size
+        self.head_dim = head_dim
+        self.q_dim = num_qo_heads * head_dim
+        self.updateChildrenIOShape()
+    
+    def update(self, qo_indicies, device_id):
+        self.qo_indicies = qo_indicies
+        io_device = self.children[device_id].inputs["Q"]
+        start_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset)
+        end_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset + io_device.batch_size)
+
+        self.input_req_idx = self.externals["KVCache"].input_req_idx[start_req_idx:end_req_idx]
+    
+    def profile(self):
+        pass
+    
+class DecAttnTorch_Device(Operation_Device):
+    def __init__(self, parent, device):
+        super().__init__(parent, device)
+        self.op_layer = DecAttnTorch_Layer 
+
+    def setShapeForIOWrappers(self):
+        self.inputs["Q"].init_shape((0, self.parent.num_qo_heads* self.parent.head_dim))
+        self.outputs["output"].init_shape((0, self.parent.num_qo_heads * self.parent.head_dim))
+
+class DecAttnTorch_Layer(Operation_Layer):
+    def __init__(self, layer, op_device):
+        super().__init__(layer, op_device=op_device)
+
+    def run(self):
+        Q = self.inputs["Q"].tensor
+        # self.operator_device.parent.impl.run(Q, self.kv_tuple, self.outputs["output"].tensor)
+        self.impl.run(self.layer, Q, self.parent.externals["KVCache"], self.outputs["output"].tensor)
+    
+class PFAttnTorchImpl(OperationImpl):
+    category_tag = "torch"
+    def __init__(self, op_base, stream, device_id):
+        super().__init__(op_base, stream, device_id)
+        self.num_qo_heads = op_base.num_qo_heads
+        self.num_kv_heads = op_base.num_kv_heads
+        self.head_dim = op_base.head_dim
+
+    def run(self, layer, qo_indicies, Q, KVCache, output
+    ):
+        with torch.cuda.stream(self.stream):
+            if Q.shape[0] == 0:
+                return
+            scale = 1.0 / (self.head_dim ** 0.5)
+            # Compute group size: how many query heads correspond to one key/value head.
+            group_size = self.num_qo_heads // self.num_kv_heads
+
+            qo_indicies = self.op_base.qo_indicies
+            input_req_idx = self.op_base.input_req_idx
+
+            for i, global_index in enumerate(input_req_idx):
+                # Retrieve the query slice for this batch element.
+                start = qo_indicies[i]
+                end = qo_indicies[i + 1]
+                # Q is expected to be flattened as [n_total, num_qo_heads * head_dim];
+                # extract the sub-tensor corresponding to this batch element.
+                sub_q = Q[start:end, :]  # shape: [n_q, num_qo_heads * head_dim]
+                sub_q = sub_q.view(-1, self.num_qo_heads, self.head_dim)
+
+                sub_k, sub_v = KVCache.get(layer, global_index)
+                n_k = sub_k.shape[0]
+
+                sub_k = sub_k.view(n_k, self.num_kv_heads, self.head_dim)
+                sub_v = sub_v.view(n_k, self.num_kv_heads, self.head_dim)
+                # Expand (repeat) the keys and values so that they align with the query heads.
+                sub_k = sub_k.repeat_interleave(group_size, dim=1)
+                sub_v = sub_v.repeat_interleave(group_size, dim=1)
+
+                scores = torch.einsum("qhd,khd->qhk", sub_q, sub_k) * scale
+
+                n_q = sub_q.shape[0]
+                n_k = sub_k.shape[0]
+                past_length = max(n_k - n_q, 0)
+                
+                if past_length > 0:
+                    new_mask = torch.tril(torch.ones(n_q, n_q, dtype=torch.bool, device=scores.device))
+                    # For the past tokens (first past_length keys), we allow full attention.
+                    past_mask = torch.ones(n_q, past_length, dtype=torch.bool, device=scores.device)
+                    # Concatenate the masks along the key dimension.
+                    causal_mask = torch.cat([past_mask, new_mask], dim=1)  # shape: [n_q, n_k]
+                else:
+                    # If there is no past context (i.e. n_k == n_q), use a standard lower-triangular mask.
+                    causal_mask = torch.tril(torch.ones(n_q, n_k, dtype=torch.bool, device=scores.device))
+
+                scores = scores.masked_fill(~causal_mask.unsqueeze(1), float("-inf"))
+                
+                # Apply softmax over the key dimension.
+                attn_weights = torch.softmax(scores, dim=-1)
+                
+                out = torch.einsum("qhk,khd->qhd", attn_weights, sub_v)
+
+                out = out.reshape(-1, self.num_qo_heads * self.head_dim)
+                # Write the computed output into th e operator's output tensor.
+                output[start:end, :].copy_(out)
+
+class PFAttnTorch(Operations):
+    def __init__(self, name):
+        super().__init__(name)
+        self.inputs = {
+            "Q": IOWrapper(self, 'Q'),
+        }
+        self.outputs = {
+            "output": IOWrapper(self, 'output')
+        }
+        # Note: for consistency with other operators (like RopeAppend), we expect the external KV cache to be
+        # available as "KVCache". If needed, you can change the key name.
+        self.externals = {
+            "KVCache": None
+        }
+        self.impl_map = {}
+        self.init_impl_map()
+        self.op_device = PFAttnTorch_Device
+
+    def init_impl_map(self):
+        self.add_impl(PFAttnTorchImpl)
+    
+    def setShape(self, num_kv_heads, num_qo_heads, head_dim, tp_size=1):
+        self.num_kv_heads = num_kv_heads // tp_size
+        self.num_qo_heads = num_qo_heads // tp_size
+        self.head_dim = head_dim
+        self.q_dim = num_qo_heads * head_dim
+        self.updateChildrenIOShape()
+    
+    def update(self, qo_indicies, device_id):
+        io_device = self.children[device_id].inputs["Q"]
+        start_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset)
+        end_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset + io_device.batch_size)
+
+        self.qo_indicies = torch.tensor(qo_indicies[start_req_idx:end_req_idx + 1]) - io_device.tensor_offset
+        self.input_req_idx = self.externals["KVCache"].input_req_idx[start_req_idx:end_req_idx]
+    
+
+    def profile(self):
+        input_q = torch.randn(2, self.q_dim, dtype=torch.float16, device='cuda')
+        k_data = torch.randn(2, self.num_kv_heads* self.head_dim, dtype=torch.float16, device='cuda')
+        v_data = torch.randn(2, self.num_kv_heads* self.head_dim, dtype=torch.float16, device='cuda')
+        output_list = []
+        for category_tag, impl in self.impl_map.items():
+            out = torch.zeros((2, self.q_dim), dtype=torch.float16, device='cuda')
+            print("name: ", self.name + f"_{category_tag}")
+            if category_tag == "torch":
+                nokv_cache = KVCacheNone()
+                nokv_cache.put(0, k_data, v_data)
+                impl().run(0, self.head_dim, self.num_qo_heads, self.num_kv_heads, torch.tensor([0, 2], dtype=torch.int32), input_q, [nokv_cache], out)
+                output_list.append(out)
+                print("output: ", out)
+
+                torch_kv_cache = KVCacheTorch()
+                torch_kv_cache.put(0, k_data, v_data)
+                impl().run(0, self.head_dim, self.num_qo_heads, self.num_kv_heads, torch.tensor([0, 2], dtype=torch.int32), input_q, [torch_kv_cache], out)
+                print("output: ", out)
+                output_list.append(out)
+            elif category_tag == "cuda":
+                torch_kv_cache = KVCacheTorch()
+                torch_kv_cache.put(0, k_data, v_data)
+
+                impl().run(0, self.head_dim, self.num_qo_heads, self.num_kv_heads, torch.tensor([0, 2], dtype=torch.int32), input_q, [torch_kv_cache], out)
+                print("output: ", out)
+                output_list.append(out)
+            elif category_tag == "batched_cuda":
+                kv_pool = DistKVPool(1, self.num_kv_heads, self.head_dim, 2048, 7, 1)
+                batched_kv_cache = BatchedDistKVCache(kv_pool, 0)
+
+                k_data = k_data.view(-1, self.num_kv_heads, self.head_dim)
+                v_data = v_data.view(-1, self.num_kv_heads, self.head_dim)
+                batched_kv_cache.pre_allocate(0, 2)
+                batched_kv_cache._pool.put_for_profile(0, 2, k_data, v_data)
+                impl().run(0, self.head_dim, self.num_qo_heads, self.num_kv_heads, torch.tensor([0, 2], dtype=torch.int32), input_q, [batched_kv_cache], out)
+                print("output: ", out)
+                output_list.append(out)
+
+        self.checkConsistencyBetweenImpl(output_list)
+
+    
+class PFAttnTorch_Device(Operation_Device):
+    def __init__(self, parent, device):
+        super().__init__(parent, device)
+        self.op_layer = PFAttnTorch_Layer 
+
+    def setShapeForIOWrappers(self):
+        self.inputs["Q"].init_shape((0, self.parent.num_qo_heads * self.parent.head_dim))
+        self.outputs["output"].init_shape((0, self.parent.num_qo_heads * self.parent.head_dim))
+
+class PFAttnTorch_Layer(Operation_Layer):
+    def __init__(self, layer, op_device):
+        super().__init__(layer=layer, op_device=op_device)
+    
+    def run(self):
+        Q = self.inputs["Q"].tensor
+        self.impl.run(self.layer, self.parent.parent.qo_indicies,  Q, self.parent.externals["KVCache"], self.outputs["output"].tensor)
+        
