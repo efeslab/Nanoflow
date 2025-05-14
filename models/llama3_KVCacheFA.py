@@ -26,7 +26,7 @@ from core.executor import Executor
 
 
 class Pipeline:
-    def __init__(self):
+    def __init__(self, max_seq_len: int = 2048):
         # Set parameters as instance variables.
         self.pipeline_name = "Llama3-8B"
         self.num_kv_heads = 8
@@ -40,6 +40,7 @@ class Pipeline:
         self.num_layers = 32
         self.num_devices = torch.cuda.device_count()
         self.page_size = 64
+        self.max_seq_len = max_seq_len
 
     def init(self, weight_path: str, cached: bool = False):
         self.init_streams()
