@@ -1,8 +1,6 @@
 import transformers
 import torch
 import os, sys
-
-from utils.prof_marker import prof_marker
 sys.path.append("../")
 sys.path.append('../pybind/build')
 os.environ["HF_HOME"] = "/code/hf"
@@ -249,18 +247,18 @@ class Pipeline():
 
     def config_algorithm(self, device_id=0):
         self.gen_embedding.config_tag("torch", device_id)
-        self.layerNormAttn.config_tag("triton", device_id)
+        self.layerNormAttn.config_tag("torch", device_id)
         self.activation.config_tag("torch", device_id)
         self.kqv.config_tag("torch", device_id)
         # self.kqv.config_tag("triton", device_id)
         self.ropeAppend.config_tag("torch:withKVCache", device_id)
         self.decAttn.config_tag("torch", device_id)
         self.pfAttn.config_tag("torch", device_id)
-        self.layerNormFFN.config_tag("triton", device_id)
+        self.layerNormFFN.config_tag("torch", device_id)
         self.o.config_tag("torch", device_id)
         self.ug.config_tag("torch", device_id)
         self.d.config_tag("torch", device_id)
-        self.modelLayerNorm.config_tag("triton", device_id)
+        self.modelLayerNorm.config_tag("torch", device_id)
         self.sample.config_tag("torch", device_id)
         self.getLogits.config_tag("torch", device_id)
 

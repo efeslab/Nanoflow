@@ -198,8 +198,13 @@ class KVCacheFANoPage:
         This function (re)initializes the KV cache with the given batch size,
         and should not be called multiple times for a single batch.
         """
-        if self.k_cache is not None or self.v_cache is not None:
-            logging.warning("Cache already exists, overwriting it.")
+        if self.batch_size == batch_size:
+            return
+        old_k_cache, old_v_cache, old_indicces = (
+            self.k_cache,
+            self.v_cache,
+            self.indices,
+        )
         self.batch_size = batch_size
         self.indices = torch.zeros((self.batch_size,), dtype=torch.int32, device=f"cuda:{self.device_id}")
         self.k_cache = [
@@ -222,6 +227,11 @@ class KVCacheFANoPage:
                 device=f"cuda:{self.device_id}",
             ) for _ in range(self.num_layers)
         ]
+        if old_k_cache is not None and old_v_cache is not None and old_indicces is not None:
+            self.indices[: old_indicces.shape[0]] = old_indicces
+            for i in range(self.num_layers):
+                self.k_cache[i][: old_k_cache[i].shape[0]] = old_k_cache[i]
+                self.v_cache[i][: old_v_cache[i].shape[0]] = old_v_cache[i]
 
     def get(self, layer_id: int, request_id: int) -> tuple[torch.Tensor, torch.Tensor]:
         r"""Get the KV cache for a specific layer and request.

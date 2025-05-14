@@ -39,7 +39,7 @@ class GEMM_N_Parallel(Operations):
         self.init_impl_map()
         self.op_device = GEMM_N_Parallel_Device
 
-    def setParameter(self, alpha = 1, beta = 0):
+    def setParameter(self, alpha: float = 1.0, beta: float = 0.0):
         self.alpha = alpha
         self.beta = beta
         if self.bias == False and self.beta != 0:

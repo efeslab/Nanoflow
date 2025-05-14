@@ -21,6 +21,7 @@ from operations.virtualOp.virtual_ops import Copy, Redist
 from kvcache.kv import KVCacheFANoPage
 from core.weightManager import WeightManager
 from core.bufferAllocate import BufferAllocator
+from core.nanobatchSplit import split_nanobatch
 from core.executor import Executor
 
 
@@ -35,7 +36,7 @@ class Pipeline:
         self.vocab_size = 128256
         self.hidden_dim = 4096
         self.intermediate_dim = 14 * 1024
-        self.batch_size: int | None = None
+        self.batch_size = None
         self.num_layers = 32
         self.num_devices = torch.cuda.device_count()
         self.page_size = 64
@@ -244,44 +245,43 @@ class Pipeline:
             self.operation_layers_per_device.append(op_layers)
 
     def init_dependency(self):
-        self.global_input.outputs["tokens"] >> self.gen_embedding.inputs["token"]
+        self.global_input.outputs["tokens"] >> self.gen_embedding.inputs["token"]  # type: ignore
 
-        self.gen_embedding.outputs["output"] >> self.copy_embedding.inputs["input_0"]
-        self.copy_embedding.outputs["output_0"] >> self.layerNormAttn.inputs["input"]
-        self.copy_embedding.outputs["output_1"] >> self.o.inputs["C"]
+        self.gen_embedding.outputs["output"] >> self.copy_embedding.inputs["input_0"]  # type: ignore
+        self.copy_embedding.outputs["output_0"] >> self.layerNormAttn.inputs["input"]  # type: ignore
+        self.copy_embedding.outputs["output_1"] >> self.o.inputs["C"]  # type: ignore
 
-        self.layerNormAttn.outputs["output"] >> self.kqv.inputs["A"]
+        self.layerNormAttn.outputs["output"] >> self.kqv.inputs["A"]  # type: ignore
 
-        self.kqv.outputs["D"] >> self.ropeAppend.inputs["kqv"]
+        self.kqv.outputs["D"] >> self.ropeAppend.inputs["kqv"]  # type: ignore
 
-        self.ropeAppend.outputs["q"] >> self.redist_p.inputs["input_0"]
-        self.redist_p.outputs["output_0"] >> self.decAttn.inputs["Q"]
-        self.redist_p.outputs["output_1"] >> self.pfAttn.inputs["Q"]
+        self.ropeAppend.outputs["q"] >> self.redist_p.inputs["input_0"]  # type: ignore
+        self.redist_p.outputs["output_0"] >> self.decAttn.inputs["Q"]  # type: ignore
+        self.redist_p.outputs["output_1"] >> self.pfAttn.inputs["Q"]  # type: ignore
 
-        self.decAttn.outputs["output"] >> self.redist_a.inputs["input_0"]
-        self.pfAttn.outputs["output"] >> self.redist_a.inputs["input_1"]
-        self.redist_a.outputs["output_0"] >> self.o.inputs["A"]
+        self.decAttn.outputs["output"] >> self.redist_a.inputs["input_0"]  # type: ignore
+        self.pfAttn.outputs["output"] >> self.redist_a.inputs["input_1"]  # type: ignore
+        self.redist_a.outputs["output_0"] >> self.o.inputs["A"]  # type: ignore
 
-        self.o.outputs["D"] >> self.copy_o.inputs["input_0"]
-        self.copy_o.outputs["output_0"] >> self.layerNormFFN.inputs["input"]
-        self.copy_o.outputs["output_1"] >> self.d.inputs["C"]
+        self.o.outputs["D"] >> self.copy_o.inputs["input_0"]  # type: ignore
+        self.copy_o.outputs["output_0"] >> self.layerNormFFN.inputs["input"]  # type: ignore
+        self.copy_o.outputs["output_1"] >> self.d.inputs["C"]  # type: ignore
 
-        self.layerNormFFN.outputs["output"] >> self.ug.inputs["A"]
+        self.layerNormFFN.outputs["output"] >> self.ug.inputs["A"]  # type: ignore
 
-        self.ug.outputs["D"] >> self.activation.inputs["input"]
+        self.ug.outputs["D"] >> self.activation.inputs["input"]  # type: ignore
 
-        self.activation.outputs["output"] >> self.d.inputs["A"]
+        self.activation.outputs["output"] >> self.d.inputs["A"]  # type: ignore
 
+        self.d.outputs["D"] >> self.copy_d.inputs["input_0"]  # type: ignore
+        self.copy_d.outputs["output_0"] >> (self.copy_embedding.inputs["input_1"], True)  # type: ignore
+        self.copy_d.outputs["output_1"] >> self.modelLayerNorm.inputs["input"]  # type: ignore
 
-        self.d.outputs["D"] >> self.copy_d.inputs["input_0"]
-        self.copy_d.outputs["output_0"] >> (self.copy_embedding.inputs["input_1"], True)
-        self.copy_d.outputs["output_1"] >> self.modelLayerNorm.inputs["input"]
+        self.modelLayerNorm.outputs["output"] >> self.getLogits.inputs["A"]  # type: ignore
 
-        self.modelLayerNorm.outputs["output"] >> self.getLogits.inputs["A"]
+        self.getLogits.outputs["D"] >> self.sample.inputs["logits"]  # type: ignore
 
-        self.getLogits.outputs["D"] >> self.sample.inputs["logits"]
-
-        self.sample.outputs["tokens"] >> self.global_output.inputs["tokens"]
+        self.sample.outputs["tokens"] >> self.global_output.inputs["tokens"]  # type: ignore
 
         for operation in self.operation_list + self.virtual_operation_list:
             operation.checkConnection()
@@ -321,23 +321,22 @@ class Pipeline:
         weight_manager = WeightManager(self.pipeline_name, self.num_devices, cached)
         if not cached:
             print("load from safe tensor")
-            weight_manager.load_from_safe_tensor(weight_path)
-        weight_manager.set_weight(self.operation_list)
+            weight_manager.load_from_safe_tensor(weight_path)  # type: ignore
+        weight_manager.set_weight(self.operation_list)  # type: ignore
         torch.cuda.empty_cache()
 
-    def config_batch_size(self, decode_flag: bool, device_id: int = 0):
+    def clear_batch_size(self, device_id: int = 0):
         # init the batchsize to None
-        for op_device in self.operation_device_list[device_id]:  # type: ignore
+        for op_device in self.operation_device_list[device_id]:
             op_device.setBatchSize(None)  # type: ignore
 
+    def config_batch_size(self, decode_batchsize: int, device_id: int = 0):
         self.global_input_devices[device_id].setBatchSize(self.batch_size)  # type: ignore
-        self.decAttn_devices[device_id].setBatchSize(0)  # type: ignore
-        if decode_flag:
-            self.decAttn_devices[device_id].setBatchSize(self.batch_size)  # type: ignore
+        self.decAttn_devices[device_id].setBatchSize(decode_batchsize)  # type: ignore
 
     def config_algorithm(self, device_id: int = 0):
         self.gen_embedding.config_tag("torch", device_id)  # type: ignore
-        self.layerNormAttn.config_tag("triton", device_id)  # type: ignore
+        self.layerNormAttn.config_tag("torch", device_id)  # type: ignore
         self.activation.config_tag("torch", device_id)  # type: ignore
         self.kqv.config_tag("torch", device_id)  # type: ignore
         self.ropeAppend.config_tag("flash_attn_no_page", device_id) # type: ignore
@@ -347,129 +346,148 @@ class Pipeline:
         self.o.config_tag("torch", device_id)  # type: ignore
         self.ug.config_tag("torch", device_id)  # type: ignore
         self.d.config_tag("torch", device_id)  # type: ignore
-        self.modelLayerNorm.config_tag("triton", device_id)  # type: ignore
+        self.modelLayerNorm.config_tag("torch", device_id)  # type: ignore
         self.sample.config_tag("torch", device_id)  # type: ignore
         self.getLogits.config_tag("torch", device_id)  # type: ignore
 
 
     def config_streams(self):
-        self.global_input.set_stream(self.streams["GEMM"])
-        self.gen_embedding.set_stream(self.streams["GEMM"])
-        self.layerNormAttn.set_stream(self.streams["GEMM"])
-        self.activation.set_stream(self.streams["GEMM"])
-        self.kqv.set_stream(self.streams["GEMM"])
-        self.ropeAppend.set_stream(self.streams["GEMM"])
-        self.decAttn.set_stream(self.streams["GEMV"])
-        self.pfAttn.set_stream(self.streams["GEMV"])
-        self.layerNormFFN.set_stream(self.streams["GEMM"])
-        self.o.set_stream(self.streams["GEMM"])
-        self.ug.set_stream(self.streams["GEMM"])
-        self.d.set_stream(self.streams["GEMM"])
-        self.modelLayerNorm.set_stream(self.streams["GEMM"])
-        self.sample.set_stream(self.streams["GEMM"])
-        self.getLogits.set_stream(self.streams["GEMM"])
-        self.global_output.set_stream(self.streams["GEMM"])
+        self.global_input.set_stream(self.streams["GEMM"])  # type: ignore
+        self.gen_embedding.set_stream(self.streams["GEMM"])  # type: ignore
+        self.layerNormAttn.set_stream(self.streams["GEMM"])  # type: ignore
+        self.activation.set_stream(self.streams["GEMM"])  # type: ignore
+        self.kqv.set_stream(self.streams["GEMM"])  # type: ignore
+        self.ropeAppend.set_stream(self.streams["GEMM"])  # type: ignore
+        self.decAttn.set_stream(self.streams["GEMV"])  # type: ignore
+        self.pfAttn.set_stream(self.streams["GEMV"])  # type: ignore
+        self.layerNormFFN.set_stream(self.streams["GEMM"])  # type: ignore
+        self.o.set_stream(self.streams["GEMM"])  # type: ignore
+        self.ug.set_stream(self.streams["GEMM"])  # type: ignore
+        self.d.set_stream(self.streams["GEMM"])  # type: ignore
+        self.modelLayerNorm.set_stream(self.streams["GEMM"])  # type: ignore
+        self.sample.set_stream(self.streams["GEMM"])  # type: ignore
+        self.getLogits.set_stream(self.streams["GEMM"])  # type: ignore
+        self.global_output.set_stream(self.streams["GEMM"])  # type: ignore
 
+    def nanobatch_split(self, total_batchsize: int, decode_batchsize: int):
+        op_nanobatch_info_map = {
+            "LayerNormAttn": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
+            "KQV": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
+            "RopeAppend": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
+            "O": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
+            "LayerNormFFN": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
+            "UG": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
+            "Activation": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
+            "D": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
+        }
+        extra_links = {
+            # TODO: add extra links for virtual ops
+            # "KQV0": "KQV1",
+            # "RopeAppend0": "RopeAppend1",
+            "RopeAppend0": ("O1", False, False),
+            "RopeAppend1": ("O0", False, True),
+        }
 
-    def update(
-        self, input_ids: list[list[int]], decode_flag: bool = False, device_id: int = 0
-    ):
-        print(input_ids)
-        self.input_ids = input_ids
-        # concatenate input_ids into a single tensor
-        flattened = [item for sublist in input_ids for item in sublist]
-        if len(flattened) != self.batch_size:
-            self.batch_size = len(flattened)
-            if not self.kv_cache.initialized:
-                self.kv_cache.update(len(input_ids))
-            self.config_batch_size(decode_flag, device_id)
-            self.update_allocate_buffers(device_id)  # type: ignore
-            print("finish update_allocate_buffers")
-            self.config_algorithm(device_id)
-            self.init_executor(device_id)
-        input_tensor = torch.tensor(
-            flattened, dtype=torch.int32, device=f"cuda:{device_id}"
-        )
-        # get cumulative sum of the number of tokens in each input
-        request_length = torch.tensor(
-            [len(x) for x in input_ids], dtype=torch.int32, device=f"cuda:{device_id}"
-        )
-        self.cumsum_input = torch.cat(
-            [
-                torch.tensor([0], dtype=torch.int32, device=f"cuda:{device_id}"),
-                torch.cumsum(request_length, dim=0, dtype=torch.int32),
-            ]
-        )
-
-        # update rev_input_indptr and per_token_offset
-        rev_input_indptr_list: list[int] = []
-        per_token_offset_list: list[int] = []
-        for i in range(len(self.cumsum_input) - 1):
-            start = self.cumsum_input[i]
-            end = self.cumsum_input[i + 1]
-            offset = self.kv_cache.get_indices(0, i) or 0
-            # append i to the rev_input_indptr for end-start times
-            rev_input_indptr_list.extend([i] * (end - start))
-            # extend the per_token_offset with a list from last_offest to last_offest + (end - start)
-            per_token_offset_list.extend(list(range(offset, int(offset + (end - start).item()))))
-
-        self.rev_input_indptr = torch.tensor(rev_input_indptr_list, dtype=torch.int32, device=f'cuda:{device_id}')
-        self.per_token_offset = torch.tensor(per_token_offset_list, dtype=torch.int32, device=f'cuda:{device_id}')
-
-        self.global_input.children[device_id].outputs["tokens"].tensor[  # type: ignore
-            : input_tensor.shape[0]
-        ].copy_(input_tensor)
-        self.ropeAppend.update(self.page_size, self.cumsum_input, None, None, None, self.rev_input_indptr, self.per_token_offset, decode_flag) # type: ignore
-        self.decAttn.update(self.cumsum_input, None, None, None, self.page_size)  # type: ignore
-        self.pfAttn.update(self.cumsum_input, None, None, None, self.page_size)  # type: ignore
-
-    def update_allocate_buffers(self, device_id: int = 0):
+        new_operation_list, addtional_virtual_ops = split_nanobatch(self.operation_list, op_nanobatch_info_map, extra_links)
+        self.operation_device_list = []
+        self.operation_layers_per_device = []
+        for i in range(self.num_devices):
+            op_devices = []
+            op_layers = []
+            for op in new_operation_list + self.virtual_operation_list + addtional_virtual_ops:
+                print("op.name", op.name)
+                op_devices.append(op.children[i])
+            for operation in new_operation_list:
+                op_layers.extend(operation.op_layers_per_device[i])
+            self.operation_device_list.append(op_devices)
+            self.operation_layers_per_device.append(op_layers)
+    
+    def update(self, new_input_infos, decode_batchsize=0, device_id=0):
+        self.input_req_idx = []
+        self.input_ids = []
+        with prof_marker("update_step_0"):
+            for item in new_input_infos:
+                # print("item", item)
+                self.input_req_idx.append(item[0])
+                self.input_ids.append(item[1])
+        with prof_marker("update_step_1"):
+            # concatenate input_ids into a single tensor
+            flattened = [item for sublist in self.input_ids for item in sublist]
+        with prof_marker("update_step_2"):
+            if len(flattened) != self.batch_size:
+                self.batch_size = len(flattened)
+                # print(f"batch_size: {self.batch_size}")
+                # print("decode_batchsize: ", decode_batchsize)
+                self.clear_batch_size(device_id)
+                self.config_batch_size(decode_batchsize, device_id)
+                self.nanobatch_split(self.batch_size, decode_batchsize)
+                self.update_allocate_buffers(device_id)
+                # print("finish update_allocate_buffers")
+                self.config_algorithm(device_id)
+                self.init_executor(device_id)
+        with prof_marker("update_step_3"):  # type: ignore
+            input_tensor = torch.tensor(flattened, dtype=torch.int32, device=f'cuda:{device_id}')
+            # get cumulative sum of the number of tokens in each input
+        with prof_marker("update_step_4"):
+            request_length = torch.tensor([len(x) for x in self.input_ids], dtype=torch.int32, device='cpu')
+        with prof_marker("update_step_5"):
+            self.cumsum_input = torch.cat([torch.tensor([0], dtype=torch.int32, device='cpu'), torch.cumsum(request_length, dim=0, dtype=torch.int32)]).tolist()
+        with prof_marker("update_step_6"):
+            self.kv_cache.update(len(self.input_ids))
+        with prof_marker("update_step_7"):
+            self.global_input.children[device_id].outputs["tokens"].tensor.copy_(input_tensor)
+        with prof_marker("update_step_8"):
+            self.ropeAppend.update(self.cumsum_input, decode_batchsize, device_id)
+        with prof_marker("update_step_9"):
+            self.decAttn.update(self.cumsum_input, device_id)
+        with prof_marker("update_step_10"):
+            self.pfAttn.update(self.cumsum_input, device_id)
+        
+    def update_allocate_buffers(self, device_id):
         # Build list of buffers(op_device)
         buffers_list = []
         for operation in self.operation_device_list[device_id]:
-            for _, wrapper in operation.inputs.items():  # type: ignore
-                buffers_list.append(wrapper)  # type: ignore
-            for _, wrapper in operation.outputs.items():  # type: ignore
-                buffers_list.append(wrapper)  # type: ignore
+            for _, wrapper in operation.inputs.items():
+                buffers_list.append(wrapper)
+            for _, wrapper in operation.outputs.items():
+                buffers_list.append(wrapper)
 
         # Allocate buffers for each devices seperatly
-        bufferAllocator = BufferAllocator(buffers_list)  # type: ignore
+        bufferAllocator = BufferAllocator(buffers_list)
         bufferAllocator.create_dependency_graph()
         bufferAllocator.set_all_batchsize_by_linear_programming()
-
-        bufferAllocator.allocate_buffer(device_id)  # type: ignore
-        print(
-            f"Total allocated: {bufferAllocator.total_allocated / 1024 / 1024} MB in device {device_id}"
-        )
+        
+        bufferAllocator.allocate_buffer(device_id)
+        print(f"Total allocated: {bufferAllocator.total_allocated / 1024 / 1024} MB in device {device_id}")
 
     def profile(self):
         for operation in self.operation_list:
-            operation.profile()  # type: ignore
+            operation.profile()
 
     def search_profile_data(self):
-        operation_base = Operations("")
+        operation_base = Operations()
         operation_base.search_profile_data()
 
-    def run(
-        self,
-        rank: int = 0,
-        file_name: str = "out-operator_layer_test",
-        filefolder_name: str = "llama3-kv-out-rope_test",
-    ):
+    def run(self, rank=0, file_name="out-torch-cycle2", filefolder_name="llama3-torch-cycle2"):
 
-        assert isinstance(self.batch_size, int), "batch_size should be set before run"
-        temp_out = torch.zeros(self.batch_size, dtype=torch.int32, device="cuda")
+        temp_out = torch.zeros(self.batch_size, dtype=torch.int32, device='cuda')
 
         os.makedirs(f"./{filefolder_name}", exist_ok=True)
 
-        self.executor.execute({}, temp_out)  # type: ignore
+        self.executor.execute({}, temp_out)
         # self.executor.print_debug(file_name, rank, filefolder_name=filefolder_name, output=temp_out)
 
-        with prof_marker("after_execute_before_return"):  # type: ignore
+        with prof_marker("after_execute_before_return"):
             temp_out = temp_out.cpu()
-            new_tokens = [[temp_out[idx - 1].item()] for idx in self.cumsum_input[1:]]
-        return new_tokens
-
+        with prof_marker("after_execute_step_1"):
+            new_tokens = [ [temp_out[idx-1].item()] for idx in self.cumsum_input[1:]]
+        with prof_marker("after_execute_step_2"):
+            output = []
+        with prof_marker("after_execute_step_3"):
+            for req_idx, new_token in zip(self.input_req_idx, new_tokens):
+                # print(f"req_idx: {req_idx}, new_token: {new_token}")
+                output.append((req_idx, new_token))
+        return output
 
 if __name__ == "__main__":
     # remove the file performance.db
