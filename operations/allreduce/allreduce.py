@@ -8,8 +8,8 @@ from operations.impl_base import OperationImpl
 
 class AllReduceTorchImpl(OperationImpl):
     category_tag = "torch"
-    def __init__(self, op_base, device_id):
-        super().__init__(op_base, device_id)
+    def __init__(self, op_base, device):
+        super().__init__(op_base, device)
         self.tp_size = op_base.tp_size
         self.subgroup = op_base.subgroup
         print(f"subgroup: {self.subgroup}")

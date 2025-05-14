@@ -2,7 +2,7 @@ import torch
 import triton
 import platform_config
 from operations.impl_base import OperationImpl
-from .triton.kernels.sm_constraint_gemm import gemm_kernel_persistent, gemm_kernel
+from pybind_triton_kernels.triton_gemm.src.kernels import gemm_kernel_persistent
 
 class GEMMTorchImpl(OperationImpl):
     category_tag = "torch"
@@ -41,13 +41,13 @@ class GEMMTritonImpl(OperationImpl):
         with torch.cuda.stream(self.stream):
             D = self.outputs["D"].tensor
             A = self.inputs["A"].tensor
-            C = self.inputs["C"].tensor if self.bias else torch.empty((self.M, self.N), dtype=torch.float16, device=f"cuda:{self.device_id}")
+            C = self.inputs["C"].tensor if self.bias else torch.empty((self.M, self.N), dtype=torch.float16, device=self.device)
 
             stride_am, stride_ak = A.stride()
             stride_bk, stride_bn = B.stride()
             stride_cm, stride_cn = C.stride()
 
-            NUM_SMS = torch.cuda.get_device_properties(self.device_id).multi_processor_count
+            NUM_SMS = torch.cuda.get_device_properties(self.device).multi_processor_count
 
             grid = lambda META: (
                 min(
@@ -77,7 +77,7 @@ class GEMMTritonImpl(OperationImpl):
 
 
 if platform_config.PLATFORM_CUDA:
-    import pybind.build.bind_gemm as bind_gemm
+    import bind_gemm
     class GEMMCudaImpl(OperationImpl):
         category_tag = "cuda"
         impl_tag_profile = "SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto"
@@ -97,7 +97,7 @@ if platform_config.PLATFORM_CUDA:
                     bind_gemm.configGEMM(impl_tag, self.name, self.inputs["A"].tensor, self.inputs["C"].tensor, self.outputs["D"].tensor, self.M, self.N, self.K, self.alpha, self.beta)
                 else:
                     # print("GEMMCudaImpl config", self.name, "M:", self.M, "N:", self.N, "K:", self.K)
-                    bind_gemm.configGEMM(impl_tag, self.name, self.inputs["A"].tensor, torch.empty((self.M, self.N), dtype=torch.float16, device=f"cuda:{self.device_id}"), self.outputs["D"].tensor, self.M, self.N, self.K, self.alpha, self.beta)
+                    bind_gemm.configGEMM(impl_tag, self.name, self.inputs["A"].tensor, torch.empty((self.M, self.N), dtype=torch.float16, device=self.device), self.outputs["D"].tensor, self.M, self.N, self.K, self.alpha, self.beta)
 
         # def profile(self, impl_tag):
 

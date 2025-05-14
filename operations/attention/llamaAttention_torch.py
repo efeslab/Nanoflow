@@ -8,13 +8,13 @@ from core.weightWrapper import WeightWrapper
 from core.processWeight import process_weight_none, process_weight_layer
 from operations.impl_base import OperationImpl
 from kvcache.kv import KVCacheNone, KVCacheTorch, DistKVPool, BatchedDistKVCache
-from utils.help_functions import tensor_offset_to_req_idx
+from utils.util_functions import tensor_offset_to_req_idx
 
 
 class DecAttnTorchImpl(OperationImpl):
     category_tag = "torch"
-    def __init__(self, op_base, stream, device_id):
-        super().__init__(op_base, stream, device_id)
+    def __init__(self, op_base, stream, device):
+        super().__init__(op_base, stream, device)
         self.num_qo_heads = op_base.num_qo_heads
         self.num_kv_heads = op_base.num_kv_heads
         self.head_dim = op_base.head_dim
@@ -87,9 +87,9 @@ class DecAttnTorch(Operations):
         self.q_dim = num_qo_heads * head_dim
         self.updateChildrenIOShape()
     
-    def update(self, qo_indicies, device_id):
+    def update(self, qo_indicies, device):
         self.qo_indicies = qo_indicies
-        io_device = self.children[device_id].inputs["Q"]
+        io_device = self.children[device].inputs["Q"]
         start_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset)
         end_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset + io_device.batch_size)
 
@@ -118,8 +118,8 @@ class DecAttnTorch_Layer(Operation_Layer):
     
 class PFAttnTorchImpl(OperationImpl):
     category_tag = "torch"
-    def __init__(self, op_base, stream, device_id):
-        super().__init__(op_base, stream, device_id)
+    def __init__(self, op_base, stream, device):
+        super().__init__(op_base, stream, device)
         self.num_qo_heads = op_base.num_qo_heads
         self.num_kv_heads = op_base.num_kv_heads
         self.head_dim = op_base.head_dim
@@ -209,8 +209,8 @@ class PFAttnTorch(Operations):
         self.q_dim = num_qo_heads * head_dim
         self.updateChildrenIOShape()
     
-    def update(self, qo_indicies, device_id):
-        io_device = self.children[device_id].inputs["Q"]
+    def update(self, qo_indicies, device):
+        io_device = self.children[device].inputs["Q"]
         start_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset)
         end_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset + io_device.batch_size)
 

@@ -1,7 +1,5 @@
 import torch
-import sys
 import time
-sys.path.append('../../pybind/build')
 
 from operations.operation_base import Operations, Operation_Device, Operation_Layer
 from core.IOWrapper import IOWrapper

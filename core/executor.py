@@ -74,7 +74,7 @@ class Executor():
                 torch.cuda.synchronize()
                 output.copy_(op.inputs["tokens"].tensor)
 
-    def print_debug(self, filename="out.txt", rank=0, filefolder_name = None, output=None):
+    def print_debug(self, filename="out.txt", device="cuda:0", filefolder_name = None, output=None):
         file = f"{filename}"
 
         with open(file, "w") as f:
@@ -91,10 +91,10 @@ class Executor():
 
                 for weights in op.weights.values():
                     f.write(f"[{op.name}_{weights.name}]\n")
-                    f.write(str(weights.weight_map[rank][op.layer]))
+                    f.write(str(weights.weight_map[device][op.layer]))
                     f.write("\n")
-                    f.write(str(weights.weight_map[rank][op.layer].shape))
-                    torch.save(weights.weight_map[rank][op.layer].cpu(), f"./{filefolder_name}/{op.name}_{weights.name}")
+                    f.write(str(weights.weight_map[device][op.layer].shape))
+                    torch.save(weights.weight_map[device][op.layer].cpu(), f"./{filefolder_name}/{op.name}_{weights.name}")
 
                 f.flush()
 

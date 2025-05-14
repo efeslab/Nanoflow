@@ -12,15 +12,15 @@ from core.processWeight import process_weight_none, process_weight_layer
 from operations.impl_base import OperationImpl
 from kvcache.kv import KVCacheNone, KVCacheTorch, DistKVPool, BatchedDistKVCache
 from utils.prof_marker import prof_marker
-from utils.help_functions import tensor_offset_to_req_idx
+from utils.util_functions import tensor_offset_to_req_idx
 
         
 if platform_config.PLATFORM_CUDA:
     import bind_ropeappend
     class RopeAppendCudaImpl(OperationImpl):
         category_tag = "cuda"
-        def __init__(self, op_base, stream, device_id):
-            super().__init__(op_base, stream, device_id)
+        def __init__(self, op_base, stream, device):
+            super().__init__(op_base, stream, device)
             # self.page_size = op_base.page_size
             self.num_kv_heads = op_base.num_kv_heads
             self.num_qo_heads = op_base.num_qo_heads
@@ -91,20 +91,20 @@ class RopeAppendFlashinfer(Operations):
         self.head_dim = head_dim
         self.updateChildrenIOShape()
 
-    def update(self, qo_indicies, decode_batchsize, device_id):
+    def update(self, qo_indicies, decode_batchsize, device):
         if self.isNanoSplit:
             for nano_op in self.nano_ops:
-                nano_op.update(qo_indicies, decode_batchsize, device_id)
+                nano_op.update(qo_indicies, decode_batchsize, device)
         else:
             """Stores the starting indices for the query/key segments."""
-            io_device = self.children[device_id].inputs["kqv"]
+            io_device = self.children[device].inputs["kqv"]
             self.qo_indicies = qo_indicies
-            self.kv_indptr =  self.externals["KVCache"].kv_indptr_devices[device_id]
-            self.kv_indices = self.externals["KVCache"].kv_indices_devices[device_id]
-            self.kv_last_page_len = self.externals["KVCache"].kv_last_page_len_devices[device_id]
+            self.kv_indptr =  self.externals["KVCache"].kv_indptr_devices[device]
+            self.kv_indices = self.externals["KVCache"].kv_indices_devices[device]
+            self.kv_last_page_len = self.externals["KVCache"].kv_last_page_len_devices[device]
 
-            self.rev_input_indptr = self.externals["KVCache"].rev_input_indptr_devices[device_id][io_device.tensor_offset: io_device.tensor_offset + io_device.batch_size]
-            self.per_token_offset = self.externals["KVCache"].per_token_offset_devices[device_id][io_device.tensor_offset: io_device.tensor_offset + io_device.batch_size]
+            self.rev_input_indptr = self.externals["KVCache"].rev_input_indptr_devices[device][io_device.tensor_offset: io_device.tensor_offset + io_device.batch_size]
+            self.per_token_offset = self.externals["KVCache"].per_token_offset_devices[device][io_device.tensor_offset: io_device.tensor_offset + io_device.batch_size]
             self.page_size = self.externals["KVCache"].page_size
             self.decode_batchsize = decode_batchsize
 
@@ -192,7 +192,7 @@ class RopeAppendFlashinfer_Device(Operation_Device):
 class RopeAppendFlashinfer_Layer(Operation_Layer):
     def __init__(self, layer, op_device):
         super().__init__(layer, op_device)
-        self.k_data_ptr, self.v_data_ptr = op_device.externals["KVCache"].get_whole_kv_data(self.device_id, self.layer)
+        self.k_data_ptr, self.v_data_ptr = op_device.externals["KVCache"].get_whole_kv_data(self.device, self.layer)
 
     def run(self):
         self.impl.run(self.layer, self.inputs["kqv"].tensor, self.k_data_ptr, self.v_data_ptr, self.outputs["q"].tensor)

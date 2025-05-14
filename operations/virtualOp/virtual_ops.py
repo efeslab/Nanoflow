@@ -62,7 +62,7 @@ class Redist(Operations):
         )
         link_allinputs_to_alloutputs(self.inputs, self.outputs)
         # link_firstinputs_to_alloutputs(self.inputs["input_0"], self.outputs)
-        self.children = []
+        self.children = {}
         self.op_device = Redist_Device
 
     def checkConnection(self):
@@ -76,14 +76,14 @@ class Redist(Operations):
     def set_input(self, updated_input):
         assert len(self.inputs) == 1, "Nano_Dist operation should have only one input"
         updated_input.owner = self
-        updated_input.children = []
+        updated_input.children = {}
         self.inputs["input_0"] = updated_input
         self.relink_inputs_and_outputs()
 
     def set_output(self, updated_output):
         assert len(self.outputs) == 1, "Nano_Dist operation should have only one output"
         updated_output.owner = self
-        updated_output.children = []
+        updated_output.children = {}
         self.outputs["output_0"] = updated_output
         self.relink_inputs_and_outputs()
 

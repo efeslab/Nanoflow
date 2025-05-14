@@ -10,14 +10,14 @@ from core.weightWrapper import WeightWrapper
 from core.processWeight import process_weight_none, process_weight_layer
 from operations.impl_base import OperationImpl
 from kvcache.kv import KVCacheNone, KVCacheTorch, DistKVPool, BatchedDistKVCache
-from utils.help_functions import tensor_offset_to_req_idx
+from utils.util_functions import tensor_offset_to_req_idx
 
 if platform_config.PLATFORM_CUDA:
     import flashinfer
     class DecAttnCudaImpl(OperationImpl):
         category_tag = "cuda"
-        def __init__(self, op_base, stream, device_id):
-            super().__init__(op_base, stream, device_id)
+        def __init__(self, op_base, stream, device):
+            super().__init__(op_base, stream, device)
             self.num_qo_heads = op_base.num_qo_heads
             self.num_kv_heads = op_base.num_kv_heads
             self.head_dim = op_base.head_dim
@@ -51,9 +51,9 @@ if platform_config.PLATFORM_CUDA:
 
     class DecAttnBatchedCudaImpl(OperationImpl):
         category_tag = "batched_cuda"
-        def __init__(self, op_base, stream, device_id):
-            super().__init__(op_base, stream, device_id)
-            self.workspace_buffer = torch.empty(32 * 1024 * 1024, dtype=torch.int8).to(self.device_id)
+        def __init__(self, op_base, stream, device):
+            super().__init__(op_base, stream, device)
+            self.workspace_buffer = torch.empty(32 * 1024 * 1024, dtype=torch.int8).to(self.device)
             self.wrapper = flashinfer.decode.BatchDecodeWithPagedKVCacheWrapper(
                     self.workspace_buffer, "HND", False, True
                 )
@@ -116,15 +116,15 @@ class DecAttnFlashinfer(Operations):
         self.q_dim = num_qo_heads * head_dim
         self.updateChildrenIOShape()
     
-    def update(self, qo_indicies, device_id):
+    def update(self, qo_indicies, device):
         self.qo_indicies = qo_indicies
-        io_device = self.children[device_id].inputs["Q"]
+        io_device = self.children[device].inputs["Q"]
         start_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset)
         end_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset + io_device.batch_size)
 
-        self.kv_indptr =  self.externals["KVCache"].kv_indptr_devices[device_id][start_req_idx: end_req_idx + 1]
-        self.kv_indices = self.externals["KVCache"].kv_indices_devices[device_id]
-        self.kv_last_page_len = self.externals["KVCache"].kv_last_page_len_devices[device_id][start_req_idx: end_req_idx]
+        self.kv_indptr =  self.externals["KVCache"].kv_indptr_devices[device][start_req_idx: end_req_idx + 1]
+        self.kv_indices = self.externals["KVCache"].kv_indices_devices[device]
+        self.kv_last_page_len = self.externals["KVCache"].kv_last_page_len_devices[device][start_req_idx: end_req_idx]
 
         self.page_size = self.externals["KVCache"].page_size
         if self.impl.category_tag == "batched_cuda":
@@ -145,7 +145,7 @@ class DecAttnFlashinfer_Device(Operation_Device):
 class DecAttnFlashinfer_Layer(Operation_Layer):
     def __init__(self, layer, op_device):
         super().__init__(layer, op_device=op_device)
-        self.k_data_ptr, self.v_data_ptr = op_device.externals["KVCache"].get_whole_kv_data(self.device_id, self.layer)
+        self.k_data_ptr, self.v_data_ptr = op_device.externals["KVCache"].get_whole_kv_data(self.device, self.layer)
         self.kv_tuple = tuple([self.k_data_ptr, self.v_data_ptr])
 
     def run(self):
@@ -158,8 +158,8 @@ class DecAttnFlashinfer_Layer(Operation_Layer):
 if platform_config.PLATFORM_CUDA:
     class PFAttnCudaImpl(OperationImpl):
         category_tag = "cuda"
-        def __init__(self, op_base, stream, device_id):
-            super().__init__(op_base, stream, device_id)
+        def __init__(self, op_base, stream, device):
+            super().__init__(op_base, stream, device)
             self.num_qo_heads = op_base.num_qo_heads
             self.num_kv_heads = op_base.num_kv_heads
             self.head_dim = op_base.head_dim
@@ -201,9 +201,9 @@ if platform_config.PLATFORM_CUDA:
 
     class PFAttnBatchedCudaImpl(OperationImpl):
         category_tag = "batched_cuda"
-        def __init__(self, op_base, stream, device_id):
-            super().__init__(op_base, stream, device_id)
-            self.workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8).to(self.device_id)
+        def __init__(self, op_base, stream, device):
+            super().__init__(op_base, stream, device)
+            self.workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8).to(self.device)
             self.wrapper = flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper(
                 self.workspace_buffer, "HND"
             )
@@ -270,20 +270,20 @@ class PFAttnFlashinfer(Operations):
         self.q_dim = num_qo_heads * head_dim
         self.updateChildrenIOShape()
     
-    def update(self, qo_indicies, device_id,
+    def update(self, qo_indicies, device,
              causal=True, logits_soft_cap=0.0, pos_encoding_mode="NONE"):
         """Stores the query offset indices for each batch element.  
         qo_indicies should be a list (or tensor) of length (batch_size + 1) such that for each batch index i,  
         the query slice is Q[qo_indicies[i]:qo_indicies[i+1], :].
         """
-        io_device = self.children[device_id].inputs["Q"]
+        io_device = self.children[device].inputs["Q"]
         start_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset)
         end_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset + io_device.batch_size)
 
-        self.qo_indicies = torch.tensor(qo_indicies[start_req_idx: end_req_idx + 1], dtype=torch.int32, device=f"cuda:{device_id}") - io_device.tensor_offset
-        self.kv_indptr =  self.externals["KVCache"].kv_indptr_devices[device_id][start_req_idx: end_req_idx + 1]
-        self.kv_indices = self.externals["KVCache"].kv_indices_devices[device_id]
-        self.kv_last_page_len = self.externals["KVCache"].kv_last_page_len_devices[device_id][start_req_idx: end_req_idx]
+        self.qo_indicies = torch.tensor(qo_indicies[start_req_idx: end_req_idx + 1], dtype=torch.int32, device=device) - io_device.tensor_offset
+        self.kv_indptr =  self.externals["KVCache"].kv_indptr_devices[device][start_req_idx: end_req_idx + 1]
+        self.kv_indices = self.externals["KVCache"].kv_indices_devices[device]
+        self.kv_last_page_len = self.externals["KVCache"].kv_last_page_len_devices[device][start_req_idx: end_req_idx]
 
         self.page_size = self.externals["KVCache"].page_size
         if self.impl.category_tag == "batched_cuda":
@@ -336,7 +336,7 @@ class PFAttnFlashinfer_Device(Operation_Device):
 class PFAttnFlashinfer_Layer(Operation_Layer):
     def __init__(self, layer, op_device):
         super().__init__(layer=layer, op_device=op_device)
-        self.k_data_ptr, self.v_data_ptr = op_device.externals["KVCache"].get_whole_kv_data(self.device_id, self.layer)
+        self.k_data_ptr, self.v_data_ptr = op_device.externals["KVCache"].get_whole_kv_data(self.device, self.layer)
         self.kv_tuple = tuple([self.k_data_ptr, self.v_data_ptr])
 
     def run(self):

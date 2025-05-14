@@ -37,7 +37,7 @@ def split_nanobatch(op_list: List[Operations], op_nano_info_map, extra_links):
 
         for i in range(num_nano_op):
             copied_op = op.copy_nano(i)
-            for child in copied_op.children:
+            for child in copied_op.children.values():
                 child.setBatchSize(batch_range[i])
 
             for j, (key, value) in enumerate(copied_op.inputs.items()):

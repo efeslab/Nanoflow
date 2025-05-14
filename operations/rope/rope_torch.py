@@ -12,14 +12,14 @@ from core.processWeight import process_weight_none, process_weight_layer
 from operations.impl_base import OperationImpl
 from kvcache.kv import KVCacheNone, KVCacheTorch, DistKVPool, BatchedDistKVCache
 from utils.prof_marker import prof_marker
-from utils.help_functions import tensor_offset_to_req_idx
+from utils.util_functions import tensor_offset_to_req_idx
 
 
 
 class RopeAppendTorchImpl(OperationImpl):
     category_tag = "torch"
-    def __init__(self, op_base, stream, device_id):
-        super().__init__(op_base, stream, device_id)
+    def __init__(self, op_base, stream, device):
+        super().__init__(op_base, stream, device)
         self.rope_type = op_base.rope_type
         self.theta = op_base.theta
         self.original_max_position_embeddings = op_base.original_max_position_embeddings
@@ -145,13 +145,13 @@ class RopeAppendTorch(Operations):
         self.head_dim = head_dim
         self.updateChildrenIOShape()
 
-    def update(self, qo_indicies, decode_batchsize, device_id):
+    def update(self, qo_indicies, decode_batchsize, device):
         if self.isNanoSplit:
             for nano_op in self.nano_ops:
-                nano_op.update(qo_indicies, decode_batchsize, device_id)
+                nano_op.update(qo_indicies, decode_batchsize, device)
         else:
             """Stores the starting indices for the query/key segments."""
-            io_device = self.children[device_id].inputs["kqv"]
+            io_device = self.children[device].inputs["kqv"]
             start_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset)
             end_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset + io_device.batch_size)
 

@@ -49,7 +49,7 @@ def _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M, NUM_SMS):
     configs=matmul_get_configs(),
     key=["M", "N", "K"],
 )
-@triton.jit(launch_metadata=_matmul_launch_metadata)
+@triton.jit
 def gemm_kernel_persistent(
     a_ptr,
     b_ptr,

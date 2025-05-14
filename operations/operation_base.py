@@ -22,7 +22,7 @@ class Operations:
         self.last_layer_only = False
         self.weight_name = None
         self.tag = "torch"
-        self.children = []
+        self.children = {}
         self.isNanoSplit = False
         self.nano_ops = []
         self.nano_op_batchsizes = []
@@ -79,11 +79,11 @@ class Operations:
         self.updateChildrenIOShape()
     
     def updateChildrenIOShape(self):
-        for op_device in self.children:
+        for op_device in self.children.values():
             op_device.setShapeForIOWrappers()
 
-    def processWeight(self, global_weight_map, weight_path, cached = False):
-        return process_weight_none(global_weight_map, self.weight_name, None, self.device_list, self.layer_list, weight_path, cached)
+    def processWeight(self, global_weight_map, weight_path, cached, device):
+        return process_weight_none(global_weight_map, self.weight_name, None, self.device_list, self.layer_list, weight_path, cached, device)
     
     def first_only(self):
         self.first_layer_only = True
@@ -101,14 +101,14 @@ class Operations:
         for row in rows:
             print(row)
             
-    def config_tag(self, tag, device_id, parameter_map = {}):
+    def config_tag(self, tag, device, parameter_map = {}):
         if self.isNanoSplit:
             for nano_op in self.nano_ops:
-                nano_op.config_tag(tag, device_id, parameter_map)
+                nano_op.config_tag(tag, device, parameter_map)
             return self
         else:
             self.tag = tag
-            self.device_id = device_id
+            self.device = device
             self.parameter_map = parameter_map
             parts = tag.split(":", 1)
             category_tag = ""
@@ -118,8 +118,8 @@ class Operations:
             else:
                 category_tag = parts[0]
                 impl_tag = parts[1]
-            # self.impl  = self.impl_map[category_tag](self.inputs, self.outputs, self.weights, device_id)
-            self.impl  = self.impl_map[category_tag](self, self.stream, device_id)
+            # self.impl  = self.impl_map[category_tag](self.inputs, self.outputs, self.weights, device)
+            self.impl  = self.impl_map[category_tag](self, self.stream, device)
             self.config_impl(impl_tag, parameter_map)
             # print("name: ", self.name, "category_tag: ", category_tag, "impl_tag: ", impl_tag, "impl: ", self.impl)
             return self
@@ -143,41 +143,43 @@ class Operations:
         self.stream = stream
 
     def append_dependency(self, extra_dep):
-        for idx, child in enumerate(self.children):
-            child.append_dependency((extra_dep[0].children[idx], extra_dep[1], extra_dep[2]))
+        for device, child in self.children.items():
+            child.append_dependency((extra_dep[0].children[device], extra_dep[1], extra_dep[2]))
 
     def __str__(self):
         return self.name   
     
     def expand_gpu(self, num_devices):
-        for device_id in range(num_devices):
-            op_device = self.op_device(self, device_id)
-            self.children.append(op_device)
+        self.device_list = [f"cuda:{i}" for i in range(num_devices)]
+        for device in self.device_list:
+            op_device = self.op_device(self, device)
+            self.children[device] = op_device
         
         return self.children
     
     def expand_all_gpu_and_layers(self, num_devices, num_layers):
-        self.device_list = list(range(num_devices))
+        self.device_list = [f"cuda:{i}" for i in range(num_devices)]
         if self.first_layer_only:
             self.layer_list = [0]
         elif self.last_layer_only:
             self.layer_list = [num_layers - 1]
         else:
             self.layer_list = list(range(num_layers))
-        self.op_layers_per_device = []
-        for device_id in range(num_devices):
-            op_device = self.op_device(self, device_id)
 
-            self.op_layers_per_device.append(op_device.expand_layer(self.layer_list))
-            self.children.append(op_device)
+        self.op_layers_per_device = {}
+        for device in self.device_list:
+            op_device = self.op_device(self, device)
+
+            self.op_layers_per_device[device] = op_device.expand_layer(self.layer_list)
+            self.children[device] = op_device
         
         return self.children, self.op_layers_per_device
     
 class Operation_Device:
-    def __init__(self, parent, device_id):
+    def __init__(self, parent, device):
         self.name = parent.name
         self.parent = parent
-        self.device_id = device_id
+        self.device = device
         self.weights = parent.weights
         self.externals = self.parent.externals
         self.extra_dep = []
@@ -188,11 +190,11 @@ class Operation_Device:
             dev_wrapper = IOWrapper_Device(
                 owner=self,
                 name=base_wrapper.name,
-                device_id=device_id,
+                device=device,
                 dtype=base_wrapper.dtype,
                 base_wrapper=base_wrapper
             ).is_input()
-            base_wrapper.append_child(dev_wrapper)
+            base_wrapper.append_child(device, dev_wrapper)
             self.inputs[key] = dev_wrapper
 
         self.outputs = {}
@@ -200,11 +202,11 @@ class Operation_Device:
             dev_wrapper = IOWrapper_Device(
                 owner=self,
                 name=base_wrapper.name,
-                device_id=device_id,
+                device=device,
                 dtype=base_wrapper.dtype,
                 base_wrapper=base_wrapper
             ).is_output()
-            base_wrapper.append_child(dev_wrapper)
+            base_wrapper.append_child(device, dev_wrapper)
             self.outputs[key] = dev_wrapper
     
     def append_dependency(self, dep):
@@ -251,7 +253,7 @@ class Operation_Layer:
         self.weights = op_device.weights
         self.externals = op_device.externals
         self.parent = op_device
-        self.device_id = op_device.device_id
+        self.device = op_device.device
         self.prev_op_layer = []
         self.cuda_event = None
         self.is_depended_on = False

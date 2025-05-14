@@ -1,7 +1,4 @@
-from enum import Enum
-import numpy as np
 import torch
-from collections import defaultdict
 
 # To Do: delete the attributes that related to tensor that should not belong to a base IOWrapper anymore
 class IOWrapper:
@@ -20,7 +17,7 @@ class IOWrapper:
         self.ptr = 0
         self.transform = None
         self.dtype = dtype
-        self.children = []  # [IOWrapper_Device]
+        self.children = {}  # [IOWrapper_Device]
     
     @property
     def fullName(self):
@@ -38,8 +35,8 @@ class IOWrapper:
         
         return next_wrapper
     
-    def append_child(self, child_wrapper):
-        self.children.append(child_wrapper)
+    def append_child(self, device, child_wrapper):
+        self.children[device] = child_wrapper
 
     def __rshift__(self, next_wrapper):
         depend_on_prev = False
@@ -58,10 +55,10 @@ class IOWrapper:
     
 
 class IOWrapper_Device:
-    def __init__(self, owner, name, device_id, dtype=torch.float16, base_wrapper=None):
+    def __init__(self, owner, name, device, dtype=torch.float16, base_wrapper=None):
         self.owner = owner  # owner is now an Operations object or similar
         self.name = name
-        self.device_id = device_id
+        self.device = device
         self.dtype = dtype
         self.base_wrapper = base_wrapper
         self.tensor_shape = None # shape [0] is non-contiguous dimension, shape [1] is contiguous dimension
@@ -120,12 +117,12 @@ class IOWrapper_Device:
         #     print("io_base.owner.name", io_base.owner.name)
         #     print("io_base.fullName", io_base.fullName)
         #     print("io_base.children", io_base.children)
-        return [io_base.children[self.device_id] for io_base in self.base_wrapper.next] + [io_base.children[self.device_id] for io_base in self.base_wrapper.nano_dist_next]
+        return [io_base.children[self.device] for io_base in self.base_wrapper.next] + [io_base.children[self.device] for io_base in self.base_wrapper.nano_dist_next]
     
     @property
     def prev(self):
         
-        return [io_base.children[self.device_id] for io_base in self.base_wrapper.prev] + [io_base.children[self.device_id] for io_base in self.base_wrapper.nano_dist_prev]
+        return [io_base.children[self.device] for io_base in self.base_wrapper.prev] + [io_base.children[self.device] for io_base in self.base_wrapper.nano_dist_prev]
     
     @property
     def prev_depend_on_prev_layer(self):

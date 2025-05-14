@@ -1,6 +1,5 @@
 from numpy import isin
 import torch
-import sys
 import time
 from utils.prof_marker import prof_marker
 import platform_config

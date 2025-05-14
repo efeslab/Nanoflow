@@ -1,6 +1,5 @@
 from numpy import isin
 import torch
-import sys
 import time
 from utils.prof_marker import prof_marker
 import platform_config
@@ -130,32 +129,28 @@ class GEMM_N_Parallel(Operations):
                     ''', (self.name + f"_{category_tag}", batch_size, average_time))
         self.conn.commit()
 
-    def processWeight(self, global_weight_map, cached_weight_map, cached = False):
-        self.weights["B"].weight_map = {}
-        weight_wrapper = self.weights["B"]
+    def processWeight(self, global_weight_map, cached_weight_map, cached, device):
         if not isinstance(self.weight_name, list):
             self.weight_name = [self.weight_name]
-        if cached:
-            for device_id in self.device_list:
-                weight_wrapper.weight_map[device_id] = {}
-                for l in self.layer_list:
-                    weight_wrapper.weight_map[device_id][l] = cached_weight_map[f"{self.name}_device_{device_id}_layer_{l}"].to(f'cuda:{device_id}')
-                    assert weight_wrapper.weight_map[device_id][l].shape == weight_wrapper.shape, f"name = {self.weight_name}, expected shape = {weight_wrapper.shape}, layer = {l}, real shape = {weight_wrapper.weight_map[device_id][l].shape}"
-    
-        elif not cached:
-            for device_id in self.device_list:
-                weight_wrapper.weight_map[device_id] = {}
-                offset = device_id % self.tp_size
+        if not cached:
+            for idx, dev in enumerate(self.device_list):
+                offset = idx % self.tp_size
                 for l in self.layer_list:
                     weights_list = []
                     for name in self.weight_name:
                         stride = global_weight_map[name.format(layer=l)].shape[0] // self.tp_size
                         scope = (slice(offset * stride, (offset + 1) * stride), slice(None))
-                        weights_list.append(global_weight_map[name.format(layer=l)][scope].to(f'cuda:{device_id}').t())
-                    weight_wrapper.weight_map[device_id][l] = torch.cat(weights_list, dim=1).contiguous()
-
-                    cached_weight_map[f"{self.name}_device_{device_id}_layer_{l}"] = weight_wrapper.weight_map[device_id][l].to("cpu")
-                    assert weight_wrapper.weight_map[device_id][l].shape == weight_wrapper.shape, f"name = {self.weight_name}, expected shape = {weight_wrapper.shape}, layer = {l}, real shape = {weight_wrapper.weight_map[device_id][l].shape}"
+                        weights_list.append(global_weight_map[name.format(layer=l)][scope].t())
+                    cached_weight_map[dev][f"{self.name}_layer_{l}"] = torch.cat(weights_list, dim=1).contiguous()
+        if cached:
+            self.weights["B"].weight_map = {}
+            weight_wrapper = self.weights["B"]
+            assert device in self.device_list, f"device {device} not in device list {self.device_list}"
+            weight_wrapper.weight_map[device] = {}
+            for l in self.layer_list:
+                weight_wrapper.weight_map[device][l] = cached_weight_map[device][f"{self.name}_layer_{l}"].to(device, non_blocking=True)
+                assert weight_wrapper.weight_map[device][l].shape == weight_wrapper.shape, f"name = {self.weight_name}, expected shape = {weight_wrapper.shape}, layer = {l}, real shape = {weight_wrapper.weight_map[device][l].shape}"
+            
         # torch.cuda.empty_cache()
         # device = torch.cuda.current_device()
         # reserved_memory = torch.cuda.memory_reserved(device)
@@ -179,4 +174,4 @@ class GEMM_N_Parallel_Layer(Operation_Layer):
 
     def run(self):
         with prof_marker("GEMM_run"):
-            self.impl.run(self.weights["B"].weight_map[self.device_id][self.layer])
+            self.impl.run(self.weights["B"].weight_map[self.device][self.layer])

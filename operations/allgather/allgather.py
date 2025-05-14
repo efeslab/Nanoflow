@@ -9,8 +9,8 @@ from operations.impl_base import OperationImpl
 
 class AllGatherTorchImpl(OperationImpl):
     category_tag = "torch"
-    def __init__(self, op_base, stream, device_id):
-        super().__init__(op_base, stream, device_id)
+    def __init__(self, op_base, stream, device):
+        super().__init__(op_base, stream, device)
         self.tp_size = op_base.tp_size
         self.subgroup = op_base.subgroup
     
