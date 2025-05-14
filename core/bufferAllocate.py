@@ -4,7 +4,7 @@ import networkx as nx
 import re
 import sympy as sp
 import os
-os.environ['GRB_LICENSE_FILE'] = '/code/Nanoflow-python/gurobi.lic'
+os.environ['GRB_LICENSE_FILE'] = '/root/Nanoflow-python/gurobi.lic'
 import gurobipy as gp
 from gurobipy import GRB
 from core.IOWrapper import IOWrapper
