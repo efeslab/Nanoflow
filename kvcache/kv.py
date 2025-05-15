@@ -119,11 +119,12 @@ class KVCacheFANoPage:
     def __init__(
         self,
         *,
+        num_layers,
+        num_heads,
+        head_dim,
+        max_seq_len: int = 256,
         device_id: int = 0,
-        num_layers: int = 32,
-        num_heads: int = 8,
-        head_dim: int = 128,
-        max_size_per_request: int = 2048
+        tp_size: int = 1,
     ) -> None:
         r"""Initialize the KV cache.
 
@@ -148,9 +149,10 @@ class KVCacheFANoPage:
         self.indices: torch.Tensor | None = None
         self.device_id = device_id
         self.num_layers = num_layers
-        self.num_heads = num_heads
+        self.num_heads = num_heads // tp_size
         self.head_dim = head_dim
-        self.max_size_per_request = max_size_per_request
+        self.max_size_per_request = max_seq_len
+        self.input_req_idx: torch.Tensor | None = None
         self.last_kv: list[tuple[torch.Tensor, torch.Tensor] | None] = [
             None for _ in range(self.num_layers)
         ]
@@ -185,7 +187,7 @@ class KVCacheFANoPage:
         return self.indices[request_id].item() # type: ignore
 
 
-    def update(self, batch_size: int) -> None:
+    def update(self, input_req_idx: list[int]) -> None:
         r"""Update the KV cache with a new batch size.
 
         Parameters
@@ -198,6 +200,8 @@ class KVCacheFANoPage:
         This function (re)initializes the KV cache with the given batch size,
         and should not be called multiple times for a single batch.
         """
+        batch_size = len(input_req_idx)
+        self.input_req_idx = torch.tensor(input_req_idx, dtype=torch.int32, device=f"cuda:{self.device_id}")
         if self.batch_size == batch_size:
             return
         old_k_cache, old_v_cache, old_indicces = (
@@ -351,7 +355,7 @@ class KVCacheFANoPage:
 
     def get_whole_kv_data(
         self, device_id: int, layer: int
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         r"""Get the KV cache for a specific layer.
         
         Parameters

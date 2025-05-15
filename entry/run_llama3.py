@@ -5,7 +5,7 @@ sys.path.append("../")
 sys.path.append("../utils")
 sys.path.append('../pybind/build')
 
-# os.environ["HF_HOME"] = "/code/hf"
+os.environ["HF_HOME"] = "/storage/ziren/framework-test/hf"
 from utils.prof_marker import prof_marker
 from utils.frontend import requestManager
 from transformers import AutoTokenizer
@@ -56,13 +56,13 @@ prefill_context = "Large Language Models (LLMs) have rapidly evolved from simple
 
 prefill_input_ids = [tokenizer.encode(prefill_context)[:640] for _ in range(1000)]
 
-weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
+weight_map_wzr = "/storage/ziren/framework-test/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
 # weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
 weight_map_amd_kan = "/work1/kasikci/kanzhu/models/llama3-8b"
-weight_map_yi = "/root/llama3-8b"
+# weight_map_yi = "/root/llama3-8b"
 
 pipeline = Pipeline()
-pipeline.init(weight_map_yi, cached=False)
+pipeline.init(weight_map_wzr, cached=True)
 
 # torch.cuda.empty_cache()
 # device = torch.cuda.current_device()
@@ -111,13 +111,13 @@ def test_performance():
 
 def test_correctness(use_kv_cache=True):
     special_inputs_0 = [(0, input_ids[0]), (1, input_ids[1])]
-    # special_inputs_1 = [(2, input_ids[2]), (3, input_ids[3])]
+    special_inputs_1 = [(2, input_ids[2]), (3, input_ids[3])]
     output_strings = {}
     for idx, tensor in special_inputs_0:
         output_strings[idx] = tensor
 
-    # for idx, tensor in special_inputs_1:
-        # output_strings[idx] = tensor
+    for idx, tensor in special_inputs_1:
+        output_strings[idx] = tensor
 
     pipeline.update(special_inputs_0)
     new_tokens = pipeline.run()
@@ -128,23 +128,23 @@ def test_correctness(use_kv_cache=True):
     
     # print("new_tokens: ", new_tokens)
     if use_kv_cache:
-        # new_tokens.extend(special_inputs_1)
+        new_tokens.extend(special_inputs_1)
         pipeline.update(new_tokens, decode_batchsize)
     else:
         new_tokens = [(0, output_strings[0]), (1, output_strings[1])]
-        # new_tokens.extend(special_inputs_1)
+        new_tokens.extend(special_inputs_1)
         pipeline.update(new_tokens, 0)
 
     new_tokens = pipeline.run()
     for req_idx, new_token in new_tokens:
         output_strings[req_idx].extend(new_token)
     decode_batchsize = len(new_tokens)
-    assert decode_batchsize == 2
+    assert decode_batchsize == 4
 
     if use_kv_cache:
         pipeline.update(new_tokens, decode_batchsize)
     else:
-        new_tokens = [(i, output_strings[i]) for i in range(2)]
+        new_tokens = [(i, output_strings[i]) for i in range(4)]
         pipeline.update(new_tokens, 0)
 
     for i in range(20):
@@ -153,12 +153,12 @@ def test_correctness(use_kv_cache=True):
         for req_idx, new_token in new_tokens:
             output_strings[req_idx].extend(new_token)
         decode_batchsize = len(new_tokens)
-        assert decode_batchsize == 2
+        assert decode_batchsize == 4
         # print("new_tokens: ", new_tokens)
         if use_kv_cache:
             pipeline.update(new_tokens, decode_batchsize)
         else:
-            new_tokens = [(i, output_strings[i]) for i in range(2)]
+            new_tokens = [(i, output_strings[i]) for i in range(4)]
             pipeline.update(new_tokens, 0)
 
     output_text = tokenizer.batch_decode(list(output_strings.values()), skip_special_tokens=True)

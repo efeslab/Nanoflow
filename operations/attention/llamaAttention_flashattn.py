@@ -5,7 +5,9 @@ from operations.operation_base import Operations, Operation_Device, Operation_La
 from core.IOWrapper import IOWrapper
 from operations.impl_base import OperationImpl
 from kvcache.kv import KVCacheFANoPage
-from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache  # type: ignore[import]
+from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
+
+from utils.help_functions import tensor_offset_to_req_idx  # type: ignore[import]
 
 
 class DecAttnFANoPageImpl(OperationImpl):
@@ -71,11 +73,13 @@ class DecAttnFANoPageImpl(OperationImpl):
         q = Q.view(-1, 1, self.num_qo_heads, self.head_dim)
         k_cache, v_cache = KVCache.get_whole_kv_data(self.device_id, layer)
         assert k_cache is not None and v_cache is not None
+        cache_seqlens = KVCache.get_whole_indices()[self.op_base.input_req_idx]
+        assert q.shape[0] == cache_seqlens.shape[0], f"q.shape {q.shape} mismatch with cache_seqlens.shape {cache_seqlens.shape}"
         o = flash_attn_with_kvcache( # type: ignore
             q,
             k_cache,
             v_cache,
-            cache_seqlens=KVCache.get_whole_indices(),
+            cache_seqlens=cache_seqlens,
         )
         assert isinstance(o, torch.Tensor)
         o = o.view(-1, self.num_qo_heads * self.head_dim)
@@ -90,7 +94,7 @@ class DecAttnFANoPageImpl(OperationImpl):
                 v_list.append(v_cache[i].view(-1, self.num_kv_heads * self.head_dim)[:seq_len])  # type: ignore
             k = torch.cat(k_list, dim=0)
             v = torch.cat(v_list, dim=0)
-            logging.debug(f"q.shape {q.shape}\nq {q}\nk.shape {k.shape}\nk {k}\nv.shape {v.shape}\nv {v}\no.shape {o.shape}\no {o}")
+            logging.debug(f"device {q.device} q.shape {q.shape}\nq {q}\nk.shape {k.shape}\nk {k}\nv.shape {v.shape}\nv {v}\no.shape {o.shape}\no {o}")
         output.copy_(o)
 
 
@@ -114,9 +118,9 @@ class DecAttnFA(Operations):
     def init_impl_map(self):
         self.add_impl(DecAttnFANoPageImpl)
     
-    def setShape(self, num_kv_heads, num_qo_heads, head_dim):
-        self.num_kv_heads = num_kv_heads
-        self.num_qo_heads = num_qo_heads
+    def setShape(self, num_kv_heads, num_qo_heads, head_dim, tp_size: int = 1):
+        self.num_kv_heads = num_kv_heads // tp_size
+        self.num_qo_heads = num_qo_heads // tp_size
         self.head_dim = head_dim
         self.q_dim = num_qo_heads * head_dim
         for op_device in self.children:
@@ -124,6 +128,11 @@ class DecAttnFA(Operations):
     
     def update(self, cumsum_input: list[int], device_id: int):
         self.qo_indicies = torch.tensor(cumsum_input, dtype=torch.int32, device=f"cuda:{device_id}")
+        io_device = self.children[device_id].inputs["Q"]
+        start_req_idx = tensor_offset_to_req_idx(self.qo_indicies.tolist(), io_device.tensor_offset)
+        end_req_idx = tensor_offset_to_req_idx(self.qo_indicies.tolist(), io_device.tensor_offset + io_device.batch_size)
+        self.input_req_idx = self.externals["KVCache"].input_req_idx[start_req_idx:end_req_idx]
+        self.qo_indicies = self.qo_indicies[start_req_idx:end_req_idx + 1] - io_device.tensor_offset
     
     def profile(self):
         pass
@@ -225,7 +234,7 @@ class PFAttnFANoPageImpl(OperationImpl):
             q = q.view(-1, self.num_qo_heads * self.head_dim)
             k = k.view(-1, self.num_kv_heads * self.head_dim)
             v = v.view(-1, self.num_kv_heads * self.head_dim)
-            logging.debug(f"q.shape {q.shape}\nq {q}\nk.shape {k.shape}\nk {k}\nv.shape {v.shape}\nv {v}\no.shape {o.shape}\no {o}")
+            logging.debug(f"device {q.device} q.shape {q.shape}\nq {q}\nk.shape {k.shape}\nk {k}\nv.shape {v.shape}\nv {v}\no.shape {o.shape}\no {o}")
         output.copy_(o)
 
 class PFAttnFA(Operations):
@@ -249,9 +258,9 @@ class PFAttnFA(Operations):
     def init_impl_map(self):
         self.add_impl(PFAttnFANoPageImpl)
     
-    def setShape(self, num_kv_heads, num_qo_heads, head_dim):
-        self.num_kv_heads = num_kv_heads
-        self.num_qo_heads = num_qo_heads
+    def setShape(self, num_kv_heads, num_qo_heads, head_dim, tp_size: int = 1):
+        self.num_kv_heads = num_kv_heads // tp_size
+        self.num_qo_heads = num_qo_heads // tp_size
         self.head_dim = head_dim
         self.q_dim = num_qo_heads * head_dim
         for op_device in self.children:
@@ -262,6 +271,11 @@ class PFAttnFA(Operations):
         seq_lens = self.qo_indicies.diff()
         self.max_seqlen_q = torch.max(seq_lens).item()
         self.max_seqlen_k = self.max_seqlen_q
+        io_device = self.children[device_id].inputs["Q"]
+        start_req_idx = tensor_offset_to_req_idx(self.qo_indicies.tolist(), io_device.tensor_offset)
+        end_req_idx = tensor_offset_to_req_idx(self.qo_indicies.tolist(), io_device.tensor_offset + io_device.batch_size)
+        self.input_req_idx = self.externals["KVCache"].input_req_idx[start_req_idx:end_req_idx]
+        self.qo_indicies = self.qo_indicies[start_req_idx:end_req_idx + 1] - self.qo_indicies[start_req_idx]
 
     def profile(self):
         raise NotImplementedError("Profile not implemented for PFAttnFA")

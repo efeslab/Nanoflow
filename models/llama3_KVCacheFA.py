@@ -63,7 +63,11 @@ class Pipeline:
         }
 
     def init_external_data(self):
-        self.kv_cache = KVCacheFANoPage()
+        self.kv_cache = KVCacheFANoPage(
+            num_layers=self.num_layers,
+            num_heads=self.num_kv_heads,
+            head_dim=self.head_dim,
+        )
 
     def init_operations(self):
         self.global_input = GlobalInput("GlobalInput").first_only()
@@ -433,7 +437,7 @@ class Pipeline:
         with prof_marker("update_step_5"):
             self.cumsum_input = torch.cat([torch.tensor([0], dtype=torch.int32, device='cpu'), torch.cumsum(request_length, dim=0, dtype=torch.int32)]).tolist()
         with prof_marker("update_step_6"):
-            self.kv_cache.update(len(self.input_ids))
+            self.kv_cache.update(self.input_req_idx)
         with prof_marker("update_step_7"):
             self.global_input.children[device_id].outputs["tokens"].tensor.copy_(input_tensor)
         with prof_marker("update_step_8"):
