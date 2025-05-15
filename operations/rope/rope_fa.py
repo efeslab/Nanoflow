@@ -35,7 +35,7 @@ class RopeAppendFANoPageImpl(OperationImpl):
             dtype=torch.float16, device=f"cuda:{device_id}"
         )
 
-    def _compute_inv_freq(self, base: int | float) -> torch.Tensor:
+    def _compute_inv_freq(self, base: float) -> torch.Tensor:
         """Compute the inverse frequency."""
         inv_freq = 1.0 / (
             base
@@ -65,6 +65,9 @@ class RopeAppendFANoPageImpl(OperationImpl):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.cache.device != query.device:
             self.cache = self.cache.to(query.device)
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            logging.debug(f"device {query.device} query shape: {query.shape}\nquery: {query}")
+        
         positions = self.op_base.per_token_offset  # type: ignore
         assert isinstance(positions, torch.Tensor)
         num_tokens = positions.shape[0]
@@ -103,9 +106,9 @@ class RopeAppendFANoPageImpl(OperationImpl):
         # key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         key = key.view(key_shape)
 
-        if logging.getLogger().isEnabledFor(logging.DEBUG):
-            logging.debug(f"query_rot shape: {query_rot.shape}\nquery_rot: {query_rot}")
-            logging.debug(f"key_rot shape: {key_rot.shape}\nkey_rot: {key_rot}")
+        # if logging.getLogger().isEnabledFor(logging.DEBUG):
+        #     logging.debug(f"device {query_rot.device} query_rot shape: {query_rot.shape}\nquery_rot: {query_rot}")
+        #     logging.debug(f"device {key_rot.device} key_rot shape: {key_rot.shape}\nkey_rot: {key_rot}")
 
         return query, key
 

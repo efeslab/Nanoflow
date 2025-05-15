@@ -1,3 +1,7 @@
+import logging
+
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+
 def worker(rank, world_size, shared_int, shared_batch_size, shared_array, barrier, pipeline, command, input_ids):
     """
     Worker process: wait for a new task value from the main process,
@@ -5,6 +9,7 @@ def worker(rank, world_size, shared_int, shared_batch_size, shared_array, barrie
     """
     from torch.cuda import set_device
     set_device(rank)
+    pipeline.kv_cache.device_id = rank
     pipeline.init_streams()
     pipeline.config_streams()
     pipeline.config_network(rank)
@@ -15,9 +20,9 @@ def worker(rank, world_size, shared_int, shared_batch_size, shared_array, barrie
     while True:
         # First barrier: wait until the main process writes a new task.
         barrier.wait()
-        match command.value:
-            case 1:
-                input0 = input_ids[0:2]
+        if command.value == 1:
+                input0 = input_ids[0:4]
+                logging.info(f"Worker {rank} input0: {input0}")
                 pipeline.update(input0, 0, device_id=rank)
                 new_tokens = pipeline.run(rank=rank, file_name=f"./test_data/70B_test_flashinfer_{rank}", filefolder_name=f"./test_data/70B_test_flashinfer_{rank}_folder")
                 decode_batchsize = len(new_tokens)
@@ -25,16 +30,16 @@ def worker(rank, world_size, shared_int, shared_batch_size, shared_array, barrie
                 if rank == 0:
                     for req_idx, new_token in new_tokens:
                         shared_array[req_idx] = new_token[0]
-                new_tokens.extend(input_ids[2:4])
-            case 2:
-                pipeline.update(new_tokens, decode_batchsize=2, device_id=rank)
+                # new_tokens.extend(input_ids[2:4])
+        elif command.value == 2:
+                logging.info(f"Worker {rank} new_tokens: {new_tokens}")
+                pipeline.update(new_tokens, decode_batchsize=4, device_id=rank)
                 new_tokens = pipeline.run(rank=rank, file_name=f"70B_test_flashinfer_{rank}", filefolder_name=f"70B_test_flashinfer_{rank}_folder")
                 print("new_tokens: ", new_tokens)
                 if rank == 0:
                     for req_idx, new_token in new_tokens:
                         shared_array[req_idx] = new_token[0]
-                
-            case -1:
+        elif command.value == -1:
                 # Termination signal received.
                 pipeline.terminate()
                 barrier.wait()
@@ -50,7 +55,7 @@ if __name__ == '__main__':
     import time
     import sys, os
     sys.path.append("../")
-    os.environ["HF_HOME"] = "/code/hf"
+    # os.environ["HF_HOME"] = "/code/hf"
     # os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1"
     # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
@@ -58,7 +63,8 @@ if __name__ == '__main__':
     from transformers import AutoTokenizer
     # from models.llama3_FlashinferKVCache_TP2 import Pipeline
     # from models.llama3_KVCacheTorch_TP2 import Pipeline
-    from models.llama3_70B_KVCacheTorch_TP8 import Pipeline
+    # from models.llama3_70B_KVCacheTorch_TP8 import Pipeline
+    from models.llama3_70B_KVCacheFA_TP8 import Pipeline
     
     mp.set_start_method('spawn')
     
@@ -79,7 +85,8 @@ if __name__ == '__main__':
     print("finish init shape")
     # weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
     weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
-    pipeline.init_set_weight(weight_map_wzr, cached=True)
+    weigth_map_amd = "/work1/kasikci/kanzhu/models/llama3-70b"
+    pipeline.init_set_weight(weigth_map_amd, cached=True)
 
     print("finish update pipeline")
 
