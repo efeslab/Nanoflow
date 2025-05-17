@@ -5,14 +5,14 @@ from utils.prof_marker import prof_marker
 from utils.graph_plot import plot_graph_topological, draw_graphs_subplots
 
 class Executor():
-    def __init__(self, operations_layers_list, layer):
+    def __init__(self, operations_layers_list, layer_list):
         self.operations_layers_list = [op_layer for op_layer in operations_layers_list if op_layer.batch_size > 0]
         # self.operations_layers_list = operations_layers_list
-        self.layer = layer
+        self.layer_list = layer_list
         self.ordered_operations = []
     
     def not_this_layer(self, op, layer):
-        return (op.first_layer_only and layer != 0) or (op.last_layer_only and layer != self.layer - 1)
+        return (op.first_layer_only and layer != 0) or (op.last_layer_only and layer != self.layer_list[-1])
     
     
     def plan_layer_ordering(self):
@@ -40,7 +40,7 @@ class Executor():
                             G.nodes[prev_op_name]['op'].set_is_depended_on(op)
                             # print("op.name", op.name, "prev_op_name", prev_op_name)
                 elif dep_on_next_layer:
-                    if layer < self.layer - 1:
+                    if layer < self.layer_list[-1]:
                         prev_op_name = f"{dep.name}_{layer + 1}"
                         # check if the next layer op exists
                         if G.has_node(prev_op_name):
@@ -74,7 +74,7 @@ class Executor():
                 torch.cuda.synchronize()
                 output.copy_(op.inputs["tokens"].tensor)
 
-    def print_debug(self, filename="out.txt", device="cuda:0", filefolder_name = None, output=None):
+    def print_debug(self, filename="out.txt", filefolder_name = None, output=None):
         file = f"{filename}"
 
         with open(file, "w") as f:
@@ -87,14 +87,16 @@ class Executor():
                     f.write(str(inputs.tensor))
                     f.write("\n")
                     f.write(str(inputs.tensor.shape))
+                    f.write("\n")
                     torch.save(inputs.tensor.cpu(), f"./{filefolder_name}/{op.name}_{inputs.name}")
 
                 for weights in op.weights.values():
                     f.write(f"[{op.name}_{weights.name}]\n")
-                    f.write(str(weights.weight_map[device][op.layer]))
+                    f.write(str(weights.weight_map[op.layer]))
                     f.write("\n")
-                    f.write(str(weights.weight_map[device][op.layer].shape))
-                    torch.save(weights.weight_map[device][op.layer].cpu(), f"./{filefolder_name}/{op.name}_{weights.name}")
+                    f.write(str(weights.weight_map[op.layer].shape))
+                    f.write("\n")
+                    torch.save(weights.weight_map[op.layer].cpu(), f"./{filefolder_name}/{op.name}_{weights.name}")
 
                 f.flush()
 
@@ -103,6 +105,7 @@ class Executor():
                     op.run()
                     op.record_cuda_event()
 
+                torch.cuda.synchronize()
                 if "GlobalOutput" in op.name:
                     torch.cuda.synchronize()
                     output.copy_(op.inputs["tokens"].tensor)

@@ -5,7 +5,7 @@ import os
 os.environ['GRB_LICENSE_FILE'] = '/code/Nanoflow-python/gurobi.lic'
 import gurobipy as gp
 from gurobipy import GRB
-from operations.virtualOp.virtual_ops import Redist_Device
+from operations.virtualOp.virtual_ops import Redist
 from utils.graph_plot import plot_graph_topological, draw_graphs_subplots
 
 class BufferAllocator():
@@ -31,7 +31,7 @@ class BufferAllocator():
             G.add_node(wrapper.fullName, wrapper=wrapper)
             # print(f"add node {wrapper.fullName}")
         for wrapper in self.buffers_list:
-            for next_wrapper in wrapper.next:
+            for next_wrapper in wrapper.actual_next:
                 assert next_wrapper.fullName in G.nodes, f"{next_wrapper.fullName} is not in the graph"
                 G.add_edge(wrapper.fullName, next_wrapper.fullName)
                 # print(f"add edge {wrapper.fullName} -> {next_wrapper.fullName}")
@@ -58,11 +58,12 @@ class BufferAllocator():
         # build the equations
         for w in self.buffers_list:
         # if the wrapper is input, build the equation inside the op (Redist will only execute once)
+            assert w.is_input_wrapper or w.is_output_wrapper, f"{w.fullName} is not input or output wrapper"
             if w.is_input_wrapper:
-                if isinstance(w.owner, Redist_Device) and len(w.next) > 0:
+                if isinstance(w.owner, Redist) and len(w.actual_next) > 0:
                     # for Redist_Device, we need to build the equation for each input and output
                     lhs = gp.quicksum(vars_by_wrap[iw] for iw in w.owner.inputs.values())
-                    rhs = gp.quicksum(vars_by_wrap[ow] for ow in w.next)
+                    rhs = gp.quicksum(vars_by_wrap[ow] for ow in w.actual_next)
                     # print(f"add equation {wrapper.fullName}: {input_symbols} = {output_symbols}")
                     model.addConstr(lhs == rhs, name=f"redist_{w.fullName}")
                 else:
@@ -73,15 +74,19 @@ class BufferAllocator():
                         model.addConstr(in_var == vars_by_wrap[ow], name=f"copy_{w.fullName}")
 
             # all links between the ops
-            if w.is_output_wrapper and len(w.next) > 0:
-                assert len(w.next) <= 1, f"{w.fullName} has more than one next connections!\n"
-                next_var = vars_by_wrap[w.next[0]]
-                model.addConstr(vars_by_wrap[w] == next_var, name=f"link_{w.fullName}->{w.next[0].fullName}")
+            if w.is_output_wrapper and len(w.actual_next) > 0:
+                assert len(w.actual_next) <= 1, f"{w.fullName} has more than one next connections!\n"
+                next_var = vars_by_wrap[w.actual_next[0]]
+                model.addConstr(vars_by_wrap[w] == next_var, name=f"link_{w.fullName}->{w.actual_next[0].fullName}")
 
-        # print(f"equations: {equations}")
         # Solve the linear programming problem
         model.setObjective(0.0)     # feasibility only
         model.optimize()
+        # for v in model.getVars():
+        #     print(f"Variable {v.VarName}: Lower Bound = {v.LB}, Upper Bound = {v.UB}")
+        # for c in model.getConstrs():
+        #     expr = model.getRow(c)
+        #     print(f"Constraint {c.ConstrName}: {expr} <= {c.RHS}")
         if model.status != GRB.OPTIMAL:
             raise RuntimeError(f"Gurobi returned status {model.status} "
                            "(infeasible or unbounded).")

@@ -7,21 +7,13 @@ import time
 import fast_uring
 
 class WeightManager():
-    def __init__(self, pipeline_name, weight_path, cached, global_device_list, device):
+    def __init__(self, pipeline_name, weight_path, cached, device):
         self.pipeline_name = pipeline_name
         self.cached = cached
         self.cached_weight_path = f"../cached_weights/{pipeline_name}"
         self.weight_map = {}
-        self.processed_weight_map = dict(
-            [
-                (device, {}) for device in global_device_list
-            ]
-        )
-        self.processed_weight_metadata = dict(
-            [
-                (device, {}) for device in global_device_list
-            ]
-        )
+        self.processed_weight_map = {}
+        self.processed_weight_metadata = {}
         os.makedirs(self.cached_weight_path, exist_ok=True)
 
         if cached:
@@ -41,8 +33,7 @@ class WeightManager():
     
     def load_from_disk(self, device):
         print("load weight from disk")
-        meta_data = json.load(open(os.path.join(self.cached_weight_path, f"{self.pipeline_name}_metadata.json"), "r"))
-        assert device in meta_data.keys(), f"device {device} not in metadata {meta_data.keys()}"
+        meta_data = json.load(open(os.path.join(self.cached_weight_path, f"{self.pipeline_name}_{device}_metadata.json"), "r"))
         file = os.path.join(self.cached_weight_path, f"{self.pipeline_name}_{device}.bin")
         start_load_time = time.time()
         # use torch.load to load the tensor
@@ -55,13 +46,13 @@ class WeightManager():
         ten = ten.to(device, non_blocking=True)
         print(f"load tensor to device time: {time.time() - start_load_to_device_time:.2f}s")
 
-        for name, metadata in meta_data[device].items():
+        for name, metadata in meta_data.items():
             offset = metadata["offset"]
             shape = metadata["shape"]
             dtype = metadata["dtype"]
             size = metadata["size"]
             # print(f"load tensor {name} with shape {shape} and offset {offset}")
-            self.processed_weight_map[device][name] = ten[offset:offset + size].view(shape)
+            self.processed_weight_map[name] = ten[offset:offset + size].view(shape)
         
         print(f"load weight time: {time.time() - start_load_time:.2f}s")
     
@@ -72,29 +63,30 @@ class WeightManager():
             op.processWeight(self.weight_map, self.processed_weight_map, cached=self.cached, device=device)
         if not self.cached:
             print("save weight to disk")
-            for dev, map in self.processed_weight_map.items():
-                total_el = 0
-                offsets = []
-                for weight_name, weight_tensor in map.items():
-                    t = weight_tensor.contiguous()
-                    
-                    offsets.append(total_el)
-                    self.processed_weight_metadata[dev][weight_name] = {
-                        "offset": total_el,
-                        "shape": t.shape,
-                        "dtype": str(t.dtype),
-                        "size": t.numel(),
-                    }
-                    total_el += t.numel()
+            total_el = 0
+            offsets = []
+            for weight_name, weight_tensor in self.processed_weight_map.items():
+                # print(f"weight name: {weight_name}, shape: {weight_tensor.shape}, dtype: {weight_tensor.dtype}, size: {weight_tensor.numel()}")
+                t = weight_tensor.contiguous()
                 
-                flat = torch.empty(total_el, dtype=torch.float16)
-                for t, offset in zip(map.values(), offsets):
-                    flat[offset:offset + t.numel()].copy_(t.contiguous().view(-1))
+                offsets.append(total_el)
+                self.processed_weight_metadata[weight_name] = {
+                    "offset": total_el,
+                    "shape": t.shape,
+                    "dtype": str(t.dtype),
+                    "size": t.numel(),
+                }
+                total_el += t.numel()
+            # print("creating flat tensor")
+            flat = torch.empty(total_el, dtype=torch.float16)
+            # print(f"flat tensor size: {flat.size()}, dtype: {flat.dtype}")
+            for t, offset in zip(self.processed_weight_map.values(), offsets):
+                flat[offset:offset + t.numel()].copy_(t.contiguous().view(-1))
 
-                with open(os.path.join(self.cached_weight_path, f"{self.pipeline_name}_{dev}.bin"), "wb") as f:
-                    f.write(flat.numpy().tobytes())
+            with open(os.path.join(self.cached_weight_path, f"{self.pipeline_name}_{device}.bin"), "wb") as f:
+                f.write(flat.numpy().tobytes())
 
-            json.dump(self.processed_weight_metadata, open(os.path.join(self.cached_weight_path, f"{self.pipeline_name}_metadata.json"), "w"))
+            json.dump(self.processed_weight_metadata, open(os.path.join(self.cached_weight_path, f"{self.pipeline_name}_{device}_metadata.json"), "w"))
             # breakpoint()
         
         print(f"set weight time: {time.time() - start_time:.2f}s")

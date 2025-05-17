@@ -2,7 +2,7 @@ import torch
 import time
 
 import platform_config
-from operations.operation_base import Operations, Operation_Device, Operation_Layer
+from operations.operation_base import Operations, Operation_Layer
 from core.IOWrapper import IOWrapper
 from core.weightWrapper import WeightWrapper
 from core.processWeight import process_weight_no_transpose
@@ -26,32 +26,32 @@ if platform_config.PLATFORM_CUDA:
                 bind_genEmbedding.genEmbedding(tokens, embedding, output, self.stream_handle)
             
 class GenEmbedding(Operations):
-    def __init__(self, name):
-        super().__init__(name)
+    def __init__(self, name, device):
+        super().__init__(name, device)
         self.inputs = {
-            "token": IOWrapper(self, 'token', dtype=torch.int32),
+            "token": IOWrapper(self, 'token', device, dtype=torch.int32).is_input(),
         }
         self.outputs = {
-            "output": IOWrapper(self, 'output')
+            "output": IOWrapper(self, 'output', device).is_output(),
         }
         self.weights = {
             "embedding": WeightWrapper(self)
         }
         self.impl_map = {}
         self.init_impl_map()
-        self.op_device = GenEmbedding_Device
+        self.op_layer = GenEmbedding_Layer
     
     def init_impl_map(self):
         self.add_impl(GenEmbeddingTorchImpl)
         if platform_config.PLATFORM_CUDA:
             self.add_impl(GenEmbeddingCudaImpl)
         
-    def setShape(self, hidden_dim, vocab_size, tp_size=1):
-        self.N = hidden_dim // tp_size
+    def setShape(self, hidden_dim, vocab_size):
+        self.N = hidden_dim
         self.vocab_size = vocab_size
-        self.tp_size = tp_size
         self.weights["embedding"].shape = (self.vocab_size, self.N)
-        self.updateChildrenIOShape()
+        self.inputs["token"].init_shape((0,))
+        self.outputs["output"].init_shape((0, self.N))
     
     
     def profile(self):
@@ -91,21 +91,11 @@ class GenEmbedding(Operations):
         self.conn.commit()
     
     def processWeight(self, global_weight_map, cached_weight_map, cached, device):
-        return process_weight_no_transpose(global_weight_map, self.weight_name, self.weights["embedding"], self.device_list, self.layer_list, cached_weight_map, cached, device, tp_size=self.tp_size)
-    
-class GenEmbedding_Device(Operation_Device):
-    def __init__(self, parent, device):
-        super().__init__(parent, device)
-        self.op_layer = GenEmbedding_Layer
-
-    def setShapeForIOWrappers(self):
-        self.inputs["token"].init_shape((0,))
-        self.outputs["output"].init_shape((0, self.parent.N))
-
+        return process_weight_no_transpose(global_weight_map, self.weight_name, self.weights["embedding"], self.layer_list, cached_weight_map, cached, device)
 
 class GenEmbedding_Layer(Operation_Layer):
-    def __init__(self, layer, op_device):
-        super().__init__(layer, op_device)
+    def __init__(self, layer, base_op):
+        super().__init__(layer, base_op)
     
     def run(self):
-        self.impl.run(self.inputs["token"].tensor, self.weights["embedding"].weight_map[self.device][self.layer], self.outputs["output"].tensor)
+        self.impl.run(self.inputs["token"].tensor, self.weights["embedding"].weight_map[self.layer], self.outputs["output"].tensor)

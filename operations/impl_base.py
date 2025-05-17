@@ -8,10 +8,10 @@ class OperationImpl:
         self.stream = stream
         self.stream_handle = stream.cuda_stream
         self.device = device
-        self.batch_size = op_base.children[device].batch_size
-        self.inputs = op_base.children[device].inputs
-        self.outputs = op_base.children[device].outputs
-        self.weights = op_base.children[device].weights
+        self.batch_size = op_base.batch_size
+        self.inputs = op_base.inputs
+        self.outputs = op_base.outputs
+        self.weights = op_base.weights
     
     @staticmethod
     def list_tags(self) -> List[str]:

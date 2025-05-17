@@ -1,7 +1,7 @@
 import torch
 import time
 import platform_config
-from operations.operation_base import Operations, Operation_Device, Operation_Layer
+from operations.operation_base import Operations, Operation_Layer
 from core.IOWrapper import IOWrapper
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none, process_weight_layer
@@ -28,20 +28,20 @@ if platform_config.PLATFORM_CUDA:
                 bind_rms_norm.rms_norm(output, x, weight, epsilon, self.stream_handle)
 
 class LayerNorm(Operations):
-    def __init__(self, name):
-        super().__init__(name)
+    def __init__(self, name, device):
+        super().__init__(name, device)
         self.inputs = {
-            "input": IOWrapper(self, 'input'),
+            "input": IOWrapper(self, 'input', device).is_input(),
         }
         self.outputs = {
-            "output": IOWrapper(self, 'output')
+            "output": IOWrapper(self, 'output', device).is_output(),
         }
         self.weights = {
             "weight": WeightWrapper(self),
         }
         self.impl_map = {}
         self.init_impl_map()
-        self.op_device = LayerNorm_Device
+        self.op_layer = LayerNorm_Layer
 
     def init_impl_map(self):
         self.add_impl(LayerNormTorchImpl)
@@ -51,12 +51,13 @@ class LayerNorm(Operations):
     def setShape(self, hidden_dim):
         self.hidden_dim = hidden_dim
         self.weights["weight"].shape = (self.hidden_dim,)
-        self.updateChildrenIOShape()
+        self.inputs["input"].init_shape((0, self.hidden_dim))
+        self.outputs["output"].init_shape((0, self.hidden_dim))
     
     def copy_nano(self, index):
-        new_op = LayerNorm(f"{self.name}{index}")
+        new_op = LayerNorm(f"{self.name}{index}", self.device)
         new_op.weights = self.weights
-        new_op.expand_all_gpu_and_layers(len(self.device_list), 32)
+        new_op.expand_layer(self.layer_list)
         new_op.setShape(self.hidden_dim)
         new_op.set_stream(self.stream)
 
@@ -100,22 +101,12 @@ class LayerNorm(Operations):
         self.conn.commit()
     
     def processWeight(self, global_weight_map, weight_path, cached, device):
-        return process_weight_layer(global_weight_map, self.weight_name, self.weights["weight"], self.device_list, self.layer_list, weight_path, cached, device)
-
-    
-class LayerNorm_Device(Operation_Device):
-    def __init__(self, parent, device):
-        super().__init__(parent, device)
-        self.op_layer = LayerNorm_Layer
-
-    def setShapeForIOWrappers(self):
-        self.inputs["input"].init_shape((0, self.parent.hidden_dim))
-        self.outputs["output"].init_shape((0, self.parent.hidden_dim))
+        return process_weight_layer(global_weight_map, self.weight_name, self.weights["weight"], self.layer_list, weight_path, cached, device)
         
 
 class LayerNorm_Layer(Operation_Layer):
-    def __init__(self, layer, op_device):
-        super().__init__(layer, op_device)
+    def __init__(self, layer, base_op):
+        super().__init__(layer, base_op)
 
     def run(self):
-        self.impl.run(self.inputs["input"].tensor, self.weights["weight"].weight_map[self.device][self.layer], self.outputs["output"].tensor, epsilon = 1e-5)
+        self.impl.run(self.inputs["input"].tensor, self.weights["weight"].weight_map[self.layer], self.outputs["output"].tensor, epsilon = 1e-5)

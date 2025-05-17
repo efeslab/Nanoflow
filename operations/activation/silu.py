@@ -1,10 +1,10 @@
 import torch
 import time
 
-from operations.operation_base import Operations, Operation_Device, Operation_Layer
+from operations.operation_base import Operations, Operation_Layer
 from core.IOWrapper import IOWrapper
 from core.weightWrapper import WeightWrapper    
-from core.processWeight import process_weight_none, process_weight_layer
+from core.processWeight import process_weight_none
 import platform_config as config
 from operations.impl_base import OperationImpl
 
@@ -24,32 +24,37 @@ if config.PLATFORM_CUDA:
                 bind_silu_multiply.silu_multiply(x, output, self.stream_handle)
 
 class Activation(Operations):
-    def __init__(self, name):
-        super().__init__(name)
+    def __init__(self, name, device):
+        super().__init__(name, device)
         self.inputs = {
-            "input": IOWrapper(self, 'input'),
+            "input": IOWrapper(self, 'input', device).is_input(),
         }
         self.outputs = {
-            "output": IOWrapper(self, 'output')
+            "output": IOWrapper(self, 'output', device).is_output(),
         }
         self.act_fn = torch.nn.SiLU()
         self.impl_map = {}
         self.init_impl_map()
-        self.op_device = Activation_Device
+        self.op_layer = Activation_Layer
+        
     
     def init_impl_map(self):
         self.add_impl(SiluMultiplyTorchImpl)
         if config.PLATFORM_CUDA:
             self.add_impl(SiluMultiplyCudaImpl)
         
-    def setShape(self, N, tp_size=1):
+    def setShape(self, N, tp_idx=0, tp_size=1):
         self.N = N // tp_size
-        self.updateChildrenIOShape()
+        self.tp_idx = tp_idx
+        self.tp_size = tp_size
+        tp_N = N // tp_size
+        self.inputs["input"].init_shape((0, tp_N * 2))
+        self.outputs["output"].init_shape((0, tp_N))
     
     def copy_nano(self, index):
-        new_op = Activation(f"{self.name}{index}")
-        new_op.expand_all_gpu_and_layers(len(self.device_list), 32)
-        new_op.setShape(self.N)
+        new_op = Activation(f"{self.name}{index}", self.device)
+        new_op.expand_layer(self.layer_list)
+        new_op.setShape(self.N, self.tp_idx, self.tp_size)
         new_op.set_stream(self.stream)
 
         self.nano_ops.append(new_op)
@@ -98,19 +103,10 @@ class Activation(Operations):
         rows = self.cursor.fetchall()
         for row in rows:
             print(row)
-
-class Activation_Device(Operation_Device):
-    def __init__(self, parent, device):
-        super().__init__(parent, device)
-        self.op_layer = Activation_Layer
-
-    def setShapeForIOWrappers(self):
-        self.inputs["input"].init_shape((0, self.parent.N * 2))
-        self.outputs["output"].init_shape((0, self.parent.N))
-
+        
 class Activation_Layer(Operation_Layer):
-    def __init__(self, layer, op_device):
-        super().__init__(layer=layer, op_device=op_device)
+    def __init__(self, layer, base_op):
+        super().__init__(layer, base_op)
     
     def run(self):
         self.impl.run(self.inputs["input"].tensor, self.outputs["output"].tensor)

@@ -1,7 +1,7 @@
 import torch
 import time
 import platform_config
-from operations.operation_base import Operations, Operation_Device, Operation_Layer
+from operations.operation_base import Operations, Operation_Layer
 from core.IOWrapper import IOWrapper
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none, process_weight_layer
@@ -25,17 +25,17 @@ if platform_config.PLATFORM_CUDA:
 
 
 class Sampling(Operations):
-    def __init__(self, name):
-        super().__init__(name)
+    def __init__(self, name, device):
+        super().__init__(name, device)
         self.inputs = {
-            "logits": IOWrapper(self, 'logits')
+            "logits": IOWrapper(self, 'logits', device).is_input(),
         }
         self.outputs = {
-            "tokens": IOWrapper(self, 'tokens', dtype=torch.int32)
+            "tokens": IOWrapper(self, 'tokens', device, dtype=torch.int32).is_output(),
         }
         self.impl_map = {}
         self.init_impl_map()
-        self.op_device = Sampling_Device
+        self.op_layer = Sampling_Layer
     
     def init_impl_map(self):
         self.add_impl(SamplingTorchImpl)
@@ -44,7 +44,8 @@ class Sampling(Operations):
     
     def setShape(self, vocab_size):
         self.vocab_size = vocab_size
-        self.updateChildrenIOShape()
+        self.inputs["logits"].init_shape((0, self.vocab_size))
+        self.outputs["tokens"].init_shape((0,))
         
     def profile(self):
         maxvals = torch.zeros(2, dtype=torch.float16, device='cuda')
@@ -79,19 +80,11 @@ class Sampling(Operations):
                     VALUES (?, ?, ?)
                     ''', (self.name + f"_{category_tag}", batch_size, average_time))
         self.conn.commit()
-
-class Sampling_Device(Operation_Device):
-    def __init__(self, parent, device):
-        super().__init__(parent, device)
-        self.op_layer = Sampling_Layer   
-
-    def setShapeForIOWrappers(self):
-        self.inputs["logits"].init_shape((0, self.parent.vocab_size))
-        self.outputs["tokens"].init_shape((0,))
+        
 
 class Sampling_Layer(Operation_Layer):
-    def __init__(self, layer, op_device):
-        super().__init__(layer, op_device)
+    def __init__(self, layer, base_op):
+        super().__init__(layer, base_op)
     
     def run(self):
         self.impl.run(self.inputs["logits"].tensor, self.outputs["tokens"].tensor)

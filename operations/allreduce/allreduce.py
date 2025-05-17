@@ -2,7 +2,7 @@ import torch
 import torch.distributed as dist
 
 import platform_config
-from operations.operation_base import Operations, Operation_Device, Operation_Layer
+from operations.operation_base import Operations, Operation_Layer
 from core.IOWrapper import IOWrapper
 from operations.impl_base import OperationImpl
 

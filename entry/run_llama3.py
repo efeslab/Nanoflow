@@ -59,8 +59,10 @@ prefill_input_ids = [tokenizer.encode(prefill_context)[:640] for _ in range(1000
 weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
 # weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
 # weight_map_amd_kan = "/work1/kasikci/kanzhu/models/llama3-8b"
-
-# prepare_weight(Pipeline, weight_map_wzr)
+pipeline_dict = {
+    "cuda:0" : Pipeline()
+}
+# prepare_weight(pipeline_dict, weight_map_wzr)
 
 pipeline = Pipeline()
 pipeline.init(weight_map_wzr, cached=True)
