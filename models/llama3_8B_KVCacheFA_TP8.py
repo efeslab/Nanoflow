@@ -28,16 +28,16 @@ from utils.prof_marker import prof_marker
 class Pipeline:
     def __init__(self):
         # Set parameters as instance variables.
-        self.pipeline_name = "Llama3-70B-TP8"
+        self.pipeline_name = "Llama3-8B-TP8"
         self.num_kv_heads = 8
-        self.num_qo_heads = 64
+        self.num_qo_heads = 32
         self.kqv_heads = self.num_qo_heads + 2 * self.num_kv_heads
         self.head_dim = 128
         self.vocab_size = 128256
-        self.hidden_dim = 8192
-        self.intermediate_dim = 28 * 1024
+        self.hidden_dim = 4096
+        self.intermediate_dim = 14 * 1024
         self.batch_size = None
-        self.num_layers = 80
+        self.num_layers = 32
         self.num_devices = torch.cuda.device_count()
         self.page_size = 64
 
@@ -463,7 +463,7 @@ class Pipeline:
 
     def config_network(self, device_id=0):
         os.environ["MASTER_ADDR"] = "localhost"
-        os.environ["MASTER_PORT"] = "12547"
+        os.environ["MASTER_PORT"] = "12549"
         dist.init_process_group(
             backend="nccl", rank=device_id, world_size=self.num_devices
         )

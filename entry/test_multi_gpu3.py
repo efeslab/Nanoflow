@@ -33,7 +33,10 @@ def worker(rank, world_size, shared_int, shared_batch_size, shared_array, barrie
                 new_tokens.extend(input_ids[2:4])
         elif command.value == 2:
                 logging.info(f"Worker {rank} new_tokens: {new_tokens}")
-                pipeline.update(new_tokens, decode_batchsize=2, device_id=rank)
+                decode_batchsize = 0
+                for sublist in new_tokens:
+                    decode_batchsize += 1 if len(sublist[1]) == 1 else 0
+                pipeline.update(new_tokens, decode_batchsize=decode_batchsize, device_id=rank)
                 new_tokens = pipeline.run(rank=rank, file_name=f"70B_test_flashinfer_{rank}", filefolder_name=f"70B_test_flashinfer_{rank}_folder")
                 print("new_tokens: ", new_tokens)
                 if rank == 0:
@@ -64,6 +67,7 @@ if __name__ == '__main__':
     # from models.llama3_FlashinferKVCache_TP2 import Pipeline
     # from models.llama3_KVCacheTorch_TP2 import Pipeline
     # from models.llama3_70B_KVCacheTorch_TP8 import Pipeline
+    # from models.llama3_8B_KVCacheFA_TP8 import Pipeline
     from models.llama3_70B_KVCacheFA_TP8 import Pipeline
     
     mp.set_start_method('spawn')

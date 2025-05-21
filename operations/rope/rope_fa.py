@@ -65,9 +65,7 @@ class RopeAppendFANoPageImpl(OperationImpl):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.cache.device != query.device:
             self.cache = self.cache.to(query.device)
-        if logging.getLogger().isEnabledFor(logging.DEBUG):
-            logging.debug(f"device {query.device} query shape: {query.shape}\nquery: {query}")
-        
+
         positions = self.op_base.per_token_offset  # type: ignore
         assert isinstance(positions, torch.Tensor)
         num_tokens = positions.shape[0]
@@ -75,14 +73,14 @@ class RopeAppendFANoPageImpl(OperationImpl):
         cos, sin = cos_sin.chunk(2, dim=-1)
 
         query_shape = query.shape
-        query = query.view(num_tokens, -1, self.head_dim)
+        query = query.view(num_tokens, self.num_qo_heads, self.head_dim)
         query_rot = query[..., : self.rotary_dim]
-        # query_pass = query[..., self.rotary_dim:]
         apply_rotary_emb(
             query_rot,
             cos,
             sin,
             inplace=True,
+            seqlen_offsets=cu_seqlens[:-1],
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
         )
@@ -91,7 +89,7 @@ class RopeAppendFANoPageImpl(OperationImpl):
         query = query.view(query_shape)
 
         key_shape = key.shape
-        key = key.view(num_tokens, -1, self.head_dim)
+        key = key.view(num_tokens, self.num_kv_heads, self.head_dim)
         key_rot = key[..., : self.rotary_dim]
         # key_pass = key[..., self.rotary_dim:]
         apply_rotary_emb(
@@ -99,6 +97,7 @@ class RopeAppendFANoPageImpl(OperationImpl):
             cos,
             sin,
             inplace=True,
+            seqlen_offsets=cu_seqlens[:-1],
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
         )
@@ -120,35 +119,46 @@ class RopeAppendFANoPageImpl(OperationImpl):
         output: torch.Tensor,
         offset: int = 0,
     ):
-        # Determine the number of elements for each slice.
-        layout_strides = [
-            self.num_kv_heads * self.head_dim,
-            self.num_kv_heads * self.head_dim,
-            self.num_qo_heads * self.head_dim,
-        ]
-        # Split kqv into key, query, and value (here assumed to be in the order: k, q, v).
-        # print("kqv shape:", kqv.shape)
-        k, v, q = torch.split(kqv, layout_strides, dim=1)
-        k = k.contiguous()
-        v = v.contiguous()
-        q = q.contiguous()
+        if kqv.shape[0] == 0:
+            return
 
-        # Process each batch element.
-        with prof_marker("RopeAppendTorch: Rope"):
-            q, k = self.forward(q, k, self.op_base.qo_indicies, self.op_base.max_seqlen)
+        with torch.cuda.stream(self.stream):
+            # Determine the number of elements for each slice.
+            layout_strides = [
+                self.num_kv_heads * self.head_dim,
+                self.num_kv_heads * self.head_dim,
+                self.num_qo_heads * self.head_dim,
+            ]
+            # Split kqv into key, query, and value (here assumed to be in the order: k, q, v).
+            # print("kqv shape:", kqv.shape)
+            k, v, q = torch.split(kqv, layout_strides, dim=1)
+            k = k.contiguous()
+            v = v.contiguous()
+            q = q.contiguous()
 
-        with prof_marker("RopeAppendTorch: KVCachePutBatch"):
-            KVCache.put_batch(
-                layer,
-                self.op_base.qo_indicies,
-                k,
-                v,
-                self.op_base.rev_input_indptr,
-                self.op_base.per_token_offset,
-            )
-        with prof_marker("RopeAppendTorch: FinalCopy"):
-            output.copy_(q)
-            KVCache.store_last_kv(k, v, self.device_id, layer)
+            # Process each batch element.
+            with prof_marker("RopeAppendTorch: Rope"):
+                q, k = self.forward(q, k, self.op_base.qo_indicies, self.op_base.max_seqlen)
+
+            with prof_marker("RopeAppendTorch: KVCachePutBatch"):
+                KVCache.put_batch(
+                    layer,
+                    self.op_base.qo_indicies,
+                    k,
+                    v,
+                    self.op_base.rev_input_indptr,
+                    self.op_base.per_token_offset,
+                    self.op_base.start_req_idx,
+                    self.op_base.end_req_idx,
+                )
+            with prof_marker("RopeAppendTorch: FinalCopy"):
+                output.copy_(q)
+                KVCache.store_last_kv(
+                    k,
+                    v,
+                    self.op_base.io_device.tensor_offset,
+                    self.op_base.io_device.tensor_offset + self.op_base.io_device.batch_size,
+                )
 
 
 class RopeAppendFA(Operations):
@@ -204,19 +214,35 @@ class RopeAppendFA(Operations):
                 nano_op.update(qo_indicies, decode_batchsize, device_id)
         else:
             """Stores the starting indices for the query/key segments."""
-            self.qo_indicies = torch.tensor(qo_indicies)
+            self.io_device = self.children[device_id].inputs["kqv"]
+            self.start_req_idx = tensor_offset_to_req_idx(
+                qo_indicies, self.io_device.tensor_offset
+            )
+            self.end_req_idx = tensor_offset_to_req_idx(
+                qo_indicies, self.io_device.tensor_offset + self.io_device.batch_size
+            )
+            if self.start_req_idx == self.end_req_idx:
+                return
+            self.qo_indicies = (
+                torch.tensor(
+                    qo_indicies[self.start_req_idx : self.end_req_idx + 1],
+                    dtype=torch.int32,
+                    device=f"cuda:{device_id}",
+                )
+                - qo_indicies[self.start_req_idx]
+            )
             self.seqlens = self.qo_indicies.diff()
             self.max_seqlen = self.seqlens.max().item()
             self.per_token_offset = torch.zeros(int(self.qo_indicies[-1].item()))
             self.rev_input_indptr = torch.zeros(int(self.qo_indicies[-1].item()))
-            indices = self.externals["KVCache"].get_whole_indices()
+            self.indices = self.externals["KVCache"].get_whole_indices()[self.start_req_idx : self.end_req_idx]
             for i, seqlen in enumerate(self.seqlens.tolist()):
                 self.per_token_offset[
                     self.qo_indicies[i] : self.qo_indicies[i] + seqlen
-                ] = torch.arange(seqlen) + indices[i].cpu()
+                ] = (torch.arange(seqlen) + self.indices[i].cpu())
                 self.rev_input_indptr[
                     self.qo_indicies[i] : self.qo_indicies[i] + seqlen
-                ] = i
+                ] = (i + self.start_req_idx)
             self.qo_indicies = self.qo_indicies.to(
                 dtype=torch.int32, device=f"cuda:{device_id}"
             )

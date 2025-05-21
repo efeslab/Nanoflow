@@ -438,7 +438,7 @@ class Pipeline:
         with prof_marker("update_step_5"):
             self.cumsum_input = torch.cat([torch.tensor([0], dtype=torch.int32, device='cpu'), torch.cumsum(request_length, dim=0, dtype=torch.int32)]).tolist()
         with prof_marker("update_step_6"):
-            self.kv_cache.update(self.input_req_idx)
+            self.kv_cache.update(self.input_req_idx, self.cumsum_input)
         with prof_marker("update_step_7"):
             self.global_input.children[device_id].outputs["tokens"].tensor.copy_(input_tensor)
         with prof_marker("update_step_8"):

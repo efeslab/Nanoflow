@@ -1,3 +1,4 @@
+import logging
 import torch
 import matplotlib.pyplot as plt
 import networkx as nx
@@ -70,6 +71,22 @@ class Executor():
                 op.wait_cuda_event()
                 op.run()
                 op.record_cuda_event()
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                for name, tensor in op.inputs.items():
+                    logging.debug(
+                        f"op_name {op_name} device {tensor.tensor.device} "
+                        f"input: {name} shape: {tensor.tensor.shape}\n"
+                        f"{tensor.tensor}\n"
+                        f"first dimension: {tensor.tensor[..., 0]}\n"
+                    )
+                for name, tensor in op.outputs.items():
+                    logging.debug(
+                        f"op_name {op_name} device {tensor.tensor.device} "
+                        f"output: {name} shape: {tensor.tensor.shape}\n"
+                        f"{tensor.tensor}\n"
+                        f"first dimension: {tensor.tensor[..., 0]}\n"
+                    )
+            
             if "GlobalOutput" in op.name:
                 torch.cuda.synchronize()
                 output.copy_(op.inputs["tokens"].tensor)
