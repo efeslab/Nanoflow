@@ -4,10 +4,6 @@
 
 #include "cutlassGemmExternDeclearation.cuh"
 
-BaseGEMMWrapper::~BaseGEMMWrapper() {
-
-}
-
 std::unordered_map<std::string, BaseGEMMWrapper*(*)()> GEMMGenMap = {
 @map_entries@
 };

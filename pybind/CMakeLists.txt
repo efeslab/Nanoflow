@@ -49,7 +49,7 @@ get_filename_component(PARENT_DIR ${CMAKE_SOURCE_DIR} DIRECTORY)
 set(CUTLASS_DIR ${PARENT_DIR}/3rdparty/cutlass CACHE PATH "Path to modified cutlass src")
 set(SPDLOG_DIR  ${PARENT_DIR}/3rdparty/spdlog CACHE PATH "Path to spdlog src")
 set(FLASHINFER_DIR ${PARENT_DIR}/3rdparty/flashinfer CACHE PATH "Path to flashinfer src")
-set(MSCCLPP_DIR ${PARENT_DIR}/3rdparty/mscclpp CACHE PATH "Path to mscclpp install")
+set(MSCCLPP_DIR /usr/local/mscclpp CACHE PATH "Path to mscclpp install")
 
 # Include directories
 include_directories(${MSCCLPP_DIR}/include)
