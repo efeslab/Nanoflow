@@ -90,7 +90,7 @@ def test_performance():
     decode_inputs.extend([(decode_batch_size, prefill_input_ids[decode_batch_size])])
     pipeline.update(decode_inputs, decode_batch_size)
 
-    for i in range(decode_batch_size, decode_batch_size + 100):
+    for i in range(decode_batch_size, decode_batch_size + 50):
         print("Cycle: ", i - decode_batch_size)
         next_prefill_idx = i + 1
         new_tokens = pipeline.run()

@@ -102,13 +102,14 @@ class Operations:
             
     def config_tag(self, tag, parameter_map = {}):
         if self.isNanoSplit:
-            for nano_op in self.nano_ops:
-                nano_op.config_tag(tag, parameter_map)
+            assert len(tag) == len(self.nano_ops), f"Operation {self.name} has {len(self.nano_ops)} nano ops, but {len(tag)} tags were provided."
+            for i, nano_op in enumerate(self.nano_ops):
+                nano_op.config_tag(tag[i], parameter_map)
             return self
         else:
             self.tag = tag
             self.parameter_map = parameter_map
-            parts = tag.split(":", 1)
+            parts = self.tag.split(":", 1)
             category_tag = ""
             impl_tag = ""
             if len(parts) == 1:

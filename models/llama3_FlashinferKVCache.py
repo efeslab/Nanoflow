@@ -34,10 +34,10 @@ class Pipeline():
         self.batch_size = None
         self.num_layers = 32
         self.layer_list = [i for i in range(self.num_layers)]
-        self.page_size = 64
+        self.page_size = 80
         self.device = "cuda:0"
 
-    def set_work_dev(self, device):
+    def set_device(self, device):
         self.device = device
 
     def init(self, weight_path, cached=False):
@@ -62,7 +62,7 @@ class Pipeline():
         }
 
     def init_external_data(self):
-        self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048, self.page_size, 1, self.device)
+        self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048* 2, self.page_size, 1, self.device)
         self.kv_cache = BatchedDistKVCache(self.kv_pool)
 
     def init_operations(self):
@@ -241,17 +241,29 @@ class Pipeline():
     def config_algorithm(self):
         gemm_tag = "cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto"
         self.gen_embedding.config_tag("cuda")
-        self.layerNormAttn.config_tag("cuda")
-        self.activation.config_tag("cuda")
-        self.kqv.config_tag(gemm_tag)
+        self.layerNormAttn.config_tag(["cuda", "cuda"])
+        # self.layerNormAttn.config_tag("cuda")
+        self.activation.config_tag(["cuda", "cuda"])
+        # self.activation.config_tag("cuda")
+        # self.kqv.config_tag(gemm_tag)
+        self.kqv.config_tag([gemm_tag, gemm_tag])
+        # self.kqv.config_tag(["cuda:128_128_32_64_64_32_3_5_RowMajor_RowMajor_RowMajor", "cuda:128_128_32_64_64_32_3_5_RowMajor_RowMajor_RowMajor"])
         # self.kqv.config_tag("triton")
-        self.ropeAppend.config_tag("cuda")
+        self.ropeAppend.config_tag(["cuda", "cuda"])
+        # self.ropeAppend.config_tag("cuda")
         self.decAttn.config_tag("batched_cuda")
         self.pfAttn.config_tag("batched_cuda")
-        self.layerNormFFN.config_tag("cuda")
-        self.o.config_tag(gemm_tag)
-        self.ug.config_tag(gemm_tag)
-        self.d.config_tag(gemm_tag)
+        # self.layerNormFFN.config_tag("cuda")
+        self.layerNormFFN.config_tag(["cuda", "cuda"])
+        # self.o.config_tag(gemm_tag)
+        self.o.config_tag([gemm_tag, gemm_tag])
+        # self.o.config_tag(["cuda:128_128_32_64_64_32_1_5_RowMajor_RowMajor_RowMajor", "cuda:128_128_32_64_64_32_2_5_RowMajor_RowMajor_RowMajor"])
+        # self.ug.config_tag(gemm_tag)
+        self.ug.config_tag([gemm_tag, gemm_tag])
+        # self.ug.config_tag(["cuda:128_128_32_64_64_32_1_5_RowMajor_RowMajor_RowMajor", "cuda:128_128_32_64_64_32_2_5_RowMajor_RowMajor_RowMajor"])
+        # self.d.config_tag(gemm_tag)
+        self.d.config_tag([gemm_tag, gemm_tag])
+        # self.d.config_tag(["cuda:128_128_32_64_64_32_1_5_RowMajor_RowMajor_RowMajor", "cuda:128_128_32_64_64_32_2_5_RowMajor_RowMajor_RowMajor"])
         self.modelLayerNorm.config_tag("cuda")
         self.sample.config_tag("cuda")
         self.getLogits.config_tag(gemm_tag)
@@ -287,8 +299,8 @@ class Pipeline():
         }
         extra_links = {
             # TODO: add extra links for virtual ops
-            # "KQV0": "KQV1",
-            # "RopeAppend0": "RopeAppend1",
+            # "KQV0": ("KQV1", False, False),
+            # "RopeAppend0": ("RopeAppend1", False, False),
             "RopeAppend0": ("O1", False, False),
             "RopeAppend1": ("O0", False, True),
         }
