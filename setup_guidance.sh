@@ -1,3 +1,11 @@
+apt update && apt upgrade -y
+apt install pybind11-dev
+apt install liburing-dev
+apt install libopenmpi-dev
+apt-get install nvidia-cuda-toolkit
+sysctl -w kernel.io_uring_disabled=0
+sysctl -w vm.nr_hugepages=65536
+
 git submodule init
 git submodule update
 
@@ -7,11 +15,6 @@ pip install torch==2.7.0 torchvision==0.22.0+cu128 torchaudio==2.7.0 --index-url
 pip install nvtx
 pip install loguru
 pip install transformers
-apt install pybind11-dev
-apt install liburing-dev
-apt install libopenmpi-dev
-sysctl -w kernel.io_uring_disabled=0
-sysctl -w vm.nr_hugepages=65536
 
 cd ..
 # install cmake 3.29.0
@@ -20,9 +23,7 @@ if [[ ! -f "$CMAKE_INSTALLER" ]]; then
   wget https://github.com/Kitware/CMake/releases/download/v3.29.0-rc2/$CMAKE_INSTALLER
   chmod +x ./$CMAKE_INSTALLER
 fi
-mkdir -p /root/cmake
-./$CMAKE_INSTALLER --prefix=/root/cmake --exclude-subdir
-export PATH=/root/cmake/bin:$PATH
+./$CMAKE_INSTALLER --prefix=/usr/local --exclude-subdir
 
 # install nsight
 NSIGHT="NsightSystems-linux-cli-public-2025.1.1.131-3554042.deb"
@@ -59,7 +60,7 @@ cd ./pybind
 mkdir build
 cd build/
 cmake ..
-make -j
+make -j 256
 cd ../..
 
 # run tests

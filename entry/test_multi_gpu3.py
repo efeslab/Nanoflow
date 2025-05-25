@@ -70,8 +70,6 @@ if __name__ == '__main__':
     from multiprocessing import Value, Array, Barrier
     from transformers import AutoTokenizer
     print("import modules1, ", time.perf_counter() - T0)
-    # from models.llama3_FlashinferKVCache_TP2 import Pipeline
-    # from models.llama3_KVCacheTorch_TP2 import Pipeline
     # from models.llama3_70B_KVCacheTorch import Pipeline
     from models.llama3_70B_FlashinferKVCache import Pipeline
 

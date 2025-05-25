@@ -143,6 +143,7 @@ def test_correctness(use_kv_cache=True):
         output_strings[req_idx].extend(new_token)
     decode_batchsize = len(new_tokens)
     assert decode_batchsize == 4
+    # print("new_tokens: ", new_tokens)
 
     if use_kv_cache:
         pipeline.update(new_tokens, decode_batchsize)

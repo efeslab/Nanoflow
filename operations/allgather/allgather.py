@@ -13,12 +13,13 @@ class AllGatherTorchImpl(OperationImpl):
         super().__init__(op_base, stream, device)
         self.tp_size = op_base.tp_size
         self.subgroup = op_base.subgroup
+        self.N = op_base.N
+        self.gather_list = [torch.empty((self.batch_size, self.N // self.tp_size), dtype=torch.float16, device=device) for _ in range(self.tp_size)]
     
     def run(self, input, output):
         with torch.cuda.stream(self.stream):
-            gather_list = [torch.empty_like(input) for _ in range(self.tp_size)]
-            dist.all_gather(gather_list, input, group=self.subgroup)
-            out = torch.cat(gather_list, dim=1)
+            dist.all_gather(self.gather_list, input, group=self.subgroup)
+            out = torch.cat(self.gather_list, dim=1)
             output.copy_(out)
 
 class AllGather(Operations):

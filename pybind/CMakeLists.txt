@@ -12,7 +12,6 @@ if(CMAKE_CUDA_ARCHITECTURES STREQUAL "90")
 endif()
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-# add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=0)
 
 #set(CMAKE_C_COMPILER "/usr/bin/gcc-11")
 #set(CMAKE_CXX_COMPILER "/usr/bin/g++-11")

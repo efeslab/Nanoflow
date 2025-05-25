@@ -92,5 +92,6 @@ if platform_config.PLATFORM_CUDA:
         # def profile(self, impl_tag):
 
         def run(self, A, B, C, D):
-            if self.batch_size > 0:
-                bind_gemm.gemmLauncher(self.name, A, B, C, D, self.stream_handle)
+            with torch.cuda.stream(self.stream):
+                if self.batch_size > 0:
+                    bind_gemm.gemmLauncher(self.name, A, B, C, D, self.stream_handle)
