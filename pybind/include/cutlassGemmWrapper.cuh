@@ -146,7 +146,7 @@ struct CutlassGEMMWrapper : public BaseGEMMWrapperTemplate<LayoutInputA_, Layout
 										   tensor_d_ref,
 										   {alpha, beta},
 										   split_k};
-		cutlass::Status status = gemm_op.update(arguments, workspace);
+		cutlass::Status status = gemm_op.initialize(arguments, workspace);
 		CUTLASS_CHECK(status);
 	}
 	// Expected usage:
