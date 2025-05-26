@@ -267,6 +267,7 @@ class Pipeline():
         self.modelLayerNorm.config_tag("cuda")
         self.sample.config_tag("cuda")
         self.getLogits.config_tag(gemm_tag)
+        # self.getLogits.config_tag("cuda:128_256_32_64_64_32_1_3_RowMajor_RowMajor_RowMajor")
 
     def config_streams(self):
         self.global_input.set_stream(self.streams["GEMM"])

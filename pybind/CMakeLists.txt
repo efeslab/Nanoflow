@@ -32,13 +32,7 @@ execute_process(
   OUTPUT_VARIABLE TorchCMakePrefixPath
   OUTPUT_STRIP_TRAILING_WHITESPACE
 )
-
-# Get pybind11 CMake directory
-execute_process(
-  COMMAND python -m pybind11 --cmakedir
-  OUTPUT_VARIABLE PYBIND11_CMAKE_DIR
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-)
+set(Torch_DIR "${TorchCMakePrefixPath}/Torch")
 
 # Set paths
 list(APPEND CMAKE_PREFIX_PATH "${TorchCMakePrefixPath}")

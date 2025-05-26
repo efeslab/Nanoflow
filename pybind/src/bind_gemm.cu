@@ -30,7 +30,8 @@ void configGEMM(const std::string& gemm_tag, const std::string& gemm_name, int M
   gemm_wrapper->set_alpha(alpha);
   gemm_wrapper->set_beta(beta);
 
-  gemm_wrapper->init(beta);
+  gemm_wrapper->init();
+  cudaDeviceSynchronize(); // Ensure the initialization is complete before proceeding
 
   gemm_map[gemm_name] = gemm_wrapper;
 }
@@ -66,9 +67,9 @@ void runGEMM(const std::string& gemm_name, torch::Tensor Input_A, torch::Tensor 
     gemm_wrapper->set_weight(gemm_weight);
     gemm_wrapper->setC(gemm_bias);
     gemm_wrapper->setD(gemm_output);
-
-    gemm_wrapper->updateArgument();
     gemm_wrapper->setStream(stream);
+    
+    gemm_wrapper->updateArgument();
     gemm_wrapper->work(); // Launch the GEMM operation
 
   // // // Synchronize the stream to ensure the operation is complete.

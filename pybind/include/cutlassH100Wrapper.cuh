@@ -169,7 +169,7 @@ struct CutlassH100GEMMWrapper : public BaseGEMMWrapperTemplate<LayoutInputA_, La
 		};
 		cutlass::Status status;
 		// status = gemm_op.update(arguments, workspace.get());
-		status = gemm_op.initialize(arguments, workspace.get());
+		status = gemm_op.initialize(arguments, workspace.get(), stream);
 		CUTLASS_CHECK(status);
 	}
 	
@@ -187,7 +187,7 @@ struct CutlassH100GEMMWrapper : public BaseGEMMWrapperTemplate<LayoutInputA_, La
 	// Expected usage:
 	// Call set{A,B,C,D} to configure the input/output tensors before calling this init.
 	// Assuming all tensor operands are setup.
-	void init(ElementComputeEpilogue beta_) override {
+	void init() override {
 		int M = int(this->M);
 		int N = int(this->N);
 		int K = int(this->K);
@@ -214,8 +214,6 @@ struct CutlassH100GEMMWrapper : public BaseGEMMWrapperTemplate<LayoutInputA_, La
 			stride_D = cutlass::make_cute_packed_stride(StrideD{}, {N, M, 1});
 		} 
 
-
-		beta = beta_;
 		typename Gemm::Arguments  arguments{
 			cutlass::gemm::GemmUniversalMode::kGemm,
 			{M, N, K, split_k},
