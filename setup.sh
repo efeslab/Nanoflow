@@ -63,7 +63,17 @@ cmake ..
 make -j 256
 cd ../..
 
+# login to huggingface
+cd ..
+mkdir -p hf
+export HF_HOME=$(pwd)/hf
+huggingface-cli login
+
+cd Nanoflow-python
+# load llama3-8B weights
+cd ./core
+python weightSaver.py
+
 # run tests
 cd ./entry
 python run_llama3.py
-
