@@ -1,7 +1,6 @@
 import transformers
 import torch
 import torch.distributed as dist
-import nvtx
 import os, sys
 sys.path.append("../")
 sys.path.append('../pybind/build')

@@ -17,6 +17,16 @@ class SiluMultiplyTorchImpl(OperationImpl):
             A, B = torch.split(x, x.shape[-1] // 2, dim=-1)
             output.copy_(A * torch.nn.functional.silu(B))
 
+
+if config.PLATFORM_AITER:
+    from aiter.ops.activation import silu_and_mul as aiter_silu_multiply
+    class SiluMultiplyAiterImpl(OperationImpl):
+        category_tag = "aiter"
+        def run(self, x, output):
+            with torch.cuda.stream(self.stream):
+                aiter_silu_multiply(output, x)
+
+
 if config.PLATFORM_CUDA:
     import bind_silu_multiply
     class SiluMultiplyCudaImpl(OperationImpl):
@@ -41,6 +51,8 @@ class Activation(Operations):
     
     def init_impl_map(self):
         self.add_impl(SiluMultiplyTorchImpl)
+        if config.PLATFORM_AITER:
+            self.add_impl(SiluMultiplyAiterImpl)
         if config.PLATFORM_CUDA:
             self.add_impl(SiluMultiplyCudaImpl)
         

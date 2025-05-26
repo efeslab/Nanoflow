@@ -341,17 +341,17 @@ class Pipeline:
 
     def config_algorithm(self, device_id: int = 0):
         self.gen_embedding.config_tag("torch", device_id)  # type: ignore
-        self.layerNormAttn.config_tag("torch", device_id)  # type: ignore
+        self.layerNormAttn.config_tag("aiter", device_id)  # type: ignore
         self.activation.config_tag("torch", device_id)  # type: ignore
         self.kqv.config_tag("torch", device_id)  # type: ignore
         self.ropeAppend.config_tag("flash_attn_no_page", device_id) # type: ignore
         self.decAttn.config_tag("flash_attn_no_page", device_id)  # type: ignore
         self.pfAttn.config_tag("flash_attn_no_page", device_id)  # type: ignore
-        self.layerNormFFN.config_tag("triton", device_id)  # type: ignore
+        self.layerNormFFN.config_tag("aiter", device_id)  # type: ignore
         self.o.config_tag("torch", device_id)  # type: ignore
         self.ug.config_tag("torch", device_id)  # type: ignore
         self.d.config_tag("torch", device_id)  # type: ignore
-        self.modelLayerNorm.config_tag("torch", device_id)  # type: ignore
+        self.modelLayerNorm.config_tag("aiter", device_id)  # type: ignore
         self.sample.config_tag("torch", device_id)  # type: ignore
         self.getLogits.config_tag("torch", device_id)  # type: ignore
 

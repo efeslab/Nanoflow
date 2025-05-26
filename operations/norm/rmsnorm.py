@@ -18,12 +18,15 @@ class LayerNormTorchImpl(OperationImpl):
             normalized_x = x / rms
             output.copy_(normalized_x.to(torch.float16) * weight)
 
+
 if platform_config.PLATFORM_TRITON:
     from triton_ops.rmsnorm import rms_norm as triton_rms_norm
     class LayerNormTritonImpl(OperationImpl):
         category_tag = "triton"
         def run(self, x, weight, output, epsilon):
-            triton_rms_norm(x, weight, output, epsilon)
+            with torch.cuda.stream(self.stream):
+                triton_rms_norm(x, weight, output, epsilon)
+
 
 if platform_config.PLATFORM_CUDA:
     import bind_rms_norm
@@ -32,7 +35,19 @@ if platform_config.PLATFORM_CUDA:
         def run(self, x, weight, output, epsilon):
             # print("using cuda")
             if self.batch_size > 0:
-                bind_rms_norm.rms_norm(output, x, weight, epsilon, self.stream_handle)
+                with torch.cuda.stream(self.stream):
+                    bind_rms_norm.rms_norm(output, x, weight, epsilon, self.stream_handle)
+
+
+if platform_config.PLATFORM_AITER:
+    from aiter.ops.rmsnorm import rms_norm as aiter_rms_norm
+
+    class LayerNormAiterImpl(OperationImpl):
+        category_tag = "aiter"
+        def run(self, x, weight, output, epsilon):
+            with torch.cuda.stream(self.stream):
+                output.copy_(aiter_rms_norm(x, weight, epsilon))
+
 
 class LayerNorm(Operations):
     def __init__(self, name):
@@ -54,6 +69,8 @@ class LayerNorm(Operations):
         self.add_impl(LayerNormTorchImpl)
         if platform_config.PLATFORM_TRITON:
             self.add_impl(LayerNormTritonImpl)
+        if platform_config.PLATFORM_AITER:
+            self.add_impl(LayerNormAiterImpl)
         if platform_config.PLATFORM_CUDA:
             self.add_impl(LayerNormCudaImpl)
     

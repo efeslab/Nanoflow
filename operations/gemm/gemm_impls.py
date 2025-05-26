@@ -19,11 +19,11 @@ class GEMMTorchImpl(OperationImpl):
             D = self.outputs["D"].tensor
             A = self.inputs["A"].tensor
             
-            if self.bias:
+            if self.bias or self.beta:
                 C = self.inputs["C"].tensor
-                D.copy_(A.matmul(B) * self.alpha + C * self.beta)
+                torch.addmm(C, A, B, beta=self.beta, alpha=self.alpha, out=D)
             else:
-                D.copy_(A.matmul(B) * self.alpha)
+                torch.matmul(A, B, out=D)
 
 class GEMMTritonImpl(OperationImpl):
     category_tag = "triton"
@@ -75,6 +75,27 @@ class GEMMTritonImpl(OperationImpl):
             )
             D.copy_(C)
 
+
+if platform_config.PLATFORM_AITER:
+    class GEMMAiterImpl(OperationImpl):
+        category_tag = "aiter"
+        def config(self, impl_tag, parameter_map):
+            self.alpha = self.op_base.alpha
+            self.bias = self.op_base.bias
+            self.beta = 0.0
+            if self.bias:
+                self.beta = self.op_base.beta
+        
+        def run(self, B):
+            with torch.cuda.stream(self.stream):
+                D = self.outputs["D"].tensor
+                A = self.inputs["A"].tensor
+                
+                if self.bias:
+                    C = self.inputs["C"].tensor
+                    D.copy_(A.matmul(B) * self.alpha + C * self.beta)
+                else:
+                    D.copy_(A.matmul(B) * self.alpha)
 
 if platform_config.PLATFORM_CUDA:
     import pybind.build.bind_gemm as bind_gemm

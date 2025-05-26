@@ -1,4 +1,7 @@
+from contextlib import nullcontext
 import logging
+
+import torch
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -17,11 +20,19 @@ def worker(rank, world_size, shared_int, shared_batch_size, shared_array, barrie
     
     new_tokens = None
 
-    while True:
-        # First barrier: wait until the main process writes a new task.
-        barrier.wait()
-        if command.value == 1:
-                input0 = input_ids[0:2]
+    with torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ],
+        record_shapes=True,
+        profile_memory=True,
+    ) if rank == 0 else nullcontext() as prof:
+        while True:
+            # First barrier: wait until the main process writes a new task.
+            barrier.wait()
+            if command.value == 1:
+                input0 = input_ids[0:len(input_ids) // 2]
                 logging.info(f"Worker {rank} input0: {input0}")
                 pipeline.update(input0, 0, device_id=rank)
                 new_tokens = pipeline.run(rank=rank, file_name=f"./test_data/70B_test_flashinfer_{rank}", filefolder_name=f"./test_data/70B_test_flashinfer_{rank}_folder")
@@ -30,8 +41,8 @@ def worker(rank, world_size, shared_int, shared_batch_size, shared_array, barrie
                 if rank == 0:
                     for req_idx, new_token in new_tokens:
                         shared_array[req_idx] = new_token[0]
-                new_tokens.extend(input_ids[2:4])
-        elif command.value == 2:
+                new_tokens.extend(input_ids[len(input_ids) // 2:])
+            elif command.value == 2:
                 logging.info(f"Worker {rank} new_tokens: {new_tokens}")
                 decode_batchsize = 0
                 for sublist in new_tokens:
@@ -42,14 +53,16 @@ def worker(rank, world_size, shared_int, shared_batch_size, shared_array, barrie
                 if rank == 0:
                     for req_idx, new_token in new_tokens:
                         shared_array[req_idx] = new_token[0]
-        elif command.value == -1:
+            elif command.value == -1:
                 # Termination signal received.
                 pipeline.terminate()
                 barrier.wait()
                 break
-        # Second barrier: wait until all workers finish computation.
-        barrier.wait()
+            # Second barrier: wait until all workers finish computation.
+            barrier.wait()
     
+    if rank == 0:
+        prof.export_chrome_trace("trace_mi300_torch.json")
     # Worker exits gracefully.
 
 if __name__ == '__main__':
@@ -66,16 +79,19 @@ if __name__ == '__main__':
     from transformers import AutoTokenizer
     # from models.llama3_FlashinferKVCache_TP2 import Pipeline
     # from models.llama3_KVCacheTorch_TP2 import Pipeline
-    # from models.llama3_70B_KVCacheTorch_TP8 import Pipeline
+    from models.llama3_70B_KVCacheTorch_TP8 import Pipeline
     # from models.llama3_8B_KVCacheFA_TP8 import Pipeline
-    from models.llama3_70B_KVCacheFA_TP8 import Pipeline
+    # from models.llama3_70B_KVCacheFA_TP8 import Pipeline
     
     mp.set_start_method('spawn')
     
     # tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-70B-Instruct")
-    input_strings = [ "Hi, who are you?" for _ in range(4)]
-    input_ids = [(idx, tokenizer.encode(s)) for idx, s in enumerate(input_strings)]
+    batch_size = 512
+    input_string = "Large Language Models (LLMs) have rapidly evolved from simple sequence-to-sequence systems into sophisticated architectures capable of human-level language understanding and generation. The architecture underpinning most of these models is the Transformer, introduced in the seminal paper “Attention is All You Need” by Vaswani et al. in 2017. Since then, the Transformer has served as the foundation for models such as GPT-3, PaLM, LLaMA, and Claude. These models, especially those with tens or hundreds of billions of parameters, rely on innovations in model scaling, parallelism, training data curation, and optimization techniques. At the heart of the Transformer is the attention mechanism. This allows the model to weigh and focus on different parts of the input sequence dynamically. Self-attention, in particular, enables the model to capture contextual relationships between words irrespective of their distance in the sequence. This is a dramatic departure from earlier RNNs and LSTMs, which processed sequences linearly and struggled with long-range dependencies. Self-attention operates in parallel, which is not only more computationally efficient but also critical for scaling up models. As models scaled, new challenges emerged—most notably, the explosion in compute requirements. Training GPT-3, for example, required hundreds of petaflop-days of compute and massive datasets scraped from the internet. To handle such computational demands, researchers employed techniques like model parallelism, data parallelism, pipeline parallelism, and optimizer sharding. Frameworks such as DeepSpeed and Megatron-LM became crucial in managing training across thousands of GPUs. However, bigger isn’t always better. While adding more parameters generally improves model capacity, it also introduces inefficiencies. This led to the rise of Mixture of Experts (MoE) models, where only a subset of the model’s parameters are active at a time. Instead of activating all parts of a monolithic network, an MoE model uses a gating mechanism to route inputs to a few selected “experts.” Each expert is a small feedforward network, and typically only 2–4 experts out of dozens or hundreds are used per token. This dramatically reduces the compute cost while keeping the overall model capacity high. Google's GLaM and Switch Transformer are notable implementations of this approach. Training such models also brings challenges like expert imbalance, where some experts are overused while others are underutilized. This is addressed using auxiliary losses that encourage balanced routing. Another complication is that the gating mechanism can become a bottleneck if it is not efficiently implemented, especially at scale. Another key component of LLM development is data. Large-scale training data must be diverse, representative, and relatively clean. Curating such datasets involves filtering out low-quality content, removing duplicate web pages, decontaminating evaluation sets, and ensuring that personal or harmful information is minimized. While some models are trained on curated corpora like The Pile or Common Crawl, others use proprietary datasets augmented with internal or human-labeled content. Instruct-tuning and reinforcement learning from human feedback (RLHF) further refine these models to align their outputs with human preferences. The emergence of RLHF as a fine-tuning method is particularly transformative. After a base model is trained to predict the next token, it’s further fine-tuned using rankings or preferences from human annotators. This process helps the model generate more helpful, harmless, and honest responses. OpenAI's ChatGPT and Anthropic's Claude use similar RLHF-based training pipelines. But alignment isn’t just a technical problem—it’s also philosophical. How should a model behave in ambiguous moral situations? Who decides what is “helpful” or “safe”? These are open questions that the AI research community, ethicists, and policymakers must grapple with. And as models become capable of multimodal reasoning—processing not just text but also images, audio, and video—the alignment problem becomes even more complex. Deployment of LLMs also poses engineering and infrastructure challenges. Serving a model like GPT-4 or Claude at scale requires careful attention to latency, cost-efficiency, caching strategies, and prompt engineering. Techniques like speculative decoding, retrieval-augmented generation (RAG), prompt compression, and system message templating are employed to make inference faster and more relevant. The future of LLMs appears to be moving in several directions simultaneously: larger models, more efficient smaller models, multimodal models, and models that can interact with tools and APIs. Tool-use in LLMs allows them to perform tasks like math, code execution, web search, or database queries by invoking external systems—essentially combining reasoning with action. This trend bridges the gap between static language modeling and interactive AI agents. In summary, the evolution of large language models is not just a story of bigger models and faster GPUs. It's a story of clever architectural decisions like attention and MoE, complex training and alignment strategies like RLHF, and ongoing work in model interpretability, safety, and deployment. The scale of the engineering challenge is immense, but so is the potential. With proper safeguards and continued research, LLMs have the capacity to transform industries—from education and healthcare to law and scientific discovery—while also raising new ethical and societal questions that we must answer with care."
+    # input_string = "Hi, who are you?"
+    input_ids = [(idx, tokenizer.encode(input_string)[:128]) for idx in range(batch_size)]
+
 
     output_strings = {}
     for idx, ids in input_ids:
@@ -101,7 +117,7 @@ if __name__ == '__main__':
     command = Value('i', 1)    # 'i' stands for a signed integer.
     shared_int = Value('i', 0)    # 'i' stands for a signed integer.
     shared_batch_size = Value('i', 0)    # 'i' stands for a signed integer.
-    shared_array = Array('i', 4)  # An array of integers with length equal to world_size.
+    shared_array = Array('i', batch_size)  # An array of integers with length equal to world_size.
 
     # Create a Barrier for world_size workers plus the main process.
     barrier = Barrier(world_size + 1)
@@ -125,10 +141,10 @@ if __name__ == '__main__':
 
     # get the shared array values
     print(f"Shared array values: {list(shared_array)}")
-    for i in range(2):
+    for i in range(batch_size // 2):
         output_strings[i].append(shared_array[i])
 
-    iterations = 20
+    iterations = 3
     #     print("input_ids: ", i)
     # For each iteration, update the shared integer, synchronize with the workers,
     # and let them compute and write their results.
@@ -139,7 +155,7 @@ if __name__ == '__main__':
         barrier.wait()
 
         barrier.wait()
-        for i in range(4):
+        for i in range(batch_size):
             output_strings[i].append(shared_array[i])
     
     # Signal termination: write -1 into the shared integer.
