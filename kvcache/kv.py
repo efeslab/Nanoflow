@@ -14,7 +14,7 @@ from torch.profiler import profile, record_function, ProfilerActivity
 from utils.prof_marker import prof_marker
 import time
 
-from triton_ops.kv_copy import copy_fa_nopage_kvcache, copy_torch_kvcache
+from .triton.kv_copy import copy_fa_nopage_kvcache, copy_torch_kvcache
 
 
 class KVCacheNone:

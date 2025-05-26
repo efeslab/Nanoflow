@@ -6,10 +6,10 @@ from operations.operation_base import Operations, Operation_Device, Operation_La
 from core.IOWrapper import IOWrapper
 from operations.impl_base import OperationImpl
 from kvcache.kv import KVCacheFANoPage
-from triton_ops.rope import apply_rotary_emb
 from utils.prof_marker import prof_marker
 from utils.help_functions import tensor_offset_to_req_idx
 
+from .triton.kernels.rope import apply_rotary_emb
 
 class RopeAppendFANoPageImpl(OperationImpl):
     category_tag = "flash_attn_no_page"  # type: ignore[assignment]

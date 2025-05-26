@@ -20,7 +20,7 @@ class LayerNormTorchImpl(OperationImpl):
 
 
 if platform_config.PLATFORM_TRITON:
-    from triton_ops.rmsnorm import rms_norm as triton_rms_norm
+    from .triton.kernels.rmsnorm import rms_norm as triton_rms_norm
     class LayerNormTritonImpl(OperationImpl):
         category_tag = "triton"
         def run(self, x, weight, output, epsilon):
