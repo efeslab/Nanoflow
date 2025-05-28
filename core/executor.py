@@ -4,6 +4,9 @@ import networkx as nx
 from utils.prof_marker import prof_marker
 from utils.graph_plot import plot_graph_topological, draw_graphs_subplots
 
+tensor_pool = dict()
+tensor_list = []
+
 class Executor():
     def __init__(self, operations_layers_list, layer_list):
         self.operations_layers_list = [op_layer for op_layer in operations_layers_list if op_layer.batch_size > 0]
@@ -77,46 +80,31 @@ class Executor():
     def print_debug(self, filename="out.txt", filefolder_name = None, output=None):
         file = f"{filename}"
 
-        with open(file, "w") as f:
-            for op_name in self.ordered_operations:
-                op = self.ordered_graph.nodes[op_name]['op']
-                print(f"{op.name}")
+        for op_name in self.ordered_operations:
+            op = self.ordered_graph.nodes[op_name]['op']
 
-                for inputs in op.inputs.values():
-                    f.write(f"[{op.name}_{inputs.name}]\n")
-                    f.write(str(inputs.tensor))
-                    f.write("\n")
-                    f.write(str(inputs.tensor.shape))
-                    f.write("\n")
-                    torch.save(inputs.tensor.cpu(), f"./{filefolder_name}/{op.name}_{inputs.name}")
+            for inputs in op.inputs.values():
+                tensor_pool[f"{op.name}_{inputs.name}"] = inputs.tensor
+                tensor_list.append((f"{op.name}_{inputs.name}", inputs.tensor))
+            for weights in op.weights.values():
+                tensor_pool[f"{op.name}_{weights.name}"] = weights.weight_map[op.layer]
+                tensor_list.append((f"{op.name}_{weights.name}", weights.weight_map[op.layer]))
 
-                for weights in op.weights.values():
-                    f.write(f"[{op.name}_{weights.name}]\n")
-                    f.write(str(weights.weight_map[op.layer]))
-                    f.write("\n")
-                    f.write(str(weights.weight_map[op.layer].shape))
-                    f.write("\n")
-                    torch.save(weights.weight_map[op.layer].cpu(), f"./{filefolder_name}/{op.name}_{weights.name}")
+            with prof_marker(f"{op.name}"):
+                op.wait_cuda_event()
+                op.run()
+                op.record_cuda_event()
 
-                f.flush()
-
-                with prof_marker(f"{op.name}"):
-                    op.wait_cuda_event()
-                    op.run()
-                    op.record_cuda_event()
-
+            if "GlobalOutput" in op.name:
                 torch.cuda.synchronize()
-                if "GlobalOutput" in op.name:
-                    torch.cuda.synchronize()
-                    output.copy_(op.inputs["tokens"].tensor)
-                for outputs in op.outputs.values():
-                    f.write(f"[{op.name}_{outputs.name}]\n")
-                    f.write(str(outputs.tensor))
-                    f.write("\n")
-                    f.write(str(outputs.tensor.shape))
-                    f.write("\n")
-                    torch.save(outputs.tensor.cpu(), f"./{filefolder_name}/{op.name}_{outputs.name}")
+                output.copy_(op.inputs["tokens"].tensor)
 
-                f.flush()
-            f.close()
-    
+            for outputs in op.outputs.values():
+                tensor_pool[f"{op.name}_{outputs.name}"] = outputs.tensor
+                tensor_list.append((f"{op.name}_{outputs.name}", outputs.tensor))
+
+        torch.cuda.synchronize()
+        with open(file, "w") as f:
+            for name, tensor in tensor_list:
+                f.write(f"[{name}]\n{tensor}\n{tensor.shape}\n")
+        torch.save(output, f"{filefolder_name}/output.pt")
