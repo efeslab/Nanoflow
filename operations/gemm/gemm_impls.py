@@ -23,22 +23,16 @@ class GEMMTorchImpl(OperationImpl):
 
 class GEMMTritonImpl(OperationImpl):
     category_tag = "triton"
+    impl_tag_profile = "triton"
     def config(self, impl_tag, parameter_map):
         self.M = self.batch_size
-        self.N = self.op_base.N
-        self.K = self.op_base.K
+        self.N = self.op_base.tp_N
+        self.K = self.op_base.tp_K
         self.alpha = self.op_base.alpha
-        self.bias = self.op_base.bias
-        self.beta = 0.0
-        if self.bias:
-            self.beta = self.op_base.beta
+        self.beta = self.op_base.beta
 
-    def run(self, B):
+    def run(self, A, B, C, D):
         with torch.cuda.stream(self.stream):
-            D = self.outputs["D"].tensor
-            A = self.inputs["A"].tensor
-            C = self.inputs["C"].tensor if self.bias else torch.empty((self.M, self.N), dtype=torch.float16, device=self.device)
-
             stride_am, stride_ak = A.stride()
             stride_bk, stride_bn = B.stride()
             stride_cm, stride_cn = C.stride()
@@ -81,8 +75,8 @@ if platform_config.PLATFORM_CUDA:
             if self.batch_size > 0:
                 self.name = self.op_base.name
                 self.M = self.batch_size
-                self.N = self.op_base.N // self.op_base.tp_size
-                self.K = self.op_base.K
+                self.N = self.op_base.tp_N
+                self.K = self.op_base.tp_K
                 self.alpha = self.op_base.alpha
                 self.beta = self.op_base.beta
                 # print("M:", self.M, "N:", self.N, "K:", self.K)

@@ -1,7 +1,6 @@
 from unicodedata import category
 from operations.impl_base import OperationImpl
 import torch
-import sqlite3
 from abc import ABC, abstractmethod
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none
@@ -32,19 +31,6 @@ class Operations:
         self.device = device
         self.extra_dep = []
 
-        # Connect to the database
-        # self.conn = sqlite3.connect('performance.db')
-        # self.cursor = self.conn.cursor()
-        # # Create a table to store performance data if it doesn't exist
-        # # self.cursor.execute('''
-        # #     CREATE TABLE IF NOT EXISTS performance (
-        # #         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        # #         keyword TEXT,
-        # #         batch_size INTEGER,
-        # #         average_time REAL
-        # #     )
-        # # ''')
-        # self.conn.commit()
         self.impl_map = {}
         self.op_layer = None
         
@@ -66,6 +52,7 @@ class Operations:
             raise Exception("No implementation found")
         for i in range(len(outputs)):
             for j in range(i + 1, len(outputs)):
+                print(f"Checking consistency between outputs {i} and {j} for operation {self.name}")
                 close_elements = torch.isclose(outputs[i], outputs[j], rtol=1e-01, atol=1e-03)
                 assert torch.all(close_elements), f"Outputs from different implementations are not close: {outputs[i]} and {outputs[j]}"
 
@@ -92,13 +79,21 @@ class Operations:
         self.last_layer_only = True
         return self
     
-    def search_profile_data(self):
-        self.cursor.execute('''
-            SELECT * FROM performance
-        ''')
-        rows = self.cursor.fetchall()
-        for row in rows:
-            print(row)
+    def print_profile(self):
+        assert hasattr(self, 'cursor'), "Profiling has not been run yet. Please call profile() first."
+        # print the profiling results
+        for _, impl in self.impl_map.items():
+            category_tag = impl.category_tag
+            self.cursor.execute(f'''
+                SELECT * FROM {category_tag}
+            ''')
+            cols = [col_desc[0] for col_desc in self.cursor.description]
+            rows = self.cursor.fetchall()
+            print(f"Profiling results for {category_tag}:")
+            print(" | ".join(cols))            # header line
+            for row in rows:
+                print(" | ".join(str(val) for val in row))
+        self.conn.close()
             
     def config_tag(self, tag, parameter_map = {}):
         if self.isNanoSplit:
@@ -179,7 +174,7 @@ class Operation_Layer:
         self.parent = base_op
         self.device = base_op.device
         self.prev_op_layer = []
-        self.cuda_event = None
+        self.cuda_event = torch.cuda.Event(enable_timing=True) 
         self.is_depended_on = False
 
     @property
@@ -253,7 +248,6 @@ class Operation_Layer:
     def reset_op_cuda_status(self):
         self.prev_op_layer = []
         self.is_depended_on = False
-        self.cuda_event = None
 
     def append_prev_op_layer(self, op_layer):
         self.prev_op_layer.append(op_layer)
@@ -264,15 +258,14 @@ class Operation_Layer:
 
     def record_cuda_event(self):
         if self.is_depended_on:
-            if self.cuda_event is None:
-                self.cuda_event = torch.cuda.Event(enable_timing=True)
             self.cuda_event.record(self.stream)
             # print("record_cuda_event: ", self.name, "cuda_event: ", self.cuda_event)
     
     def wait_cuda_event(self):
         events = []
         for op_layer in self.prev_op_layer:
-            if op_layer.cuda_event is not None and self.stream != op_layer.stream:
+            if self.stream != op_layer.stream:
                 events.append(op_layer.cuda_event)
+                # print("wait_cuda_event: ", self.name, "prev_op_layer: ", op_layer.name)
         for event in events:
             self.stream.wait_event(event)

@@ -63,19 +63,20 @@ if platform_config.PLATFORM_CUDA:
         
         def plan(self, kv_indptr, kv_indices, kv_last_page_len, page_size):
             with prof_marker("DecAttnBatchedCudaImpl.plan"):
-                self.wrapper.plan(
-                        kv_indptr,
-                        kv_indices,
-                        kv_last_page_len,
-                        self.num_qo_heads,
-                        self.num_kv_heads,
-                        self.head_dim,
-                        page_size,
-                        logits_soft_cap=0.0,
-                        pos_encoding_mode="NONE",
-                        data_type=torch.float16,
-                        q_data_type=torch.float16
-                    )
+                with torch.cuda.stream(self.stream):
+                    self.wrapper.plan(
+                            kv_indptr,
+                            kv_indices,
+                            kv_last_page_len,
+                            self.num_qo_heads,
+                            self.num_kv_heads,
+                            self.head_dim,
+                            page_size,
+                            logits_soft_cap=0.0,
+                            pos_encoding_mode="NONE",
+                            data_type=torch.float16,
+                            q_data_type=torch.float16
+                        )
 
         def run(self, layer, qo_indicies,  Q, kv_tuple, KVCache, output):
             with torch.cuda.stream(self.stream):
@@ -218,19 +219,20 @@ if platform_config.PLATFORM_CUDA:
             # print("num_qo_heads: ", self.num_qo_heads)
             # print("num_kv_heads: ", self.num_kv_heads)
             # print("head_dim: ", self.head_dim)
-            self.wrapper.plan(
-                qo_indicies,
-                kv_indptr,
-                kv_indices,
-                kv_last_page_len,
-                self.num_qo_heads,
-                self.num_kv_heads,
-                self.head_dim,
-                page_size,
-                causal=causal,
-                logits_soft_cap=logits_soft_cap,
-                pos_encoding_mode=pos_encoding_mode
-            )
+            with torch.cuda.stream(self.stream):
+                self.wrapper.plan(
+                    qo_indicies,
+                    kv_indptr,
+                    kv_indices,
+                    kv_last_page_len,
+                    self.num_qo_heads,
+                    self.num_kv_heads,
+                    self.head_dim,
+                    page_size,
+                    causal=causal,
+                    logits_soft_cap=logits_soft_cap,
+                    pos_encoding_mode=pos_encoding_mode
+                )
 
         def run(self, layer, qo_indicies, Q, kv_tuple, KVCache, output):
             with torch.cuda.stream(self.stream):

@@ -1,5 +1,7 @@
 import torch
 import time
+import sqlite3
+
 import platform_config
 from operations.operation_base import Operations, Operation_Layer
 from core.IOWrapper import IOWrapper
@@ -66,38 +68,66 @@ class LayerNorm(Operations):
         return new_op
 
     def profile(self):
+        self.conn = sqlite3.connect('../profiling/LayerNorm.db')
+        self.cursor = self.conn.cursor()
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+
+        hidden_dim = 4096
+
         # check the similarity of the outputs
-        x = torch.randn(2, self.hidden_dim, dtype=torch.float16, device='cuda')
-        weight = torch.randn(self.hidden_dim, dtype=torch.float16, device='cuda')
+        self.batch_size = 2
+        x = torch.randn(self.batch_size, hidden_dim, dtype=torch.float16, device='cuda')
+        weight = torch.randn(hidden_dim, dtype=torch.float16, device='cuda')
         output_list = []
         for _, impl in self.impl_map.items():
-            out = torch.zeros((2, self.hidden_dim), dtype=torch.float16, device='cuda')
-            impl().run(x, weight, out, 1e-5)
+            out = torch.zeros((self.batch_size, hidden_dim), dtype=torch.float16, device='cuda')
+            impl(self, None, self.device).run(x, weight, out, 1e-5)
             output_list.append(out)
+            self.cursor.execute(f'''
+                DROP TABLE IF EXISTS "{impl.category_tag}";
+            ''')
+            self.cursor.execute(f'''
+            CREATE TABLE IF NOT EXISTS "{impl.category_tag}" (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_size   INTEGER,
+                hidden_dim INTEGER,
+                average_time_ms REAL
+            );
+            ''')
+
+        self.conn.commit()
         self.checkConsistencyBetweenImpl(output_list)
 
         rounds = 100
         batch_sizes = [2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 640, 768, 896, 1024]
+
         for batch_size in batch_sizes:
-            out = torch.zeros((batch_size, self.hidden_dim), dtype=torch.float16, device='cuda')
+            self.batch_size = batch_size
+            out = torch.zeros((self.batch_size, hidden_dim), dtype=torch.float16, device='cuda')
             for _, impl in self.impl_map.items():
-                impl_instance = impl()
+                impl_instance = impl(self, None, self.device)
                 category_tag = impl_instance.category_tag
-                total_latency = 0
+                latency_list = torch.empty(rounds-1, dtype=torch.float32, device='cuda')
                 for round in range(rounds):
-                    x = torch.randn((batch_size, self.hidden_dim), dtype=torch.float16, device='cuda')
-                    weight = torch.randn(self.hidden_dim, dtype=torch.float16, device='cuda')
+                    x = torch.randn((self.batch_size, hidden_dim), dtype=torch.float16, device='cuda')
+                    weight = torch.randn(hidden_dim, dtype=torch.float16, device='cuda')
                     # record the time
-                    start_time = time.time()
+                    start.record()
                     impl_instance.run(x, weight, out, 1e-5)
+                    end.record()
+                    torch.cuda.synchronize()
                     if round > 0:
-                        total_latency += time.time() - start_time
-                average_time = total_latency / rounds
-                print("name: {}, batch_size: {}, average_time: {}".format(self.name + f"_{category_tag}", batch_size, average_time))
-                self.cursor.execute('''
-                    INSERT INTO performance (keyword, batch_size, average_time)
+                        # calculate the elapsed time
+                        elapsed_ms = start.elapsed_time(end)
+                        latency_list[round-1] = elapsed_ms
+                print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {batch_size}, Average Time: {latency_list.mean().item()} ms, Variance: {latency_list.var().item()}, latency[0]: {latency_list[0].item()} ms")
+                # print("latency list:", latency_list.tolist())
+                average_time_ms = latency_list.mean().item()
+                self.cursor.execute(f'''
+                    INSERT INTO {category_tag} (batch_size, hidden_dim, average_time_ms)
                     VALUES (?, ?, ?)
-                    ''', (self.name + f"_{category_tag}", batch_size, average_time))
+                    ''', (batch_size, hidden_dim, average_time_ms))
         self.conn.commit()
     
     def processWeight(self, global_weight_map, weight_path, cached, device):
