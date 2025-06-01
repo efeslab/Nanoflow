@@ -2,6 +2,7 @@ import torch
 import torch.distributed as dist
 
 import platform_config
+from utils.prof_marker import prof_marker
 from operations.operation_base import Operations, Operation_Layer
 from core.IOWrapper import IOWrapper
 from operations.impl_base import OperationImpl
@@ -18,9 +19,12 @@ class AllGatherTorchImpl(OperationImpl):
     
     def run(self, input, output):
         with torch.cuda.stream(self.stream):
-            dist.all_gather(self.gather_list, input, group=self.subgroup)
-            out = torch.cat(self.gather_list, dim=1)
-            output.copy_(out)
+            with prof_marker(f"AllGatherTorchImpl.run all_gather"):
+                dist.all_gather(self.gather_list, input, group=self.subgroup)
+            with prof_marker(f"AllGatherTorchImpl.run cat"):
+                out = torch.cat(self.gather_list, dim=1)
+            with prof_marker(f"AllGatherTorchImpl.run copy"):
+                output.copy_(out)
 
 class AllGather(Operations):
     def __init__(self, name, device):

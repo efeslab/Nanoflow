@@ -53,17 +53,27 @@ if platform_config.PLATFORM_CUDA:
         category_tag = "batched_cuda"
         def __init__(self, op_base, stream, device):
             super().__init__(op_base, stream, device)
-            self.workspace_buffer = torch.empty(32 * 1024 * 1024, dtype=torch.int8).to(self.device)
+            self.workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8).to(self.device)
             self.wrapper = flashinfer.decode.BatchDecodeWithPagedKVCacheWrapper(
-                    self.workspace_buffer, "HND", False, True
-                )
+                self.workspace_buffer, "HND", False, True
+            )
             self.num_qo_heads = op_base.num_qo_heads // op_base.tp_size
             self.num_kv_heads = op_base.num_kv_heads // op_base.tp_size
             self.head_dim = op_base.head_dim
+            # print("DecAttnBatchedCudaImpl initialized with cuda stream:", self.stream.cuda_stream)
         
         def plan(self, kv_indptr, kv_indices, kv_last_page_len, page_size):
             with prof_marker("DecAttnBatchedCudaImpl.plan"):
                 with torch.cuda.stream(self.stream):
+                    # print("DecAttnBatchedCudaImpl.plan")
+                    # print("kv_indptr: ", kv_indptr)
+                    # print("kv_indices: ", kv_indices)
+                    # print("kv_last_page_len: ", kv_last_page_len)
+                    # print("page_size: ", page_size)
+                    # print("num_qo_heads: ", self.num_qo_heads)
+                    # print("num_kv_heads: ", self.num_kv_heads)
+                    # print("head_dim: ", self.head_dim)
+                
                     self.wrapper.plan(
                             kv_indptr,
                             kv_indices,
@@ -197,7 +207,7 @@ if platform_config.PLATFORM_CUDA:
         category_tag = "batched_cuda"
         def __init__(self, op_base, stream, device):
             super().__init__(op_base, stream, device)
-            self.workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8).to(self.device)
+            self.workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8).to(self.device)
             self.wrapper = flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper(
                 self.workspace_buffer, "HND"
             )

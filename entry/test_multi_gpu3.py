@@ -16,8 +16,10 @@ if __name__ == '__main__':
     from multiprocessing import Value, Array, Barrier
     from transformers import AutoTokenizer
     print("import modules1, ", time.perf_counter() - T0)
-    # from models.llama3_70B_KVCacheTorch import Pipeline
-    from models.llama3_70B_FlashinferKVCache import Pipeline
+    # from models.llama3_70B_KVCacheTorch_allgather import Pipeline
+    # from models.llama3_70B_FlashinferKVCache_allgather import Pipeline
+    # from models.llama3_70B_KVCacheTorch_allreduce import Pipeline
+    from models.llama3_70B_FlashinferKVCache_allreduce import Pipeline
 
     print("import modules, ", time.perf_counter() - T0)
     mp.set_start_method('spawn')

@@ -15,7 +15,10 @@ cd Nanoflow-python
 chmod +x ./installAnaconda.sh
 ./installAnaconda.sh
 # restart the terminal
-./setup_guidance.sh
+source ~/.bashrc
+
+cd Nanoflow-python
+yes | bash setup.sh
 ```
 
 ## build
@@ -24,7 +27,7 @@ chmod +x ./installAnaconda.sh
 cd pybind
 mkdir -p build
 cmake ..
-make -j 128
+make -j 256
 ```
 
 ## end-to-end test

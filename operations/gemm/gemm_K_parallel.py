@@ -1,30 +1,30 @@
 from numpy import isin
 import torch
 import time
+import sqlite3
 from utils.prof_marker import prof_marker
 import platform_config
-from operations.operation_base import Operations, Operation_Device, Operation_Layer
+from operations.operation_base import Operations, Operation_Layer
 from core.IOWrapper import IOWrapper
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none, process_weight_layer
-from operations.impl_base import OperationImpl
-from operations.gemm.gemm_impls import GEMMTorchImpl, GEMMCudaImpl
 
+from operations.gemm.gemm_impls import GEMMTorchImpl, GEMMTritonImpl, GEMMCudaImpl
 
 class GEMM_K_Parallel(Operations):
-    def __init__(self, name, bias = False):
-        super().__init__(name)
+    def __init__(self, name, device, bias = False):
+        super().__init__(name, device)
         if bias:
             self.inputs = {
-                "A": IOWrapper(self, 'A'),
-                "C": IOWrapper(self, 'C')
+                "A": IOWrapper(self, 'A', device).is_input(),
+                "C": IOWrapper(self, 'C', device).is_input()
             }
         else:
             self.inputs = {
-                "A": IOWrapper(self, 'A')
+                "A": IOWrapper(self, 'A', device).is_input()
             }
         self.outputs = {
-            "D": IOWrapper(self, 'D')
+            "D": IOWrapper(self, 'D', device).is_output()
         }
         self.weights = {
             "B": WeightWrapper()
@@ -37,7 +37,7 @@ class GEMM_K_Parallel(Operations):
             self.beta = 0.0
         self.impl_map = {}
         self.init_impl_map()
-        self.op_device = GEMM_K_Parallel_Device
+        self.op_layer = GEMM_K_Parallel_Layer
 
     def setParameter(self, alpha = 1, beta = 0):
         self.alpha = alpha
@@ -50,18 +50,37 @@ class GEMM_K_Parallel(Operations):
 
     def init_impl_map(self):
         self.add_impl(GEMMTorchImpl)
+        self.add_impl(GEMMTritonImpl)
         if platform_config.PLATFORM_CUDA:
             self.add_impl(GEMMCudaImpl)
     
-    def setShape(self, N, K, tp_size=1, strides=[]):
+    def setShape(self, N, K, tp_idx=0, tp_size=1):
+        self.tp_idx = tp_idx
         self.tp_size = tp_size
+        # print("tp_idx", self.tp_idx, "tp_size", self.tp_size)
         self.N = N
-        self.K = K // tp_size
-        print("name", self.name, "N:", self.N, "K:", self.K)
-        self.weights["B"].shape = (self.K, self.N)
-        self.updateChildrenIOShape()
+        self.K = K
+        self.tp_N = N
+        self.tp_K = K // tp_size
+        print("name", self.name, "N:", self.tp_N, "K:", self.tp_K)
+        self.weights["B"].shape = (self.tp_K, self.tp_N)
+        self.inputs["A"].init_shape((0, self.tp_K))
+        if self.bias:
+            self.inputs["C"].init_shape((0, self.tp_N)) # bias is a whole buffer, will be used by multiplying a beta.
+        self.outputs["D"].init_shape((0, self.tp_N))
         return self
     
+    def copy_nano(self, index):
+        new_op = GEMM_K_Parallel(f"{self.name}{index}", self.device, self.bias)
+        new_op.weights = self.weights
+        new_op.expand_layer(self.layer_list)
+        new_op.setShape(self.N, self.K, self.tp_idx, self.tp_size).setParameter(self.alpha, self.beta)
+        new_op.set_stream(self.stream)
+        
+        self.nano_ops.append(new_op)
+
+        return new_op
+
     def profile(self):
         # print("Get into profile", self.name)
         parameters_map = {
@@ -118,56 +137,37 @@ class GEMM_K_Parallel(Operations):
                     ''', (self.name + f"_{category_tag}", batch_size, average_time))
         self.conn.commit()
 
-    def processWeight(self, global_weight_map, total_devices, total_layers, cached = False):
-        self.weights["B"].weight_map = [{} for _ in range(total_devices)]
-        weight_wrapper = self.weights["B"]
+    def processWeight(self, global_weight_map, cached_weight_map, cached, device):
         if not isinstance(self.weight_name, list):
             self.weight_name = [self.weight_name]
-        for device_id in range(total_devices):
-            offset = device_id % self.tp_size
-            if any(['{layer}' in name for name in self.weight_name]):
-                for l in range(total_layers):
-                    weights_list = []
-                    for name in self.weight_name:
-                        stride = global_weight_map[name.format(layer=l)].shape[1] // self.tp_size
-                        scope = (slice(None), slice(offset * stride, (offset + 1) * stride))
-                        weights_list.append(global_weight_map[name.format(layer=l)][scope].to(f'cuda:{device_id}').t())
-                    self.weights["B"].weight_map[device_id][l] = torch.cat(weights_list, dim=1).contiguous()
-                    assert weight_wrapper.weight_map[device_id][l].shape == weight_wrapper.shape, f"name = {self.weight_name}, expected shape = {weight_wrapper.shape}, layer = {l}, real shape = {weight_wrapper.weight_map[device_id][l].shape}"
-            else:
+        if not cached:
+            offset = self.tp_idx % self.tp_size
+            for l in self.layer_list:
                 weights_list = []
                 for name in self.weight_name:
-                    stride = global_weight_map[name].shape[1] // self.tp_size
+                    stride = global_weight_map[name.format(layer=l)].shape[1] // self.tp_size
                     scope = (slice(None), slice(offset * stride, (offset + 1) * stride))
-                    weights_list.append(global_weight_map[name][scope].to(f'cuda:{device_id}').t())
-                weight_tensor = torch.cat(weights_list, dim=1).contiguous()
-                for l in range(total_layers):
-                    self.weights["B"].weight_map[device_id][l] = weight_tensor
-                    assert weight_wrapper.weight_map[device_id][l].shape == weight_wrapper.shape, f"name = {self.weight_name}, expected shape = {weight_wrapper.shape}, layer = {l}, real shape = {weight_wrapper.weight_map[device_id][l].shape}"
+                    weights_list.append(global_weight_map[name.format(layer=l)][scope].t())
+                cached_weight_map[f"{self.name}_layer_{l}"] = torch.cat(weights_list, dim=1).contiguous()
+        if cached:
+            self.weights["B"].weight_map = {}
+            weight_wrapper = self.weights["B"]
+            for l in self.layer_list:
+                weight_wrapper.weight_map[l] = cached_weight_map[f"{self.name}_layer_{l}"].to(device, non_blocking=True)
+                assert weight_wrapper.weight_map[l].shape == weight_wrapper.shape, f"name = {self.weight_name}, expected shape = {weight_wrapper.shape}, layer = {l}, real shape = {weight_wrapper.weight_map[l].shape}"
+            
         # torch.cuda.empty_cache()
         # device = torch.cuda.current_device()
         # reserved_memory = torch.cuda.memory_reserved(device)
         # print(f"Reserved memory: {reserved_memory / 1024 / 1024} MB")
-    
-class GEMM_K_Parallel_Device(Operation_Device):
-    def __init__(self, parent, device):
-        super().__init__(parent, device)
-        self.op_layer = GEMM_K_Parallel_Layer
 
-    def setShapeForIOWrappers(self):
-        # if self.parent.name == "O":
-        #     self.inputs["A"].init_shape((0, 32, 128))
-        # else:
-        self.inputs["A"].init_shape((0, self.parent.K))
-        if self.parent.bias:
-            self.inputs["C"].init_shape((0, self.parent.N))
-        self.outputs["D"].init_shape((0, self.parent.N))
         
-
 class GEMM_K_Parallel_Layer(Operation_Layer):
-    def __init__(self, layer, op_device):
-        super().__init__(layer=layer, op_device=op_device)
+    def __init__(self, layer, base_op):
+        super().__init__(layer, base_op)
 
     def run(self):
         with prof_marker("GEMM_run"):
-            self.impl.run(self.weights["B"].weight_map[self.device_id][self.layer])
+            # with prof_marker("Allocate Sliced C"):
+            C = self.inputs["C"].tensor if self.parent.bias else torch.empty((self.parent.batch_size, self.parent.N), dtype=torch.float16, device=self.device)
+            self.impl.run(self.inputs["A"].tensor, self.weights["B"].weight_map[self.layer], C, self.outputs["D"].tensor)

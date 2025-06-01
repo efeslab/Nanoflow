@@ -32,7 +32,7 @@ def worker(start_time, rank, world_size, shared_batch_size, shared_array, barrie
             case 1:
                 input0 = input_ids[0:2]
                 pipeline.update(input0, decode_batch_size=0)
-                # new_tokens = pipeline.run(file_name=f"./test_data/70B_test_torch_{rank}", filefolder_name=f"./test_data/70B_test_torch_{rank}_folder")
+                # new_tokens = pipeline.run(file_name=f"./test_data/70B_test_torch_with_allreduce_{rank}", filefolder_name=f"./test_data/70B_test_torch_with_allreduce_{rank}_folder")
                 new_tokens = pipeline.run(file_name=f"./test_data/70B_test_flashinfer_with_allreduce_{rank}", filefolder_name=f"./test_data/70B_test_flashinfer_with_allreduce_{rank}_folder")
                 assert len(new_tokens) == 2, f"Expected 2 new tokens, got {len(new_tokens)}"
                 print("new_tokens: ", new_tokens, "ttft: ", time.perf_counter() - start_time)
@@ -43,13 +43,14 @@ def worker(start_time, rank, world_size, shared_batch_size, shared_array, barrie
                 pipeline.update(new_tokens, decode_batch_size=2)
 
             case 2:
+                # new_tokens = pipeline.run(file_name=f"./test_data/70B_test_torch_with_allreduce_{rank}", filefolder_name=f"./test_data/70B_test_torch_with_allreduce_{rank}_folder")
                 new_tokens = pipeline.run(file_name=f"./test_data/70B_test_flashinfer_with_allreduce_{rank}", filefolder_name=f"./test_data/70B_test_flashinfer_with_allreduce_{rank}_folder")
                 assert len(new_tokens) == 4, f"Expected 4 new tokens, got {len(new_tokens)}"
                 print("new_tokens: ", new_tokens)
                 # save self.kv_cache.get(0,0) to a file for debugging
-                if device == "cuda:0":
-                    os.makedirs("./kv_cache_testing", exist_ok=True)
-                    torch.save(pipeline.kv_cache.get(0, 0)[0].cpu(), f"./kv_cache_testing/kvcache_0_0_{cycle_count}.pt")
+                # if device == "cuda:0":
+                #     os.makedirs("./kv_cache_testing", exist_ok=True)
+                #     torch.save(pipeline.kv_cache.get(0, 0)[0].cpu(), f"./kv_cache_testing/kvcache_0_0_{cycle_count}.pt")
                 pipeline.update(new_tokens, decode_batch_size=4)
                 
                 if rank == 0:

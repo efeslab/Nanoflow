@@ -266,6 +266,6 @@ class Operation_Layer:
         for op_layer in self.prev_op_layer:
             if self.stream != op_layer.stream:
                 events.append(op_layer.cuda_event)
-                # print("wait_cuda_event: ", self.name, "prev_op_layer: ", op_layer.name)
+                # print("wait_cuda_event: ", self.name, "prev_op_layer: ", op_layer.name, "cuda_event: ", op_layer.cuda_event)
         for event in events:
             self.stream.wait_event(event)

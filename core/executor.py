@@ -78,10 +78,17 @@ class Executor():
                 output.copy_(op.inputs["tokens"].tensor)
 
     def print_debug(self, filename="out.txt", filefolder_name = None, output=None):
+        global tensor_list
         file = f"{filename}"
+        with open(file, "w") as f:
+            f.write(f"Number of operations: {len(self.ordered_operations)}\n")
+            f.write(f"Operations: {self.ordered_operations}\n")
+            f.write(f"Layer list: {self.layer_list}\n")
+            f.write(f"Tensor pool:\n")
 
         for op_name in self.ordered_operations:
             op = self.ordered_graph.nodes[op_name]['op']
+            # print("op name:", op.name, "layer:", op.layer, "batch_size:", op.batch_size, "device:", op.device)
 
             for inputs in op.inputs.values():
                 tensor_pool[f"{op.name}_{inputs.name}"] = inputs.tensor
@@ -95,16 +102,26 @@ class Executor():
                 op.run()
                 op.record_cuda_event()
 
+            for outputs in op.outputs.values():
+                tensor_pool[f"{op.name}_{outputs.name}"] = outputs.tensor
+                tensor_list.append((f"{op.name}_{outputs.name}", outputs.tensor))
+            
+            # if "AllGatherD" in op.name:
+            #     torch.cuda.synchronize()
+            #     print("Execution finished, saving tensors...")
+            #     with open(file, "a") as f:
+            #         for name, tensor in tensor_list:
+            #             f.write(f"[{name}]\n{tensor}\n{tensor.shape}\n")
+            #     tensor_list = []
+                # output.copy_(torch.tensor([358] * 14, dtype=torch.float16, device=op.device))
+                # break
             if "GlobalOutput" in op.name:
                 torch.cuda.synchronize()
                 output.copy_(op.inputs["tokens"].tensor)
 
-            for outputs in op.outputs.values():
-                tensor_pool[f"{op.name}_{outputs.name}"] = outputs.tensor
-                tensor_list.append((f"{op.name}_{outputs.name}", outputs.tensor))
-
         torch.cuda.synchronize()
-        with open(file, "w") as f:
+        print("Execution finished, saving tensors...")
+        with open(file, "a") as f:
             for name, tensor in tensor_list:
                 f.write(f"[{name}]\n{tensor}\n{tensor.shape}\n")
-        torch.save(output, f"{filefolder_name}/output.pt")
+        # torch.save(tensor_pool, f"{filefolder_name}/output.pt")
