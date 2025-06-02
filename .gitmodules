@@ -7,3 +7,6 @@
 [submodule "pybind_amd/bind_gemm/composable_kernel"]
 	path = pybind_amd/bind_gemm/composable_kernel
 	url = https://github.com/ROCm/composable_kernel.git
+[submodule "3rdparty/aiter"]
+	path = 3rdparty/aiter
+	url = https://github.com/Conless/aiter
