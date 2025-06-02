@@ -1,6 +1,7 @@
 import torch
 import os, sys
 
+from operations.attention.llamaAttention_vllm import DecPagedAttn
 from operations.rope.rope_fa import RopeAppendFA as RopeAppend
 from utils.prof_marker import prof_marker
 
@@ -18,7 +19,7 @@ from operations.sampling.max_sampling import Sampling
 from operations.attention.llamaAttention_flashattn import DecAttnFA as DecAttn
 from operations.attention.llamaAttention_flashattn import PFAttnFA as PFAttn
 from operations.virtualOp.virtual_ops import Copy, Redist
-from kvcache.kv import KVCacheFANoPage
+from kvcache.kv import KVCacheBatched
 from core.weightManager import WeightManager
 from core.bufferAllocate import BufferAllocator
 from core.nanobatchSplit import split_nanobatch
@@ -64,10 +65,11 @@ class Pipeline:
         }
 
     def init_external_data(self):
-        self.kv_cache = KVCacheFANoPage(
+        self.kv_cache = KVCacheBatched(
             num_layers=self.num_layers,
             num_heads=self.num_kv_heads,
             head_dim=self.head_dim,
+            max_seqlen=self.max_seq_len
         )
 
     def init_operations(self):
@@ -342,11 +344,11 @@ class Pipeline:
     def config_algorithm(self, device_id: int = 0):
         self.gen_embedding.config_tag("torch", device_id)  # type: ignore
         self.layerNormAttn.config_tag("aiter", device_id)  # type: ignore
-        self.activation.config_tag("torch", device_id)  # type: ignore
+        self.activation.config_tag("aiter", device_id)  # type: ignore
         self.kqv.config_tag("torch", device_id)  # type: ignore
-        self.ropeAppend.config_tag("flash_attn_no_page", device_id) # type: ignore
-        self.decAttn.config_tag("flash_attn_no_page", device_id)  # type: ignore
-        self.pfAttn.config_tag("flash_attn_no_page", device_id)  # type: ignore
+        self.ropeAppend.config_tag("flash_attn_batched", device_id) # type: ignore
+        self.decAttn.config_tag("flash_attn_batched", device_id)  # type: ignore
+        self.pfAttn.config_tag("flash_attn_batched", device_id)  # type: ignore
         self.layerNormFFN.config_tag("aiter", device_id)  # type: ignore
         self.o.config_tag("torch", device_id)  # type: ignore
         self.ug.config_tag("torch", device_id)  # type: ignore

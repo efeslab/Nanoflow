@@ -17,7 +17,7 @@ from operations.sampling.max_sampling import Sampling
 from operations.rope.rope_fa import RopeAppendFA
 from operations.attention.llamaAttention_flashattn import DecAttnFA, PFAttnFA
 from operations.virtualOp.virtual_ops import Copy, Redist
-from kvcache.kv import KVCacheFANoPage, KVCacheTorch
+from kvcache.kv import KVCacheBatched, KVCacheTorch
 from core.weightManager import WeightManager
 from core.bufferAllocate import BufferAllocator
 from core.executor import Executor
@@ -74,7 +74,7 @@ class Pipeline:
         }
 
     def init_external_data(self):
-        self.kv_cache = KVCacheFANoPage(
+        self.kv_cache = KVCacheBatched(
             num_layers=self.num_layers, num_heads=self.num_kv_heads, head_dim=self.head_dim, tp_size=self.tp_size
         )
 
@@ -447,9 +447,9 @@ class Pipeline:
         self.activation.config_tag("torch", device_id)
         self.allGather_activation.config_tag("torch", device_id)
         self.kqv.config_tag("torch", device_id)
-        self.ropeAppend.config_tag("flash_attn_no_page", device_id)
-        self.decAttn.config_tag("flash_attn_no_page", device_id)
-        self.pfAttn.config_tag("flash_attn_no_page", device_id)
+        self.ropeAppend.config_tag("flash_attn_batched", device_id)
+        self.decAttn.config_tag("flash_attn_batched", device_id)
+        self.pfAttn.config_tag("flash_attn_batched", device_id)
         self.allGather_attn.config_tag("torch", device_id)
         self.layerNormFFN.config_tag("torch", device_id)
         self.o.config_tag("torch", device_id)

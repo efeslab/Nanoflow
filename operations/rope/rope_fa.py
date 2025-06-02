@@ -5,14 +5,14 @@ from operations.rope.help_functions import apply_rope  # type: ignore[import]
 from operations.operation_base import Operations, Operation_Device, Operation_Layer
 from core.IOWrapper import IOWrapper
 from operations.impl_base import OperationImpl
-from kvcache.kv import KVCacheFANoPage
+from kvcache.kv import KVCacheBatched
 from utils.prof_marker import prof_marker
 from utils.help_functions import tensor_offset_to_req_idx
 
 from .triton.kernels.rope import apply_rotary_emb
 
-class RopeAppendFANoPageImpl(OperationImpl):
-    category_tag = "flash_attn_no_page"  # type: ignore[assignment]
+class RopeAppendFABatchedImpl(OperationImpl):
+    category_tag = "flash_attn_batched"  # type: ignore[assignment]
 
     def __init__(
         self, op_base: "RopeAppendFA", stream: torch.cuda.Stream, device_id: int
@@ -115,7 +115,7 @@ class RopeAppendFANoPageImpl(OperationImpl):
         self,
         layer: int,
         kqv: torch.Tensor,
-        KVCache: KVCacheFANoPage,
+        KVCache: KVCacheBatched | KVCachevLLM,
         output: torch.Tensor,
         offset: int = 0,
     ):
@@ -141,16 +141,17 @@ class RopeAppendFANoPageImpl(OperationImpl):
                 q, k = self.forward(q, k, self.op_base.qo_indicies, self.op_base.max_seqlen)
 
             with prof_marker("RopeAppendTorch: KVCachePutBatch"):
-                KVCache.put_batch(
-                    layer,
-                    self.op_base.qo_indicies,
-                    k,
-                    v,
-                    self.op_base.rev_input_indptr,
-                    self.op_base.per_token_offset,
-                    self.op_base.start_req_idx,
-                    self.op_base.end_req_idx,
-                )
+                if isinstance(KVCache, KVCacheBatched):
+                    KVCache.put_batch(
+                        layer,
+                        k,
+                        v,
+                        self.op_base.rev_input_indptr,
+                        self.op_base.per_token_offset,
+                    )
+                else:
+                    raise ValueError("Unsupported KVCache type")
+
             with prof_marker("RopeAppendTorch: FinalCopy"):
                 output.copy_(q)
                 KVCache.store_last_kv(
@@ -200,7 +201,7 @@ class RopeAppendFA(Operations):
         self.op_device = RopeAppendFA_Device
 
     def init_impl_map(self):
-        self.add_impl(RopeAppendFANoPageImpl)  # type: ignore
+        self.add_impl(RopeAppendFABatchedImpl)  # type: ignore
 
     def setShape(self, num_kv_heads: int, num_qo_heads: int, head_dim: int, tp_size: int = 1) -> None:  # type: ignore
         self.num_kv_heads = num_kv_heads // tp_size
@@ -235,11 +236,11 @@ class RopeAppendFA(Operations):
             self.max_seqlen = self.seqlens.max().item()
             self.per_token_offset = torch.zeros(int(self.qo_indicies[-1].item()))
             self.rev_input_indptr = torch.zeros(int(self.qo_indicies[-1].item()))
-            self.indices = self.externals["KVCache"].get_whole_indices()[self.start_req_idx : self.end_req_idx]
+            self.indices = self.externals["KVCache"].get_indices(self.start_req_idx, self.end_req_idx)
             for i, seqlen in enumerate(self.seqlens.tolist()):
                 self.per_token_offset[
                     self.qo_indicies[i] : self.qo_indicies[i] + seqlen
-                ] = (torch.arange(seqlen) + self.indices[i].cpu())
+                ] = (torch.arange(-seqlen, 0) + self.indices[i].cpu())
                 self.rev_input_indptr[
                     self.qo_indicies[i] : self.qo_indicies[i] + seqlen
                 ] = (i + self.start_req_idx)
@@ -252,6 +253,7 @@ class RopeAppendFA(Operations):
             self.rev_input_indptr = self.rev_input_indptr.to(
                 dtype=torch.int32, device=f"cuda:{device_id}"
             )
+
 
     def copy_nano(self, index: int):
         new_op = RopeAppendFA(
@@ -299,9 +301,6 @@ class RopeAppendFA_Device(Operation_Device):
 class RopeAppendFA_Layer(Operation_Layer):
     def __init__(self, layer, op_device):
         super().__init__(layer, op_device)
-        self.k_data_ptr, self.v_data_ptr = op_device.externals[
-            "KVCache"
-        ].get_whole_kv_data(self.device_id, self.layer)
 
     def run(self):
         self.impl.run(

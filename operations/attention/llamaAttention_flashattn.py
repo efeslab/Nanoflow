@@ -4,19 +4,19 @@ import torch
 from operations.operation_base import Operations, Operation_Device, Operation_Layer
 from core.IOWrapper import IOWrapper
 from operations.impl_base import OperationImpl
-from kvcache.kv import KVCacheFANoPage
+from kvcache.kv import KVCacheBatched
 from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 
 from utils.help_functions import tensor_offset_to_req_idx  # type: ignore[import]
 
 
-class DecAttnFANoPageImpl(OperationImpl):
+class DecAttnFABatchedImpl(OperationImpl):
     r"""FlashAttention implementation of the DecAttn operator.
 
     This implementation uses the flash_attn library to perform the decoding attention.
     """
 
-    category_tag = "flash_attn_no_page"
+    category_tag = "flash_attn_batched"
 
     def __init__(
         self, op_base: "DecAttnFA", stream: torch.cuda.Stream, device_id: int
@@ -40,10 +40,10 @@ class DecAttnFANoPageImpl(OperationImpl):
     def run(
         self,
         layer: int,
-        qo_indicies: torch.Tensor,
+        qo_indices: torch.Tensor,
         Q: torch.Tensor,
         kv_tuple: None,
-        KVCache: KVCacheFANoPage,
+        KVCache: KVCacheBatched,
         output: torch.Tensor,
     ) -> None:
         r"""Run the DecAttn operator.
@@ -52,15 +52,15 @@ class DecAttnFANoPageImpl(OperationImpl):
         ----------
         layer : int
             The layer index.g
-        qo_indicies : torch.Tensor
+        qo_indices : torch.Tensor
             The indices that mark the start and end of the query slices for each batch request.
         Q : torch.Tensor
             The query tensor.
             Shape: [n_total, num_qo_heads * head_dim]
         kv_tuple : tuple[torch.Tensor | None, torch.Tensor | None]
             Unrelated.
-        KVCache : KVCacheFANoPage
-            The KV cache in flash_attn layout. Note that here we use the last_kv it stores.
+        KVCache : KVCacheBatched
+            The KV cache in batched layout. Note that here we use the last_kv it stores.
             Shape: list of [batch_size, max_seq_len, num_kv_heads, head_dim]
         output : torch.Tensor
             The output tensor.
@@ -72,12 +72,18 @@ class DecAttnFANoPageImpl(OperationImpl):
         """
         if Q.shape[0] == 0:
             return
-        
+
         with torch.cuda.stream(self.stream):
             q = Q.view(-1, 1, self.num_qo_heads, self.head_dim)
-            k_cache, v_cache = KVCache.get_whole_kv_data(self.device_id, layer)
+            k_cache, v_cache = KVCache.get_kv_data(
+                layer,
+                self.op_base.start_req_idx,
+                self.op_base.end_req_idx,
+            )
             assert k_cache is not None and v_cache is not None
-            cache_seqlens = KVCache.get_whole_indices()[self.op_base.input_req_idx]
+            cache_seqlens = KVCache.get_indices(
+                self.op_base.start_req_idx, self.op_base.end_req_idx
+            )
             assert (
                 q.shape[0] == cache_seqlens.shape[0]
             ), f"q.shape {q.shape} mismatch with cache_seqlens.shape {cache_seqlens.shape}"
@@ -101,10 +107,10 @@ class DecAttnFA(Operations):
         self.impl_map = {}
         self.init_impl_map()
         self.batched_decode_wrapper = None
-        self.op_device = DecAttn_Device
+        self.op_device = DecAttnFA_Device
 
     def init_impl_map(self):
-        self.add_impl(DecAttnFANoPageImpl)
+        self.add_impl(DecAttnFABatchedImpl)
 
     def setShape(self, num_kv_heads, num_qo_heads, head_dim, tp_size: int = 1):
         self.num_kv_heads = num_kv_heads // tp_size
@@ -115,31 +121,29 @@ class DecAttnFA(Operations):
             op_device.setShapeForIOWrappers()
 
     def update(self, cumsum_input: list[int], device_id: int):
-        self.qo_indicies = torch.tensor(
+        self.qo_indices = torch.tensor(
             cumsum_input, dtype=torch.int32, device=f"cuda:{device_id}"
         )
         io_device = self.children[device_id].inputs["Q"]
-        start_req_idx = tensor_offset_to_req_idx(
-            self.qo_indicies.tolist(), io_device.tensor_offset
+        self.start_req_idx = tensor_offset_to_req_idx(
+            self.qo_indices.tolist(), io_device.tensor_offset
         )
-        end_req_idx = tensor_offset_to_req_idx(
-            self.qo_indicies.tolist(), io_device.tensor_offset + io_device.batch_size
+        self.end_req_idx = tensor_offset_to_req_idx(
+            self.qo_indices.tolist(), io_device.tensor_offset + io_device.batch_size
         )
-        self.input_req_idx = self.externals["KVCache"].input_req_idx[
-            start_req_idx:end_req_idx
-        ]
-        self.qo_indicies = (
-            self.qo_indicies[start_req_idx : end_req_idx + 1] - io_device.tensor_offset
+        self.qo_indices = (
+            self.qo_indices[self.start_req_idx : self.end_req_idx + 1]
+            - io_device.tensor_offset
         )
 
     def profile(self):
         pass
 
 
-class DecAttn_Device(Operation_Device):
+class DecAttnFA_Device(Operation_Device):
     def __init__(self, parent, device):
         super().__init__(parent, device)
-        self.op_layer = DecAttn_Layer
+        self.op_layer = DecAttnFA_Layer
 
     def setShapeForIOWrappers(self):
         self.inputs["Q"].init_shape(
@@ -150,34 +154,30 @@ class DecAttn_Device(Operation_Device):
         )
 
 
-class DecAttn_Layer(Operation_Layer):
+class DecAttnFA_Layer(Operation_Layer):
     def __init__(self, layer, op_device):
         super().__init__(layer, op_device=op_device)
-        self.k_data_ptr, self.v_data_ptr = op_device.externals[
-            "KVCache"
-        ].get_whole_kv_data(self.device_id, self.layer)
-        self.kv_tuple = tuple([self.k_data_ptr, self.v_data_ptr])
 
     def run(self):
         Q = self.inputs["Q"].tensor
         # self.operator_device.parent.impl.run(Q, self.kv_tuple, self.outputs["output"].tensor)
         self.impl.run(
             self.layer,
-            self.parent.parent.qo_indicies,
+            self.parent.parent.qo_indices,
             Q,
-            self.kv_tuple,
+            None,
             self.parent.externals["KVCache"],
             self.outputs["output"].tensor,
         )
 
 
-class PFAttnFANoPageImpl(OperationImpl):
+class PFAttnFABatchedImpl(OperationImpl):
     r"""FlashAttention implementation of the PFAttn operator.
 
     This implementation uses the flash_attn library to perform the prefill attention.
     """
 
-    category_tag = "flash_attn_no_page"
+    category_tag = "flash_attn_batched"
 
     def __init__(self, op_base: "PFAttnFA", stream: torch.cuda.Stream, device_id: int):
         r"""Initialize the PFAttn operator.
@@ -199,10 +199,10 @@ class PFAttnFANoPageImpl(OperationImpl):
     def run(
         self,
         layer: int,
-        qo_indicies: torch.Tensor,
+        qo_indices: torch.Tensor,
         Q: torch.Tensor,
         kv_tuple: None,
-        KVCache: KVCacheFANoPage,
+        KVCache: KVCacheBatched,
         output: torch.Tensor,
     ):
         r"""Run the PFAttn operator.
@@ -211,15 +211,15 @@ class PFAttnFANoPageImpl(OperationImpl):
         ----------
         layer : int
             The layer index.g
-        qo_indicies : torch.Tensor
+        qo_indices : torch.Tensor
             The indices that mark the start and end of the query slices for each batch request.
         Q : torch.Tensor
             The query tensor.
             Shape: [n_total, num_qo_heads * head_dim]
         kv_tuple : tuple[torch.Tensor | None, torch.Tensor | None]
             Unrelated.
-        KVCache : KVCacheFANoPage
-            The KV cache in flash_attn layout. Note that here we use the last_kv it stores.
+        KVCache : KVCacheBatched
+            The KV cache in batched layout. Note that here we use the last_kv it stores.
             Shape: list of [batch_size, max_seq_len, num_kv_heads, head_dim]
         output : torch.Tensor
             The output tensor.
@@ -231,14 +231,15 @@ class PFAttnFANoPageImpl(OperationImpl):
             q = Q.view(-1, self.num_qo_heads, self.head_dim)
             k, v = KVCache.get_last_kv(
                 self.op_base.io_device.tensor_offset,
-                self.op_base.io_device.tensor_offset + self.op_base.io_device.batch_size,
+                self.op_base.io_device.tensor_offset
+                + self.op_base.io_device.batch_size,
             )
             o = flash_attn_varlen_func(  # type: ignore
                 q,
                 k,
                 v,
-                cu_seqlens_q=qo_indicies,
-                cu_seqlens_k=qo_indicies,
+                cu_seqlens_q=qo_indices,
+                cu_seqlens_k=qo_indices,
                 max_seqlen_q=self.op_base.max_seqlen_q,  # type: ignore
                 max_seqlen_k=self.op_base.max_seqlen_k,  # type: ignore
                 softmax_scale=self.scale,
@@ -264,7 +265,7 @@ class PFAttnFA(Operations):
         self.op_device = PFAttnFA_Device
 
     def init_impl_map(self):
-        self.add_impl(PFAttnFANoPageImpl)
+        self.add_impl(PFAttnFABatchedImpl)
 
     def setShape(self, num_kv_heads, num_qo_heads, head_dim, tp_size: int = 1):
         self.num_kv_heads = num_kv_heads // tp_size
@@ -275,26 +276,23 @@ class PFAttnFA(Operations):
             op_device.setShapeForIOWrappers()
 
     def update(self, cumsum_input: list[int], device_id: int):
-        self.qo_indicies = torch.tensor(
+        self.qo_indices = torch.tensor(
             cumsum_input, dtype=torch.int32, device=f"cuda:{device_id}"
         )
-        seq_lens = self.qo_indicies.diff()
+        seq_lens = self.qo_indices.diff()
         self.max_seqlen_q = torch.max(seq_lens).item()
         self.max_seqlen_k = self.max_seqlen_q
         self.io_device = self.children[device_id].inputs["Q"]
         self.start_req_idx = tensor_offset_to_req_idx(
-            self.qo_indicies.tolist(), self.io_device.tensor_offset
+            self.qo_indices.tolist(), self.io_device.tensor_offset
         )
         self.end_req_idx = tensor_offset_to_req_idx(
-            self.qo_indicies.tolist(),
+            self.qo_indices.tolist(),
             self.io_device.tensor_offset + self.io_device.batch_size,
         )
-        self.input_req_idx = self.externals["KVCache"].input_req_idx[
-            self.start_req_idx : self.end_req_idx
-        ]
-        self.qo_indicies = (
-            self.qo_indicies[self.start_req_idx : self.end_req_idx + 1]
-            - self.qo_indicies[self.start_req_idx]
+        self.qo_indices = (
+            self.qo_indices[self.start_req_idx : self.end_req_idx + 1]
+            - self.qo_indices[self.start_req_idx]
         )
 
     def profile(self):
@@ -318,19 +316,15 @@ class PFAttnFA_Device(Operation_Device):
 class PFAttnFA_Layer(Operation_Layer):
     def __init__(self, layer, op_device):
         super().__init__(layer=layer, op_device=op_device)
-        self.k_data_ptr, self.v_data_ptr = op_device.externals[
-            "KVCache"
-        ].get_whole_kv_data(self.device_id, self.layer)
-        self.kv_tuple = tuple([self.k_data_ptr, self.v_data_ptr])
 
     def run(self):
         Q = self.inputs["Q"].tensor
         # self.operator_device.parent.impl.run(Q, self.kv_tuple, self.outputs["output"].tensor)
         self.impl.run(
             self.layer,
-            self.parent.parent.qo_indicies,
+            self.parent.parent.qo_indices,
             Q,
-            self.kv_tuple,
+            None,
             self.parent.externals["KVCache"],
             self.outputs["output"].tensor,
         )

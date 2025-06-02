@@ -106,23 +106,16 @@ class KVCacheTorch():
         return None, None
 
 
-class KVCacheFANoPage:
-    r"""KV cache for FlashAttention backend without page management.
-    
-    Note that this KV cache is somewhat static and only allocate
-    memory at each batch initialization. Specifically, given a
-    batch size and a maximum sequence length, the cache will allocate
-    memory for the entire batch. This design is based on the current
-    pipeline workflow, and should be further optimized if the memory
-    overhead is unacceptable."""
 
+class KVCacheBatched:
+    r"""Batched KV cache for FlashAttention without page."""
     def __init__(
         self,
         *,
         num_layers,
         num_heads,
         head_dim,
-        max_seq_len: int = 256,
+        max_seqlen: int = 256,
         device_id: int = 0,
         tp_size: int = 1,
     ) -> None:
@@ -151,40 +144,31 @@ class KVCacheFANoPage:
         self.num_layers = num_layers
         self.num_heads = num_heads // tp_size
         self.head_dim = head_dim
-        self.max_size_per_request = max_seq_len
+        self.max_size_per_request = max_seqlen
         self.tp_size = tp_size
         self.input_req_idx: torch.Tensor | None = None
         self.last_key: torch.Tensor | None = None
         self.last_value: torch.Tensor | None = None
-    
-    @property
-    def initialized(self) -> bool:
-        r"""Check if the KV cache is initialized.
 
-        Returns
-        -------
-        bool
-            True if the cache is initialized, False otherwise.
-        """
-        return self.k_cache is not None and self.v_cache is not None and self.batch_size is not None
-    
-    def get_indices(self, layer_id: int, request_id: int) -> int:
-        r"""Get the offset of the KV cache for a request.
 
-        Parameters
-        ----------
-        layer_id : int
-            Unrelated.
-        request_id : int
-            The request ID to get the cache for.
-        Returns
-        -------
-        int
-            The offset / position of the request.
-        """
-        if self.indices is None:
-            raise ValueError("Cache not initialized. Call update() first.")
-        return self.indices[request_id].item() # type: ignore
+    def get_indices(self, start_req_idx: int, end_req_idx: int) -> torch.Tensor:
+        return self.indices[start_req_idx:end_req_idx]
+
+
+    def get_last_kv(self, start_idx: int, end_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        return (
+            self.last_key[start_idx:end_idx],
+            self.last_value[start_idx:end_idx],
+        )
+
+
+    def get_kv_data(
+        self, layer: int, start_req_idx: int, end_req_idx: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return (
+            self.k_cache[layer][start_req_idx:end_req_idx],
+            self.v_cache[layer][start_req_idx:end_req_idx]
+        )    
 
 
     def update(self, input_req_idx: list[int], qo_indices: list[int]) -> None:
@@ -204,8 +188,10 @@ class KVCacheFANoPage:
         batch_size = len(input_req_idx)
         self.input_req_idx = torch.tensor(input_req_idx, dtype=torch.int32, device=f"cuda:{self.device_id}")
         if self.batch_size == batch_size:
+            qo_seqlens = torch.tensor(qo_indices).diff().to(self.indices.device)
+            self.indices += qo_seqlens
             return
-        old_k_cache, old_v_cache, old_indicces = (
+        old_k_cache, old_v_cache, old_indices = (
             self.k_cache,
             self.v_cache,
             self.indices,
@@ -221,13 +207,6 @@ class KVCacheFANoPage:
         )
         self.last_value = torch.zeros(
             qo_indices[-1],
-            self.num_heads,
-            self.head_dim,
-            dtype=torch.float16,
-            device=f"cuda:{self.device_id}",
-        )
-        self.qo_indices = torch.zeros(
-            input_req_idx[-1],
             self.num_heads,
             self.head_dim,
             dtype=torch.float16,
@@ -253,60 +232,14 @@ class KVCacheFANoPage:
                 device=f"cuda:{self.device_id}",
             ) for _ in range(self.num_layers)
         ]
-        if old_k_cache is not None and old_v_cache is not None and old_indicces is not None:
-            self.indices[: old_indicces.shape[0]] = old_indicces
+        if old_k_cache is not None and old_v_cache is not None and old_indices is not None:
+            self.indices[: old_indices.shape[0]] = old_indices
             for i in range(self.num_layers):
                 self.k_cache[i][: old_k_cache[i].shape[0]] = old_k_cache[i]
                 self.v_cache[i][: old_v_cache[i].shape[0]] = old_v_cache[i]
+        qo_seqlens = torch.tensor(qo_indices).diff().to(self.indices.device)
+        self.indices += qo_seqlens
 
-    def get(self, layer_id: int, request_id: int) -> tuple[torch.Tensor, torch.Tensor]:
-        r"""Get the KV cache for a specific layer and request.
-        
-        Parameters
-        ----------
-        layer_id : int
-            The layer ID to get the cache for.
-        request_id : int
-            The request ID to get the cache for.
-        
-        Returns
-        -------
-        tuple[torch.Tensor, torch.Tensor]
-            The key and value tensors for the specified layer and request.
-        
-        Notes
-        -----
-        Deprecated. Use `get_layer()` instead for better performance.
-        """
-        if self.k_cache is None or self.v_cache is None or self.batch_size is None:
-            raise ValueError("Cache not initialized. Call update() first.")
-        return (
-            self.k_cache[layer_id][request_id],
-            self.v_cache[layer_id][request_id],
-        )
-
-    def get_layer(self, batch_size: int, layer_id: int) -> tuple[torch.Tensor, torch.Tensor]:
-        r"""Get the KV cache for a specific layer.
-        
-        Parameters
-        ----------
-        batch_size : int
-            The batch size to use for the cache.
-        layer_id : int
-            The layer ID to get the cache for.
-        
-        Returns
-        -------
-        tuple[torch.Tensor, torch.Tensor]
-            The key and value tensors for the specified layer.
-        """
-        if self.k_cache is None or self.v_cache is None:
-            raise ValueError("Cache not initialized. Call update() first.")
-        if self.batch_size != batch_size:
-            raise ValueError(
-                f"Batch size mismatch. Expected {self.batch_size}, got {batch_size}."
-            )
-        return self.k_cache[layer_id], self.v_cache[layer_id]
 
     def store_last_kv(
         self,
@@ -345,148 +278,13 @@ class KVCacheFANoPage:
             )
         )
 
-
-    def get_last_kv(self, start_idx: int, end_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        r"""Get the last computed key and value tensors for a specific layer.
-
-        Parameters
-        ----------
-        device_id : int
-            The device ID to use for the cache.
-        layer : int
-            The layer ID to get the cache for.
-        
-        Returns
-        -------
-        tuple[torch.Tensor, torch.Tensor]
-            The key and value tensors for the specified layer.
-        
-        Notes
-        -----
-        This is a hack to allow FlashAttention prefill kernel to access the
-        last computed key and value tensors.
-        """
-        return (
-            self.last_key[start_idx:end_idx],
-            self.last_value[start_idx:end_idx],
-        )
-
-
-    def get_whole_indices(self) -> torch.Tensor:
-        r"""Get the sequence length in the KV cache.
-        
-        Returns
-        -------
-        torch.Tensor
-            The indices tensor for the KV cache.
-        """
-        if self.indices is None:
-            raise ValueError("Cache not initialized. Call update() first.")
-        return self.indices
-
-
-    def get_whole_kv_data(
-        self, device_id: int, layer: int
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        r"""Get the KV cache for a specific layer.
-        
-        Parameters
-        ----------
-        device_id : int
-            The device ID to use for the cache.
-        layer : int
-            The layer ID to get the cache for.
-        
-        Returns
-        -------
-        tuple[torch.Tensor | None, torch.Tensor | None]
-            The key and value tensors for the specified layer.
-        
-        Note
-        ----
-        If the cache is not initialized, this function will return None.
-        """
-        if self.k_cache is None or self.v_cache is None or self.batch_size is None:
-            return None, None
-        return self.k_cache[layer], self.v_cache[layer]
-
-
-    def _put_batch(
-        self,
-        layer: int,
-        qo_indices: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        rev_input_indices: torch.Tensor,
-        per_token_offset: torch.Tensor,
-    ) -> None:
-        r"""Put a batch of key and value tensors into the KV cache.
-
-        Parameters
-        ----------
-        layer : int
-            The layer ID to put the cache for.
-        qo_indices : torch.Tensor
-            The indices of the queries in the batch.
-            Shape: [batch_size + 1,]
-        key : torch.Tensor
-            The key tensor to put into the cache.
-            Shape: [batch_size, key_dim]
-        value : torch.Tensor
-            The value tensor to put into the cache.
-            Shape: [batch_size, value_dim]
-        rev_input_indices : torch.Tensor
-            The reverse input indices for the batch.
-            Shape: [batch_size,]
-        per_token_offset : torch.Tensor
-            The per token offset for the batch.
-            Shape: [batch_size,]
-
-        Notes
-        -----
-        Deprecated. Use `put_batch()` instead for better performance.
-        """
-        if self.k_cache is None or self.v_cache is None or self.batch_size is None:
-            raise ValueError("Cache not initialized. Call update() first.")
-        batch_size = qo_indices.shape[0] - 1
-        assert batch_size == self.batch_size, "Batch size mismatch."
-        if layer == 0:
-            assert self.indices is not None, "Cache not initialized. Call update() first."
-            self.indices += qo_indices.diff()
-        for i in range(batch_size):
-            # Get the start and end indices for the current request
-            start_idx = qo_indices[i]
-            end_idx = qo_indices[i + 1]
-
-            # Get the key and value tensors for the current request
-            key_tensor = key[start_idx:end_idx].view(
-                -1,
-                self.num_heads,
-                self.head_dim,
-            )
-            value_tensor = value[start_idx:end_idx].view(
-                -1,
-                self.num_heads,
-                self.head_dim,
-            )
-
-            # Get the offset for the current request
-            offset = self.indices[i] # type: ignore
-
-            # Update the cache with the new key and value tensors
-            self.k_cache[layer][i][offset - key_tensor.shape[0] : offset] = key_tensor
-            self.v_cache[layer][i][offset - value_tensor.shape[0] : offset] = value_tensor
-    
     def put_batch(
         self,
         layer: int,
-        qo_indices: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         rev_input_indices: torch.Tensor,
         per_token_offset: torch.Tensor,
-        start_idx: int = 0,
-        end_idx: int = -1,
     ) -> None:
         r"""Put a batch of key and value tensors into the KV cache.
 
@@ -514,7 +312,6 @@ class KVCacheFANoPage:
             raise ValueError("Cache not initialized. Call update() first.")
         if layer == 0:
             assert self.indices is not None, "Cache not initialized. Call update() first."
-            self.indices[start_idx:end_idx] += qo_indices.diff()
         kv_cache_shape = (self.batch_size, self.max_size_per_request, self.num_heads * self.head_dim)
         key_cache = self.k_cache[layer].view(kv_cache_shape)
         value_cache = self.v_cache[layer].view(kv_cache_shape)
