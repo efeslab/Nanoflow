@@ -2,7 +2,7 @@ import torch
 import os, sys
 
 from operations.attention.llamaAttention_vllm import DecPagedAttn
-from operations.rope.rope_fa import RopeAppendFA as RopeAppend
+from operations.rope.rope_fa import RopeAppendBatched as RopeAppend
 from utils.prof_marker import prof_marker
 
 sys.path.append("../")
@@ -19,7 +19,7 @@ from operations.sampling.max_sampling import Sampling
 from operations.attention.llamaAttention_flashattn import DecAttnFA as DecAttn
 from operations.attention.llamaAttention_flashattn import PFAttnFA as PFAttn
 from operations.virtualOp.virtual_ops import Copy, Redist
-from kvcache.kv import KVCacheBatched
+from kvcache.kv import KVCacheBatched, KVCachevLLM
 from core.weightManager import WeightManager
 from core.bufferAllocate import BufferAllocator
 from core.nanobatchSplit import split_nanobatch
@@ -65,7 +65,7 @@ class Pipeline:
         }
 
     def init_external_data(self):
-        self.kv_cache = KVCacheBatched(
+        self.kv_cache = KVCachevLLM(
             num_layers=self.num_layers,
             num_heads=self.num_kv_heads,
             head_dim=self.head_dim,
@@ -408,7 +408,8 @@ class Pipeline:
                 op_layers.extend(operation.op_layers_per_device[i])
             self.operation_device_list.append(op_devices)
             self.operation_layers_per_device.append(op_layers)
-    
+
+
     def update(self, new_input_infos, decode_batchsize=0, device_id=0):
         self.input_req_idx = []
         self.input_ids = []

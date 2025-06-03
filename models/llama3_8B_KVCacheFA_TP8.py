@@ -14,7 +14,7 @@ from operations.globalOp.globalOp import GlobalInput, GlobalOutput
 from operations.gemm.gemm_N_parallel import GEMM_N_Parallel
 from operations.norm.rmsnorm import LayerNorm
 from operations.sampling.max_sampling import Sampling
-from operations.rope.rope_fa import RopeAppendFA
+from operations.rope.rope_fa import RopeAppendBatched
 from operations.attention.llamaAttention_flashattn import DecAttnFA, PFAttnFA
 from operations.virtualOp.virtual_ops import Copy, Redist
 from kvcache.kv import KVCacheBatched, KVCacheTorch
@@ -124,7 +124,7 @@ class Pipeline:
             self.kqv.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
         )
 
-        self.ropeAppend = RopeAppendFA("RopeAppend")
+        self.ropeAppend = RopeAppendBatched("RopeAppend")
         self.ropeAppend.externals["KVCache"] = self.kv_cache
         self.ropeAppend_devices, self.ropeAppend_layers_per_device = (
             self.ropeAppend.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
