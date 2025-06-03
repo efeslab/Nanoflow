@@ -168,6 +168,117 @@ class RopeAppendBatchedFAImpl(OperationImpl):
                 )
 
 
+try:
+    from vllm._custom_ops import rotary_embedding
+    VLLM_CACHE = True
+except ImportError:
+    VLLM_CACHE = False
+
+
+class RopeAppendBatchedvLLMImpl(OperationImpl):
+    category_tag = "vllm"  # type: ignore[assignment]
+
+    def __init__(
+        self, op_base: "RopeAppendBatched", stream: torch.cuda.Stream, device_id: int
+    ):
+        super().__init__(op_base, stream, device_id)
+        self.rope_type = op_base.rope_type
+        self.device_id = device_id
+        if self.rope_type == "llama3":
+            self.base = 500000.0
+            self.rotary_dim = 128
+        self.theta = op_base.theta
+        self.original_max_position_embeddings = op_base.original_max_position_embeddings
+        self.low_freq_factor = op_base.low_freq_factor
+        self.high_freq_factor = op_base.high_freq_factor
+        self.factor = op_base.factor
+        self.num_kv_heads = int(op_base.num_kv_heads)  # type: ignore
+        self.num_qo_heads = int(op_base.num_qo_heads)  # type: ignore
+        self.head_dim = int(op_base.head_dim)  # type: ignore
+        self.cache = self._compute_cos_sin_cache().to(
+            dtype=torch.float16, device=f"cuda:{device_id}"
+        )
+
+    def _compute_cos_sin_cache(self) -> torch.Tensor:
+        """Compute the cos and sin cache."""
+        inv_freq = 1.0 / (
+            self.base
+            ** (
+                torch.arange(0, self.rotary_dim, 2, dtype=torch.float) / self.rotary_dim
+            )
+        )
+        t = torch.arange(self.original_max_position_embeddings, dtype=torch.float)
+
+        freqs = torch.einsum("i,j -> ij", t, inv_freq)
+        cos = freqs.cos()
+        sin = freqs.sin()
+        cache = torch.cat((cos, sin), dim=-1).contiguous()
+        return cache
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+    ) -> None:
+        if self.cache.device != query.device:
+            self.cache = self.cache.to(query.device)
+        positions = self.op_base.per_token_offset
+        rotary_embedding(positions, query, key, self.head_dim, self.cache, False)
+        
+
+    def run(
+        self,
+        layer: int,
+        kqv: torch.Tensor,
+        KVCache: KVCacheBatched | KVCachevLLM,
+        output: torch.Tensor,
+        offset: int = 0,
+    ):
+        if kqv.shape[0] == 0:
+            return
+
+        with torch.cuda.stream(self.stream):
+            # Determine the number of elements for each slice.
+            layout_strides = [
+                self.num_kv_heads * self.head_dim,
+                self.num_kv_heads * self.head_dim,
+                self.num_qo_heads * self.head_dim,
+            ]
+            # Split kqv into key, query, and value (here assumed to be in the order: k, q, v).
+            # print("kqv shape:", kqv.shape)
+            k, v, q = torch.split(kqv, layout_strides, dim=1)
+            k = k.contiguous()
+            v = v.contiguous()
+            q = q.contiguous()
+
+            # Process each batch element.
+            with prof_marker("RopeAppendBatched: Rope"):
+                self.forward(q, k)
+
+            with prof_marker("RopeAppendBatched: KVCachePutBatch"):
+                if isinstance(KVCache, KVCacheBatched):
+                    KVCache.put_batch(
+                        layer,
+                        k,
+                        v,
+                        self.op_base.rev_input_indptr,
+                        self.op_base.per_token_offset,
+                    )
+                elif isinstance(KVCache, KVCachevLLM):
+                    KVCache.put_batch(layer, k, v, self.op_base.slot_mapping)
+                else:
+                    raise ValueError("Unsupported KVCache type")
+
+            with prof_marker("RopeAppendBatched: FinalCopy"):
+                output.copy_(q)
+                KVCache.store_last_kv(
+                    k,
+                    v,
+                    self.op_base.io_device.tensor_offset,
+                    self.op_base.io_device.tensor_offset
+                    + self.op_base.io_device.batch_size,
+                )
+
 
 class RopeAppendBatched(Operations):
     def __init__(
