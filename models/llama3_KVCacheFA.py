@@ -115,7 +115,7 @@ class Pipeline:
         self.ropeAppend.externals["KVCache"] = self.kv_cache
         self.ropeAppend_devices, self.ropeAppend_layers_per_device = self.ropeAppend.expand_all_gpu_and_layers(self.num_devices, self.num_layers)
 
-        self.decAttn = DecAttn("DecAttn")
+        self.decAttn = DecPagedAttn("DecAttn")
         self.decAttn.externals["KVCache"] = self.kv_cache  # type: ignore
         self.decAttn_devices, self.decAttn_layers_per_device = (
             self.decAttn.expand_all_gpu_and_layers(  # type: ignore
@@ -347,7 +347,7 @@ class Pipeline:
         self.activation.config_tag("aiter", device_id)  # type: ignore
         self.kqv.config_tag("torch", device_id)  # type: ignore
         self.ropeAppend.config_tag("flash_attn_batched", device_id) # type: ignore
-        self.decAttn.config_tag("flash_attn_batched", device_id)  # type: ignore
+        self.decAttn.config_tag("vllm", device_id)  # type: ignore
         self.pfAttn.config_tag("flash_attn_batched", device_id)  # type: ignore
         self.layerNormFFN.config_tag("aiter", device_id)  # type: ignore
         self.o.config_tag("torch", device_id)  # type: ignore

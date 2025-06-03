@@ -5,17 +5,18 @@ from operations.rope.help_functions import apply_rope  # type: ignore[import]
 from operations.operation_base import Operations, Operation_Device, Operation_Layer
 from core.IOWrapper import IOWrapper
 from operations.impl_base import OperationImpl
-from kvcache.kv import KVCacheBatched
+from kvcache.kv import KVCacheBatched, KVCachevLLM
 from utils.prof_marker import prof_marker
 from utils.help_functions import tensor_offset_to_req_idx
 
 from .triton.kernels.rope import apply_rotary_emb
 
-class RopeAppendFABatchedImpl(OperationImpl):
+
+class RopeAppendBatchedFAImpl(OperationImpl):
     category_tag = "flash_attn_batched"  # type: ignore[assignment]
 
     def __init__(
-        self, op_base: "RopeAppendFA", stream: torch.cuda.Stream, device_id: int
+        self, op_base: "RopeAppendBatched", stream: torch.cuda.Stream, device_id: int
     ):
         super().__init__(op_base, stream, device_id)
         self.rope_type = op_base.rope_type
@@ -137,10 +138,12 @@ class RopeAppendFABatchedImpl(OperationImpl):
             q = q.contiguous()
 
             # Process each batch element.
-            with prof_marker("RopeAppendTorch: Rope"):
-                q, k = self.forward(q, k, self.op_base.qo_indicies, self.op_base.max_seqlen)
+            with prof_marker("RopeAppendBatched: Rope"):
+                q, k = self.forward(
+                    q, k, self.op_base.qo_indices, self.op_base.max_seqlen
+                )
 
-            with prof_marker("RopeAppendTorch: KVCachePutBatch"):
+            with prof_marker("RopeAppendBatched: KVCachePutBatch"):
                 if isinstance(KVCache, KVCacheBatched):
                     KVCache.put_batch(
                         layer,
@@ -149,20 +152,24 @@ class RopeAppendFABatchedImpl(OperationImpl):
                         self.op_base.rev_input_indptr,
                         self.op_base.per_token_offset,
                     )
+                elif isinstance(KVCache, KVCachevLLM):
+                    KVCache.put_batch(layer, k, v, self.op_base.slot_mapping)
                 else:
                     raise ValueError("Unsupported KVCache type")
 
-            with prof_marker("RopeAppendTorch: FinalCopy"):
+            with prof_marker("RopeAppendBatched: FinalCopy"):
                 output.copy_(q)
                 KVCache.store_last_kv(
                     k,
                     v,
                     self.op_base.io_device.tensor_offset,
-                    self.op_base.io_device.tensor_offset + self.op_base.io_device.batch_size,
+                    self.op_base.io_device.tensor_offset
+                    + self.op_base.io_device.batch_size,
                 )
 
 
-class RopeAppendFA(Operations):
+
+class RopeAppendBatched(Operations):
     def __init__(
         self,
         name: str,
@@ -198,10 +205,11 @@ class RopeAppendFA(Operations):
 
         self.impl_map = {}
         self.init_impl_map()
-        self.op_device = RopeAppendFA_Device
+        self.op_device = RopeAppendBatched_Device
 
     def init_impl_map(self):
-        self.add_impl(RopeAppendFABatchedImpl)  # type: ignore
+        self.add_impl(RopeAppendBatchedFAImpl)  # type: ignore
+        self.add_impl(RopeAppendBatchedvLLMImpl)
 
     def setShape(self, num_kv_heads: int, num_qo_heads: int, head_dim: int, tp_size: int = 1) -> None:  # type: ignore
         self.num_kv_heads = num_kv_heads // tp_size
@@ -209,54 +217,59 @@ class RopeAppendFA(Operations):
         self.head_dim = head_dim
         self.updateChildrenIOShape()
 
-    def update(self, qo_indicies: list[int], decode_batchsize: int, device_id: int):
+    def update(self, qo_indices: list[int], decode_batchsize: int, device_id: int):
         if self.isNanoSplit:
             for nano_op in self.nano_ops:
-                nano_op.update(qo_indicies, decode_batchsize, device_id)
+                nano_op.update(qo_indices, decode_batchsize, device_id)
         else:
             """Stores the starting indices for the query/key segments."""
             self.io_device = self.children[device_id].inputs["kqv"]
             self.start_req_idx = tensor_offset_to_req_idx(
-                qo_indicies, self.io_device.tensor_offset
+                qo_indices, self.io_device.tensor_offset
             )
             self.end_req_idx = tensor_offset_to_req_idx(
-                qo_indicies, self.io_device.tensor_offset + self.io_device.batch_size
+                qo_indices, self.io_device.tensor_offset + self.io_device.batch_size
             )
             if self.start_req_idx == self.end_req_idx:
                 return
-            self.qo_indicies = (
+            self.qo_indices = (
                 torch.tensor(
-                    qo_indicies[self.start_req_idx : self.end_req_idx + 1],
+                    qo_indices[self.start_req_idx : self.end_req_idx + 1],
                     dtype=torch.int32,
                     device=f"cuda:{device_id}",
                 )
-                - qo_indicies[self.start_req_idx]
+                - qo_indices[self.start_req_idx]
             )
-            self.seqlens = self.qo_indicies.diff()
+            self.seqlens = self.qo_indices.diff()
             self.max_seqlen = self.seqlens.max().item()
-            self.per_token_offset = torch.zeros(int(self.qo_indicies[-1].item()))
-            self.rev_input_indptr = torch.zeros(int(self.qo_indicies[-1].item()))
-            self.indices = self.externals["KVCache"].get_indices(self.start_req_idx, self.end_req_idx)
+            self.per_token_offset = torch.zeros(int(self.qo_indices[-1].item()))
+            self.rev_input_indptr = torch.zeros(int(self.qo_indices[-1].item()))
+            self.indices = self.externals["KVCache"].get_indices(
+                self.start_req_idx, self.end_req_idx
+            )
             for i, seqlen in enumerate(self.seqlens.tolist()):
                 self.per_token_offset[
-                    self.qo_indicies[i] : self.qo_indicies[i] + seqlen
+                    self.qo_indices[i] : self.qo_indices[i] + seqlen
                 ] = (torch.arange(-seqlen, 0) + self.indices[i].cpu())
                 self.rev_input_indptr[
-                    self.qo_indicies[i] : self.qo_indicies[i] + seqlen
+                    self.qo_indices[i] : self.qo_indices[i] + seqlen
                 ] = (i + self.start_req_idx)
-            self.qo_indicies = self.qo_indicies.to(
+            self.qo_indices = self.qo_indices.to(
                 dtype=torch.int32, device=f"cuda:{device_id}"
             )
             self.per_token_offset = self.per_token_offset.to(
-                dtype=torch.int32, device=f"cuda:{device_id}"
+                dtype=torch.long, device=f"cuda:{device_id}"
             )
             self.rev_input_indptr = self.rev_input_indptr.to(
                 dtype=torch.int32, device=f"cuda:{device_id}"
             )
-
+            if isinstance(self.externals["KVCache"], KVCachevLLM):
+                self.slot_mapping = self.externals["KVCache"].get_slot_mapping(
+                    self.rev_input_indptr, self.per_token_offset
+                )
 
     def copy_nano(self, index: int):
-        new_op = RopeAppendFA(
+        new_op = RopeAppendBatched(
             f"{self.name}{index}",
             self.rope_type,
             self.theta,
@@ -274,13 +287,15 @@ class RopeAppendFA(Operations):
         return new_op
 
     def profile(self) -> None:
-        raise NotImplementedError("Profile method is not implemented for RopeAppendFA.")
+        raise NotImplementedError(
+            "Profile method is not implemented for RopeAppendBatched."
+        )
 
 
-class RopeAppendFA_Device(Operation_Device):
+class RopeAppendBatched_Device(Operation_Device):
     def __init__(self, parent, device):
         super().__init__(parent, device)
-        self.op_layer = RopeAppendFA_Layer
+        self.op_layer = RopeAppendBatched_Layer
 
     def setShapeForIOWrappers(self):
         # The input tensor "kqv" is assumed to have a flattened layout:
@@ -298,7 +313,7 @@ class RopeAppendFA_Device(Operation_Device):
         )
 
 
-class RopeAppendFA_Layer(Operation_Layer):
+class RopeAppendBatched_Layer(Operation_Layer):
     def __init__(self, layer, op_device):
         super().__init__(layer, op_device)
 
