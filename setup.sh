@@ -1,4 +1,4 @@
-apt update && apt upgrade -y
+apt update
 apt install pybind11-dev
 apt install liburing-dev
 apt install libopenmpi-dev
