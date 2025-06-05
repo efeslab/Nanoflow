@@ -43,7 +43,7 @@ struct BaseGEMMWrapper : public OperatorWrapper{
 		return M * N;
 	}
 
-	virtual void init(ElementAccumulator beta_ = ElementAccumulator(0)) = 0;
+	virtual void init() = 0;
 	virtual void profile() = 0;
 	virtual double totalCompute() = 0;
 	virtual float gflops(double runtime_ms) = 0;

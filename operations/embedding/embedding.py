@@ -1,10 +1,9 @@
 import torch
-import sys
 import time
-sys.path.append('../../pybind/build')
+import sqlite3
 
 import platform_config
-from operations.operation_base import Operations, Operation_Device, Operation_Layer
+from operations.operation_base import Operations, Operation_Layer
 from core.IOWrapper import IOWrapper
 from core.weightWrapper import WeightWrapper
 from core.processWeight import process_weight_no_transpose
@@ -28,87 +27,105 @@ if platform_config.PLATFORM_CUDA:
                 bind_genEmbedding.genEmbedding(tokens, embedding, output, self.stream_handle)
             
 class GenEmbedding(Operations):
-    
-    def __init__(self, name):
-        super().__init__(name)
+    def __init__(self, name, device):
+        super().__init__(name, device)
         self.inputs = {
-            "token": IOWrapper(self, 'token', dtype=torch.int32),
+            "token": IOWrapper(self, 'token', device, dtype=torch.int32).is_input(),
         }
         self.outputs = {
-            "output": IOWrapper(self, 'output')
+            "output": IOWrapper(self, 'output', device).is_output(),
         }
         self.weights = {
             "embedding": WeightWrapper(self)
         }
         self.impl_map = {}
         self.init_impl_map()
-        self.op_device = GenEmbedding_Device
+        self.op_layer = GenEmbedding_Layer
     
     def init_impl_map(self):
         self.add_impl(GenEmbeddingTorchImpl)
         if platform_config.PLATFORM_CUDA:
             self.add_impl(GenEmbeddingCudaImpl)
         
-    def setShape(self, hidden_dim, vocab_size, tp_size=1):
-        self.N = hidden_dim // tp_size
+    def setShape(self, hidden_dim, vocab_size):
+        self.N = hidden_dim
         self.vocab_size = vocab_size
-        self.tp_size = tp_size
         self.weights["embedding"].shape = (self.vocab_size, self.N)
-        self.updateChildrenIOShape()
+        self.inputs["token"].init_shape((0,))
+        self.outputs["output"].init_shape((0, self.N))
     
     
     def profile(self):
+        self.conn = sqlite3.connect('../profiling/Embedding.db')
+        self.cursor = self.conn.cursor()
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+
+        vocab_size = 128256
+        hidden_dim = 4096
+
         # check the similarity of the outputs
-        tokens = torch.randint(self.vocab_size, (2,), dtype=torch.int32, device='cuda')
-        embedding = torch.randn(self.vocab_size, self.hidden_dim, dtype=torch.float16, device='cuda')
+        self.batch_size = 2
+        tokens = torch.randint(vocab_size, (self.batch_size,), dtype=torch.int32, device='cuda')
+        embedding = torch.randn(vocab_size, hidden_dim, dtype=torch.float16, device='cuda')
         output_list = []
         for _, impl in self.impl_map.items():
-            out = torch.zeros((2, self.hidden_dim), dtype=torch.float16, device='cuda')
-            impl().run(tokens, embedding, out)
+            out = torch.zeros((self.batch_size, hidden_dim), dtype=torch.float16, device='cuda')
+            impl(self, None, self.device).run(tokens, embedding, out)
             output_list.append(out)
+            # Create a table to store performance data if it doesn't exist
+            self.cursor.execute(f'''
+                DROP TABLE IF EXISTS "{impl.category_tag}";
+            ''')
+            self.cursor.execute(f'''
+            CREATE TABLE IF NOT EXISTS "{impl.category_tag}" (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT, 
+                batch_size   INTEGER,
+                vocab_size INTEGER,
+                hidden_dim INTEGER,
+                average_time_ms REAL
+            );
+            ''')
 
+        self.conn.commit()
         self.checkConsistencyBetweenImpl(output_list)
 
+        print("Consistency check passed for GenEmbedding")
         rounds = 100
         batch_sizes = [2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 640, 768, 896, 1024]
 
         for batch_size in batch_sizes:
-            output = torch.zeros((batch_size, self.hidden_dim), dtype=torch.float16, device='cuda')
+            self.batch_size = batch_size
+            output = torch.zeros((self.batch_size, hidden_dim), dtype=torch.float16, device='cuda')
             for _, impl in self.impl_map.items():
-                impl_instance = impl()
+                impl_instance = impl(self, None, self.device)
                 category_tag = impl.category_tag
-                total_latency = 0
+                latency_list = torch.empty(rounds-1, dtype=torch.float32, device='cuda')
                 for round in range(rounds):
-                    tokens = torch.randint(self.vocab_size, (batch_size,), dtype=torch.int32, device='cuda')
-                    start = time.time()
+                    tokens = torch.randint(vocab_size, (self.batch_size,), dtype=torch.int32, device='cuda')
+                    start.record()
                     impl_instance.run(tokens, embedding, output)
+                    end.record()
                     torch.cuda.synchronize()
-                    if round > 0:
-                        total_latency += time.time() - start
-                average_time = total_latency / rounds
-                print("name: {}, batch_size: {}, average_time: {}".format(self.name + f"_{category_tag}", batch_size, average_time))
-                self.cursor.execute('''
-                    INSERT INTO performance (keyword, batch_size, average_time)
-                    VALUES (?, ?, ?)
-                    ''', (self.name + f"_{category_tag}", batch_size, average_time))
+                    if round > 0:  # Skip the first round for warm-up
+                        elapsed_ms = start.elapsed_time(end)
+                        latency_list[round-1] = elapsed_ms
+                # Calculate the average time
+                print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {batch_size}, Average Time: {latency_list.mean().item()} ms, Variance: {latency_list.var().item()}, latency[0]: {latency_list[0].item()} ms")
+                # print("latency list:", latency_list.tolist())
+                average_time_ms = latency_list.mean().item()
+                self.cursor.execute(f'''
+                    INSERT INTO {category_tag} (batch_size, vocab_size, hidden_dim, average_time_ms)
+                    VALUES (?, ?, ?, ?)
+                    ''', (batch_size, vocab_size, hidden_dim, average_time_ms))
         self.conn.commit()
     
-    def processWeight(self, global_weight_map, cached_weight_map, cached = False):
-        return process_weight_no_transpose(global_weight_map, self.weight_name, self.weights["embedding"], self.device_list, self.layer_list, cached_weight_map, self.tp_size, cached=cached)
-    
-class GenEmbedding_Device(Operation_Device):
-    def __init__(self, parent, device):
-        super().__init__(parent, device)
-        self.op_layer = GenEmbedding_Layer
-
-    def setShapeForIOWrappers(self):
-        self.inputs["token"].init_shape((0,))
-        self.outputs["output"].init_shape((0, self.parent.N))
-
+    def processWeight(self, global_weight_map, cached_weight_map, cached, device):
+        return process_weight_no_transpose(global_weight_map, self.weight_name, self.weights["embedding"], self.layer_list, cached_weight_map, cached, device)
 
 class GenEmbedding_Layer(Operation_Layer):
-    def __init__(self, layer, op_device):
-        super().__init__(layer, op_device)
+    def __init__(self, layer, base_op):
+        super().__init__(layer, base_op)
     
     def run(self):
-        self.impl.run(self.inputs["token"].tensor, self.weights["embedding"].weight_map[self.device_id][self.layer], self.outputs["output"].tensor)
+        self.impl.run(self.inputs["token"].tensor, self.weights["embedding"].weight_map[self.layer], self.outputs["output"].tensor)

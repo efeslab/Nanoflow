@@ -1,22 +1,22 @@
 import torch
 import time
 
-from operations.operation_base import Operations, Operation_Device, Operation_Layer
+from operations.operation_base import Operations, Operation_Layer
 from utils.prof_marker import prof_marker
 from core.IOWrapper import IOWrapper
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none, process_weight_layer
 from operations.impl_base import OperationImpl
 from kvcache.kv import KVCacheNone, KVCacheTorch, DistKVPool, BatchedDistKVCache
-from utils.help_functions import tensor_offset_to_req_idx
+from utils.util_functions import tensor_offset_to_req_idx
 
 
 class DecAttnTorchImpl(OperationImpl):
     category_tag = "torch"
-    def __init__(self, op_base, stream, device_id):
-        super().__init__(op_base, stream, device_id)
-        self.num_qo_heads = op_base.num_qo_heads
-        self.num_kv_heads = op_base.num_kv_heads
+    def __init__(self, op_base, stream, device):
+        super().__init__(op_base, stream, device)
+        self.num_qo_heads = op_base.num_qo_heads // op_base.tp_size
+        self.num_kv_heads = op_base.num_kv_heads // op_base.tp_size
         self.head_dim = op_base.head_dim
 
     def run(self, layer, Q, KVCache, output
@@ -61,13 +61,13 @@ class DecAttnTorchImpl(OperationImpl):
                 output[start:end, :].copy_(out)
 
 class DecAttnTorch(Operations):
-    def __init__(self, name):
-        super().__init__(name)
+    def __init__(self, name, device):
+        super().__init__(name, device)
         self.inputs = {
-            "Q": IOWrapper(self, 'Q')
+            "Q": IOWrapper(self, 'Q', device).is_input(),
         }
         self.outputs = {
-            "output": IOWrapper(self, 'output')
+            "output": IOWrapper(self, 'output', device).is_output()
         }
         self.externals = {
             "KVCache": None
@@ -75,41 +75,34 @@ class DecAttnTorch(Operations):
         self.impl_map = {}
         self.init_impl_map()
         self.batched_decode_wrapper = None
-        self.op_device = DecAttnTorch_Device
+        self.op_layer = DecAttnTorch_Layer
 
     def init_impl_map(self):
         self.add_impl(DecAttnTorchImpl)
     
     def setShape(self, num_kv_heads, num_qo_heads, head_dim, tp_size=1):
-        self.num_kv_heads = num_kv_heads // tp_size
-        self.num_qo_heads = num_qo_heads // tp_size
+        self.num_kv_heads = num_kv_heads
+        self.num_qo_heads = num_qo_heads
         self.head_dim = head_dim
-        self.q_dim = num_qo_heads * head_dim
-        self.updateChildrenIOShape()
+        self.tp_size = tp_size
+        q_dim = num_qo_heads * head_dim // tp_size
+        self.inputs["Q"].init_shape((0, q_dim))
+        self.outputs["output"].init_shape((0, q_dim))
     
-    def update(self, qo_indicies, device_id):
+    def update(self, qo_indicies):
         self.qo_indicies = qo_indicies
-        io_device = self.children[device_id].inputs["Q"]
-        start_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset)
-        end_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset + io_device.batch_size)
+        io = self.inputs["Q"]
+        start_req_idx = tensor_offset_to_req_idx(qo_indicies, io.tensor_offset)
+        end_req_idx = tensor_offset_to_req_idx(qo_indicies, io.tensor_offset + io.batch_size)
 
         self.input_req_idx = self.externals["KVCache"].input_req_idx[start_req_idx:end_req_idx]
     
     def profile(self):
         pass
-    
-class DecAttnTorch_Device(Operation_Device):
-    def __init__(self, parent, device):
-        super().__init__(parent, device)
-        self.op_layer = DecAttnTorch_Layer 
-
-    def setShapeForIOWrappers(self):
-        self.inputs["Q"].init_shape((0, self.parent.num_qo_heads* self.parent.head_dim))
-        self.outputs["output"].init_shape((0, self.parent.num_qo_heads * self.parent.head_dim))
 
 class DecAttnTorch_Layer(Operation_Layer):
-    def __init__(self, layer, op_device):
-        super().__init__(layer, op_device=op_device)
+    def __init__(self, layer, base_op):
+        super().__init__(layer, base_op)
 
     def run(self):
         Q = self.inputs["Q"].tensor
@@ -118,10 +111,10 @@ class DecAttnTorch_Layer(Operation_Layer):
     
 class PFAttnTorchImpl(OperationImpl):
     category_tag = "torch"
-    def __init__(self, op_base, stream, device_id):
-        super().__init__(op_base, stream, device_id)
-        self.num_qo_heads = op_base.num_qo_heads
-        self.num_kv_heads = op_base.num_kv_heads
+    def __init__(self, op_base, stream, device):
+        super().__init__(op_base, stream, device)
+        self.num_qo_heads = op_base.num_qo_heads // op_base.tp_size
+        self.num_kv_heads = op_base.num_kv_heads // op_base.tp_size
         self.head_dim = op_base.head_dim
 
     def run(self, layer, qo_indicies, Q, KVCache, output
@@ -182,13 +175,13 @@ class PFAttnTorchImpl(OperationImpl):
                 output[start:end, :].copy_(out)
 
 class PFAttnTorch(Operations):
-    def __init__(self, name):
-        super().__init__(name)
+    def __init__(self, name, device):
+        super().__init__(name, device)
         self.inputs = {
-            "Q": IOWrapper(self, 'Q'),
+            "Q": IOWrapper(self, 'Q', device).is_input(),
         }
         self.outputs = {
-            "output": IOWrapper(self, 'output')
+            "output": IOWrapper(self, 'output', device).is_output()
         }
         # Note: for consistency with other operators (like RopeAppend), we expect the external KV cache to be
         # available as "KVCache". If needed, you can change the key name.
@@ -197,24 +190,26 @@ class PFAttnTorch(Operations):
         }
         self.impl_map = {}
         self.init_impl_map()
-        self.op_device = PFAttnTorch_Device
+        self.op_layer = PFAttnTorch_Layer
 
     def init_impl_map(self):
         self.add_impl(PFAttnTorchImpl)
     
     def setShape(self, num_kv_heads, num_qo_heads, head_dim, tp_size=1):
-        self.num_kv_heads = num_kv_heads // tp_size
-        self.num_qo_heads = num_qo_heads // tp_size
+        self.num_kv_heads = num_kv_heads
+        self.num_qo_heads = num_qo_heads
         self.head_dim = head_dim
-        self.q_dim = num_qo_heads * head_dim
-        self.updateChildrenIOShape()
+        self.tp_size = tp_size
+        q_dim = num_qo_heads * head_dim // tp_size
+        self.inputs["Q"].init_shape((0, q_dim))
+        self.outputs["output"].init_shape((0, q_dim))
     
-    def update(self, qo_indicies, device_id):
-        io_device = self.children[device_id].inputs["Q"]
-        start_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset)
-        end_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset + io_device.batch_size)
+    def update(self, qo_indicies):
+        io = self.inputs["Q"]
+        start_req_idx = tensor_offset_to_req_idx(qo_indicies, io.tensor_offset)
+        end_req_idx = tensor_offset_to_req_idx(qo_indicies, io.tensor_offset + io.batch_size)
 
-        self.qo_indicies = torch.tensor(qo_indicies[start_req_idx:end_req_idx + 1]) - io_device.tensor_offset
+        self.qo_indicies = torch.tensor(qo_indicies[start_req_idx:end_req_idx + 1]) - io.tensor_offset
         self.input_req_idx = self.externals["KVCache"].input_req_idx[start_req_idx:end_req_idx]
     
 
@@ -259,21 +254,11 @@ class PFAttnTorch(Operations):
 
         self.checkConsistencyBetweenImpl(output_list)
 
-    
-class PFAttnTorch_Device(Operation_Device):
-    def __init__(self, parent, device):
-        super().__init__(parent, device)
-        self.op_layer = PFAttnTorch_Layer 
-
-    def setShapeForIOWrappers(self):
-        self.inputs["Q"].init_shape((0, self.parent.num_qo_heads * self.parent.head_dim))
-        self.outputs["output"].init_shape((0, self.parent.num_qo_heads * self.parent.head_dim))
-
 class PFAttnTorch_Layer(Operation_Layer):
-    def __init__(self, layer, op_device):
-        super().__init__(layer=layer, op_device=op_device)
+    def __init__(self, layer, base_op):
+        super().__init__(layer, base_op)
     
     def run(self):
         Q = self.inputs["Q"].tensor
-        self.impl.run(self.layer, self.parent.parent.qo_indicies,  Q, self.parent.externals["KVCache"], self.outputs["output"].tensor)
+        self.impl.run(self.layer, self.parent.qo_indicies, Q, self.externals["KVCache"], self.outputs["output"].tensor)
         

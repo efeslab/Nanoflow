@@ -2,7 +2,7 @@ import torch
 import triton
 import platform_config
 from operations.impl_base import OperationImpl
-from .triton.kernels.sm_constraint_gemm import gemm_kernel_persistent, gemm_kernel
+from pybind_triton_kernels.triton_gemm.src.kernels import gemm_kernel_persistent
 
 class GEMMTorchImpl(OperationImpl):
     category_tag = "torch"
@@ -14,40 +14,30 @@ class GEMMTorchImpl(OperationImpl):
         if self.bias:
             self.beta = self.op_base.beta
     
-    def run(self, B):
+    def run(self, A, B, C, D):
         with torch.cuda.stream(self.stream):
-            D = self.outputs["D"].tensor
-            A = self.inputs["A"].tensor
-            
             if self.bias:
-                C = self.inputs["C"].tensor
                 D.copy_(A.matmul(B) * self.alpha + C * self.beta)
             else:
                 D.copy_(A.matmul(B) * self.alpha)
 
 class GEMMTritonImpl(OperationImpl):
     category_tag = "triton"
+    impl_tag_profile = "triton"
     def config(self, impl_tag, parameter_map):
         self.M = self.batch_size
-        self.N = self.op_base.N
-        self.K = self.op_base.K
+        self.N = self.op_base.tp_N
+        self.K = self.op_base.tp_K
         self.alpha = self.op_base.alpha
-        self.bias = self.op_base.bias
-        self.beta = 0.0
-        if self.bias:
-            self.beta = self.op_base.beta
+        self.beta = self.op_base.beta
 
-    def run(self, B):
+    def run(self, A, B, C, D):
         with torch.cuda.stream(self.stream):
-            D = self.outputs["D"].tensor
-            A = self.inputs["A"].tensor
-            C = self.inputs["C"].tensor if self.bias else torch.empty((self.M, self.N), dtype=torch.float16, device=f"cuda:{self.device_id}")
-
             stride_am, stride_ak = A.stride()
             stride_bk, stride_bn = B.stride()
             stride_cm, stride_cn = C.stride()
 
-            NUM_SMS = torch.cuda.get_device_properties(self.device_id).multi_processor_count
+            NUM_SMS = torch.cuda.get_device_properties(self.device).multi_processor_count
 
             grid = lambda META: (
                 min(
@@ -77,7 +67,7 @@ class GEMMTritonImpl(OperationImpl):
 
 
 if platform_config.PLATFORM_CUDA:
-    import pybind.build.bind_gemm as bind_gemm
+    import bind_gemm
     class GEMMCudaImpl(OperationImpl):
         category_tag = "cuda"
         impl_tag_profile = "SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto"
@@ -85,22 +75,17 @@ if platform_config.PLATFORM_CUDA:
             if self.batch_size > 0:
                 self.name = self.op_base.name
                 self.M = self.batch_size
-                self.N = self.op_base.N
-                self.K = self.op_base.K
+                self.N = self.op_base.tp_N
+                self.K = self.op_base.tp_K
                 self.alpha = self.op_base.alpha
-                self.bias = self.op_base.bias
-                self.beta = 0.0
+                self.beta = self.op_base.beta
                 # print("M:", self.M, "N:", self.N, "K:", self.K)
                 # print("alpha:", self.alpha, "beta:", self.beta)
-                if self.bias:
-                    self.beta = self.op_base.beta
-                    bind_gemm.configGEMM(impl_tag, self.name, self.inputs["A"].tensor, self.inputs["C"].tensor, self.outputs["D"].tensor, self.M, self.N, self.K, self.alpha, self.beta)
-                else:
-                    # print("GEMMCudaImpl config", self.name, "M:", self.M, "N:", self.N, "K:", self.K)
-                    bind_gemm.configGEMM(impl_tag, self.name, self.inputs["A"].tensor, torch.empty((self.M, self.N), dtype=torch.float16, device=f"cuda:{self.device_id}"), self.outputs["D"].tensor, self.M, self.N, self.K, self.alpha, self.beta)
+                bind_gemm.configGEMM(impl_tag, self.name, self.M, self.N, self.K, self.alpha, self.beta)
 
         # def profile(self, impl_tag):
 
-        def run(self, B):
-            if self.batch_size > 0:
-                bind_gemm.gemmLauncher(self.name, B, self.stream_handle)
+        def run(self, A, B, C, D):
+            with torch.cuda.stream(self.stream):
+                if self.batch_size > 0:
+                    bind_gemm.gemmLauncher(self.name, A, B, C, D, self.stream_handle)

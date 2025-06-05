@@ -8,10 +8,11 @@ sys.path.append('../pybind/build')
 os.environ["HF_HOME"] = "/code/hf"
 from utils.prof_marker import prof_marker
 from utils.frontend import requestManager
+from utils.util_functions import prepare_weight
 from transformers import AutoTokenizer
 
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "6"
 
 # from models.llama3_NoKVCacheTorch import Pipeline
 # from models.llama3_KVCacheTorch import Pipeline
@@ -57,7 +58,11 @@ prefill_input_ids = [tokenizer.encode(prefill_context)[:640] for _ in range(1000
 
 weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
 # weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
-weight_map_amd_kan = "/work1/kasikci/kanzhu/models/llama3-8b"
+# weight_map_amd_kan = "/work1/kasikci/kanzhu/models/llama3-8b"
+pipeline_dict = {
+    "cuda:0" : Pipeline()
+}
+# prepare_weight(pipeline_dict, weight_map_wzr)
 
 pipeline = Pipeline()
 pipeline.init(weight_map_wzr, cached=True)
@@ -85,7 +90,7 @@ def test_performance():
     decode_inputs.extend([(decode_batch_size, prefill_input_ids[decode_batch_size])])
     pipeline.update(decode_inputs, decode_batch_size)
 
-    for i in range(decode_batch_size, decode_batch_size + 100):
+    for i in range(decode_batch_size, decode_batch_size + 50):
         print("Cycle: ", i - decode_batch_size)
         next_prefill_idx = i + 1
         new_tokens = pipeline.run()
@@ -138,6 +143,7 @@ def test_correctness(use_kv_cache=True):
         output_strings[req_idx].extend(new_token)
     decode_batchsize = len(new_tokens)
     assert decode_batchsize == 4
+    # print("new_tokens: ", new_tokens)
 
     if use_kv_cache:
         pipeline.update(new_tokens, decode_batchsize)
@@ -162,6 +168,21 @@ def test_correctness(use_kv_cache=True):
     output_text = tokenizer.batch_decode(list(output_strings.values()), skip_special_tokens=True)
     print(output_text)
 
+def test_one_cycle():
+    special_inputs_0 = [(0, input_ids[0]), (1, input_ids[1])]
+    output_strings = {}
+    for idx, tensor in special_inputs_0:
+        output_strings[idx] = tensor
+
+    pipeline.update(special_inputs_0)
+    new_tokens = pipeline.run()
+    for req_idx, new_token in new_tokens:
+        output_strings[req_idx].extend(new_token)
+    
+    output_text = tokenizer.batch_decode(list(output_strings.values()), skip_special_tokens=True)
+    print(output_text)
+
 test_correctness()
 # test_correctness(use_kv_cache=False)
 # test_performance()
+# test_one_cycle()

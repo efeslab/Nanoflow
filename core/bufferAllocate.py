@@ -1,14 +1,11 @@
 import torch
 import matplotlib.pyplot as plt
 import networkx as nx
-import re
-import sympy as sp
 import os
 os.environ['GRB_LICENSE_FILE'] = '/code/Nanoflow-python/gurobi.lic'
 import gurobipy as gp
 from gurobipy import GRB
-from core.IOWrapper import IOWrapper
-from operations.virtualOp.virtual_ops import Copy, Copy_Device, Redist, Redist_Device
+from operations.virtualOp.virtual_ops import Redist
 from utils.graph_plot import plot_graph_topological, draw_graphs_subplots
 
 class BufferAllocator():
@@ -34,7 +31,7 @@ class BufferAllocator():
             G.add_node(wrapper.fullName, wrapper=wrapper)
             # print(f"add node {wrapper.fullName}")
         for wrapper in self.buffers_list:
-            for next_wrapper in wrapper.next:
+            for next_wrapper in wrapper.actual_next:
                 assert next_wrapper.fullName in G.nodes, f"{next_wrapper.fullName} is not in the graph"
                 G.add_edge(wrapper.fullName, next_wrapper.fullName)
                 # print(f"add edge {wrapper.fullName} -> {next_wrapper.fullName}")
@@ -42,52 +39,65 @@ class BufferAllocator():
     
     def set_all_batchsize_by_linear_programming(self):
         # Create a new model
-        variables = {}
-        equations = []
-        for wrapper in self.buffers_list:
+        model = gp.Model("batchsize_lp")
+        model.setParam("OutputFlag", 0)
+        vars_by_wrap = {}
+        for w in self.buffers_list:
             # create a new variable for each wrapper
-            variables[wrapper.fullName] = sp.symbols(wrapper.fullName)
-            if wrapper.shape is not None:
+            v = model.addVar(
+                name = w.fullName,
+                vtype = GRB.CONTINUOUS,
+                lb    = 0,
+            )
+            vars_by_wrap[w] = v
+            if w.shape is not None:
                 # assert wrapper.shape[0] > 0, f"{wrapper.fullName} has no shape"
-                equations.append(sp.Eq(variables[wrapper.fullName], wrapper.shape[0]))
+                model.addConstr(v == w.shape[0], name=f"fixed_{w.fullName}")
                 # print(f"add equation {wrapper.fullName} = {wrapper.shape[0]}")
         
         # build the equations
-        for wrapper in self.buffers_list:
+        for w in self.buffers_list:
         # if the wrapper is input, build the equation inside the op (Redist will only execute once)
-            if wrapper.is_input_wrapper:
-                if isinstance(wrapper.owner, Redist_Device) and len(wrapper.next) > 0:
+            assert w.is_input_wrapper or w.is_output_wrapper, f"{w.fullName} is not input or output wrapper"
+            if w.is_input_wrapper:
+                if isinstance(w.owner, Redist) and len(w.actual_next) > 0:
                     # for Redist_Device, we need to build the equation for each input and output
-                    input_symbols = [variables[input_wrapper.fullName] for input_wrapper in wrapper.owner.inputs.values()]
-                    output_symbols = [variables[output_wrapper.fullName] for output_wrapper in wrapper.next]
+                    lhs = gp.quicksum(vars_by_wrap[iw] for iw in w.owner.inputs.values())
+                    rhs = gp.quicksum(vars_by_wrap[ow] for ow in w.actual_next)
                     # print(f"add equation {wrapper.fullName}: {input_symbols} = {output_symbols}")
-                    equations.append(sp.Eq(sum(input_symbols), sum(output_symbols)))
+                    model.addConstr(lhs == rhs, name=f"redist_{w.fullName}")
                 else:
                     # for the case of real op and Copy, the relationship is all the same buffer.
-                    for output_wrapper in wrapper.owner.outputs.values():
-                        # print(f"add equation {wrapper.fullName} = {output_wrapper.fullName}")
-                        equations.append(sp.Eq(variables[wrapper.fullName], variables[output_wrapper.fullName]))
+                    in_var = vars_by_wrap[w]
+                    for ow in w.owner.outputs.values():
+                        # print(f"add equation {wrapper.fullName} = {ow.fullName}")
+                        model.addConstr(in_var == vars_by_wrap[ow], name=f"copy_{w.fullName}")
 
             # all links between the ops
-            if wrapper.is_output_wrapper:
-                assert len(wrapper.next) <= 1, f"{wrapper.fullName} has more than one next connections!\n"
-                for next_wrapper in wrapper.next:
-                    # assert wrapper.shape[1] == next_wrapper.shape[1], f"{wrapper.fullName} and {next_wrapper.fullName} has different shape"
-                    # print(f"add equation {wrapper.fullName} = {next_wrapper.fullName}")
-                    equations.append(sp.Eq(variables[wrapper.fullName], variables[next_wrapper.fullName]))
+            if w.is_output_wrapper and len(w.actual_next) > 0:
+                assert len(w.actual_next) <= 1, f"{w.fullName} has more than one next connections!\n"
+                next_var = vars_by_wrap[w.actual_next[0]]
+                model.addConstr(vars_by_wrap[w] == next_var, name=f"link_{w.fullName}->{w.actual_next[0].fullName}")
 
-        # print(f"equations: {equations}")
         # Solve the linear programming problem
-        solution = sp.solve(equations, variables)
+        model.setObjective(0.0)     # feasibility only
+        model.optimize()
+        # for v in model.getVars():
+        #     print(f"Variable {v.VarName}: Lower Bound = {v.LB}, Upper Bound = {v.UB}")
+        # for c in model.getConstrs():
+        #     expr = model.getRow(c)
+        #     print(f"Constraint {c.ConstrName}: {expr} <= {c.RHS}")
+        if model.status != GRB.OPTIMAL:
+            raise RuntimeError(f"Gurobi returned status {model.status} "
+                           "(infeasible or unbounded).")
         # print(f"solution: {solution}")
-        assert len(solution) != 0, f"The solution space is empty, please check the batchsize setting!"
-        assert len(solution) == len(variables), f"There are infinitely many solutions, please check the batchsize setting!"
         
         # Set the shape for each wrapper
-        for wrapper in self.buffers_list:
-            if wrapper.owner.batch_size is None:
-                wrapper.owner.batch_size = int(solution[variables[wrapper.fullName]])
-            wrapper.batch_size = int(solution[variables[wrapper.fullName]])
+        for w, v in vars_by_wrap.items():
+            bsz = int(v.X)
+            if w.owner.batch_size is None:
+                w.owner.batch_size = bsz
+            w.batch_size = bsz
             # print(f"set {wrapper.fullName} batch size to {wrapper.batch_size} with shape {wrapper.shape}")
 
     def draw_dependency_graph(self):
@@ -108,7 +118,7 @@ class BufferAllocator():
     def draw_allocation_subgraphs(self):
         draw_graphs_subplots(self.allocation_graph, title_prefix="Allocation")
     
-    def allocate_buffers_for_components(self, device_id):
+    def allocate_buffers_for_components(self, device):
         self.total_allocated = 0
         components = self.get_connected_components()
         for comp in components:
@@ -127,7 +137,7 @@ class BufferAllocator():
             collected_redist_ops = []
             wrappers = [data['wrapper'] for _, data in comp.nodes(data=True)]
             for wrapper in wrappers:
-                variables[wrapper.fullName] = model.addVar(name=wrapper.fullName, vtype=GRB.INTEGER, lb=0)
+                variables[wrapper.fullName] = model.addVar(name=wrapper.fullName, vtype=GRB.CONTINUOUS, lb=0)
                 if wrapper.owner.isVirtual:
                     if wrapper.owner.isCopy and wrapper.owner not in collected_copy_ops:
                         collected_copy_ops.append(wrapper.owner)
@@ -139,7 +149,7 @@ class BufferAllocator():
                 # print("No copy or redist operations found in the component.")
                 shape = wrappers[0].shape
                 dtype = wrappers[0].dtype
-                whole_buffer = torch.zeros(shape, dtype=dtype).cuda(device_id)
+                whole_buffer = torch.empty(shape, dtype=dtype).to(device)
                 self.total_allocated += whole_buffer.numel() * whole_buffer.element_size()
                 for wrapper in wrappers:
                     wrapper.set_whole_buffer(whole_buffer)
@@ -199,7 +209,7 @@ class BufferAllocator():
                 dtype = wrapper_for_allocation.dtype
                 # print(f"Allocated shape: {shape}, dtype: {dtype}")
                 # allocate the buffer
-                whole_buffer = torch.empty(shape, dtype=dtype).cuda(device_id)
+                whole_buffer = torch.empty(shape, dtype=dtype).to(device)
                 self.total_allocated += whole_buffer.numel() * whole_buffer.element_size()
                 # set the buffer for each wrapper
                 for wrapper in wrappers:
@@ -214,8 +224,8 @@ class BufferAllocator():
 
 
 
-    def allocate_buffer(self, device_id, plot = False):
-        self.allocate_buffers_for_components(device_id)
+    def allocate_buffer(self, device, plot = False):
+        self.allocate_buffers_for_components(device)
         if plot:
             self.draw_dependency_graph()
             self.draw_dependency_subgraphs()

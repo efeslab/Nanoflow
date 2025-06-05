@@ -146,17 +146,17 @@ struct CutlassGEMMWrapper : public BaseGEMMWrapperTemplate<LayoutInputA_, Layout
 										   tensor_d_ref,
 										   {alpha, beta},
 										   split_k};
-		cutlass::Status status = gemm_op.update(arguments, workspace);
+		// cutlass::Status status = gemm_op.update(arguments, workspace);
+		cutlass::Status status = gemm_op.initialize(arguments, workspace, stream);
 		CUTLASS_CHECK(status);
 	}
 	// Expected usage:
 	// Call set{A,B,C,D} to configure the input/output tensors before calling this init.
 	// Assuming all tensor operands are setup.
-	void init(ElementComputeEpilogue beta_) override {
+	void init() override {
 		problem_size = cutlass::gemm::GemmCoord({int(M), int(N), int(K)});
 		// spdlog::info("name:{} M:{}, N:{}, K:{}, a, b, c, d: {}, {}, {}, {}", name, M, N, K, (size_t)tensor_a_ref.data(),  (size_t)tensor_b_ref.data(),  (size_t)tensor_c_ref.data(),  (size_t)tensor_d_ref.data());
 		// spdlog::info("lda, ldb, ldc, ldd: {}, {}, {}, {}", kLda, kLdb, kLdc, kLdd);
-		beta = beta_;
 		typename Gemm::Arguments arguments{problem_size,
 										   tensor_a_ref,
 										   tensor_b_ref,

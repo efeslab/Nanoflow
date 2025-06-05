@@ -8,7 +8,6 @@ import json
 import argparse
 import torch
 
-os.environ['HF_HOME'] = '../../hf'
 from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaModel, LlamaForCausalLM
 
 

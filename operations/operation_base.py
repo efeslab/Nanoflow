@@ -1,14 +1,12 @@
 from unicodedata import category
 from operations.impl_base import OperationImpl
 import torch
-import sqlite3
 from abc import ABC, abstractmethod
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none
-from core.IOWrapper import IOWrapper_Device
 
 class Operations:
-    def __init__(self, name):
+    def __init__(self, name, device):
         # should be initialized in the device class
         self.inputs = {}
         self.outputs = {}
@@ -28,22 +26,13 @@ class Operations:
         self.nano_op_batchsizes = []
         self.isVirtual = False
         self.stream = None
+        self.batch_size = None
 
-        # Connect to the database
-        # self.conn = sqlite3.connect('performance.db')
-        # self.cursor = self.conn.cursor()
-        # # Create a table to store performance data if it doesn't exist
-        # # self.cursor.execute('''
-        # #     CREATE TABLE IF NOT EXISTS performance (
-        # #         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        # #         keyword TEXT,
-        # #         batch_size INTEGER,
-        # #         average_time REAL
-        # #     )
-        # # ''')
-        # self.conn.commit()
+        self.device = device
+        self.extra_dep = []
+
         self.impl_map = {}
-        self.op_device = None
+        self.op_layer = None
         
     def init_impl_map(self):
         self.impl_map = {} 
@@ -63,6 +52,7 @@ class Operations:
             raise Exception("No implementation found")
         for i in range(len(outputs)):
             for j in range(i + 1, len(outputs)):
+                print(f"Checking consistency between outputs {i} and {j} for operation {self.name}")
                 close_elements = torch.isclose(outputs[i], outputs[j], rtol=1e-01, atol=1e-03)
                 assert torch.all(close_elements), f"Outputs from different implementations are not close: {outputs[i]} and {outputs[j]}"
 
@@ -76,14 +66,10 @@ class Operations:
         return self
 
     def setShape(self):
-        self.updateChildrenIOShape()
-    
-    def updateChildrenIOShape(self):
-        for op_device in self.children:
-            op_device.setShapeForIOWrappers()
+        return None
 
-    def processWeight(self, global_weight_map, weight_path, cached = False):
-        return process_weight_none(global_weight_map, self.weight_name, None, self.device_list, self.layer_list, weight_path, cached)
+    def processWeight(self, global_weight_map, weight_path, cached, device):
+        return process_weight_none(global_weight_map, self.weight_name, None, self.layer_list, weight_path, cached, device)
     
     def first_only(self):
         self.first_layer_only = True
@@ -93,24 +79,32 @@ class Operations:
         self.last_layer_only = True
         return self
     
-    def search_profile_data(self):
-        self.cursor.execute('''
-            SELECT * FROM performance
-        ''')
-        rows = self.cursor.fetchall()
-        for row in rows:
-            print(row)
+    def print_profile(self):
+        assert hasattr(self, 'cursor'), "Profiling has not been run yet. Please call profile() first."
+        # print the profiling results
+        for _, impl in self.impl_map.items():
+            category_tag = impl.category_tag
+            self.cursor.execute(f'''
+                SELECT * FROM {category_tag}
+            ''')
+            cols = [col_desc[0] for col_desc in self.cursor.description]
+            rows = self.cursor.fetchall()
+            print(f"Profiling results for {category_tag}:")
+            print(" | ".join(cols))            # header line
+            for row in rows:
+                print(" | ".join(str(val) for val in row))
+        self.conn.close()
             
-    def config_tag(self, tag, device_id, parameter_map = {}):
+    def config_tag(self, tag, parameter_map = {}):
         if self.isNanoSplit:
-            for nano_op in self.nano_ops:
-                nano_op.config_tag(tag, device_id, parameter_map)
+            assert len(tag) == len(self.nano_ops), f"Operation {self.name} has {len(self.nano_ops)} nano ops, but {len(tag)} tags were provided."
+            for i, nano_op in enumerate(self.nano_ops):
+                nano_op.config_tag(tag[i], parameter_map)
             return self
         else:
             self.tag = tag
-            self.device_id = device_id
             self.parameter_map = parameter_map
-            parts = tag.split(":", 1)
+            parts = self.tag.split(":", 1)
             category_tag = ""
             impl_tag = ""
             if len(parts) == 1:
@@ -118,8 +112,8 @@ class Operations:
             else:
                 category_tag = parts[0]
                 impl_tag = parts[1]
-            # self.impl  = self.impl_map[category_tag](self.inputs, self.outputs, self.weights, device_id)
-            self.impl  = self.impl_map[category_tag](self, self.stream, device_id)
+            # self.impl  = self.impl_map[category_tag](self.inputs, self.outputs, self.weights, device)
+            self.impl  = self.impl_map[category_tag](self, self.stream, self.device)
             self.config_impl(impl_tag, parameter_map)
             # print("name: ", self.name, "category_tag: ", category_tag, "impl_tag: ", impl_tag, "impl: ", self.impl)
             return self
@@ -143,117 +137,44 @@ class Operations:
         self.stream = stream
 
     def append_dependency(self, extra_dep):
-        for idx, child in enumerate(self.children):
-            child.append_dependency((extra_dep[0].children[idx], extra_dep[1], extra_dep[2]))
+        if extra_dep not in self.extra_dep:
+            self.extra_dep.append(extra_dep)
 
     def __str__(self):
-        return self.name   
-    
-    def expand_gpu(self, num_devices):
-        for device_id in range(num_devices):
-            op_device = self.op_device(self, device_id)
-            self.children.append(op_device)
-        
-        return self.children
-    
-    def expand_all_gpu_and_layers(self, num_devices, num_layers):
-        self.device_list = list(range(num_devices))
-        if self.first_layer_only:
-            self.layer_list = [0]
-        elif self.last_layer_only:
-            self.layer_list = [num_layers - 1]
-        else:
-            self.layer_list = list(range(num_layers))
-        self.op_layers_per_device = []
-        for device_id in range(num_devices):
-            op_device = self.op_device(self, device_id)
-
-            self.op_layers_per_device.append(op_device.expand_layer(self.layer_list))
-            self.children.append(op_device)
-        
-        return self.children, self.op_layers_per_device
-    
-class Operation_Device:
-    def __init__(self, parent, device_id):
-        self.name = parent.name
-        self.parent = parent
-        self.device_id = device_id
-        self.weights = parent.weights
-        self.externals = self.parent.externals
-        self.extra_dep = []
-        self.children = []
-        self.batch_size = None
-        self.inputs = {}
-        for key, base_wrapper in parent.inputs.items():
-            dev_wrapper = IOWrapper_Device(
-                owner=self,
-                name=base_wrapper.name,
-                device_id=device_id,
-                dtype=base_wrapper.dtype,
-                base_wrapper=base_wrapper
-            ).is_input()
-            base_wrapper.append_child(dev_wrapper)
-            self.inputs[key] = dev_wrapper
-
-        self.outputs = {}
-        for key, base_wrapper in parent.outputs.items():
-            dev_wrapper = IOWrapper_Device(
-                owner=self,
-                name=base_wrapper.name,
-                device_id=device_id,
-                dtype=base_wrapper.dtype,
-                base_wrapper=base_wrapper
-            ).is_output()
-            base_wrapper.append_child(dev_wrapper)
-            self.outputs[key] = dev_wrapper
-    
-    def append_dependency(self, dep):
-        if dep not in self.extra_dep:
-            self.extra_dep.append(dep)
-
-    @property
-    def impl(self):
-        return self.parent.impl
-
-    @property
-    def isVirtual(self):
-        return self.parent.isVirtual
-    
-    @property
-    def first_layer_only(self):
-        return self.parent.first_layer_only
-    
-    @property
-    def last_layer_only(self):
-        return self.parent.last_layer_only
+        return self.name
 
     def expand_layer(self, layer_list):
-        for i in layer_list:
-            op_layer = self.op_layer(i, self)
-            self.children.append(op_layer)
+        if self.first_layer_only:
+            self.layer_list = layer_list[:1]
+        elif self.last_layer_only:
+            self.layer_list = layer_list[-1:]
+        else:
+            self.layer_list = layer_list
+
+        for layer_idx in self.layer_list:
+            self.children.append(self.op_layer(layer_idx, self))
         
         return self.children
-
+    
     def setBatchSize(self, batch_size):
         self.batch_size = batch_size
         for _, input_wrapper in self.inputs.items():
             input_wrapper.batch_size = batch_size
         for _, output_wrapper in self.outputs.items():
             output_wrapper.batch_size = batch_size
-        
-
+    
 class Operation_Layer:
-    def __init__(self, layer, op_device):
+    def __init__(self, layer, base_op):
         self.layer = layer
-        self.name = f"{op_device.name}_{layer}"
-        self.inputs = op_device.inputs
-        self.outputs = op_device.outputs
-        self.weights = op_device.weights
-        self.externals = op_device.externals
-        self.parent = op_device
-        self.device_id = op_device.device_id
+        self.name = f"{base_op.name}_{layer}"
+        self.inputs = base_op.inputs
+        self.outputs = base_op.outputs
+        self.weights = base_op.weights
+        self.externals = base_op.externals
+        self.parent = base_op
+        self.device = base_op.device
         self.prev_op_layer = []
-        self.cuda_event = None
+        self.cuda_event = torch.cuda.Event(enable_timing=True) 
         self.is_depended_on = False
 
     @property
@@ -262,7 +183,7 @@ class Operation_Layer:
 
     @property
     def stream(self):
-        return self.parent.parent.stream
+        return self.parent.stream
 
     @property
     def batch_size(self):
@@ -277,9 +198,9 @@ class Operation_Layer:
         depend_on_prev = []
         depend_on_next = []
         for _, input_wrapper in self.parent.inputs.items():
-            prev.extend(input_wrapper.prev)
-            depend_on_prev.extend(input_wrapper.prev_depend_on_prev_layer)
-            depend_on_next.extend(input_wrapper.prev_depend_on_next_layer)
+            prev.extend(input_wrapper.actual_prev)
+            depend_on_prev.extend(input_wrapper.actual_prev_depend_on_prev_layer)
+            depend_on_next.extend(input_wrapper.actual_prev_depend_on_next_layer)
         while len(prev) > 0:
             assert len(prev) == len(depend_on_prev) == len(depend_on_next), f"Operation '{self.name}' has different number of prev and depend_on_prev connections!\n"
             dep_wrapper = prev.pop()
@@ -327,7 +248,6 @@ class Operation_Layer:
     def reset_op_cuda_status(self):
         self.prev_op_layer = []
         self.is_depended_on = False
-        self.cuda_event = None
 
     def append_prev_op_layer(self, op_layer):
         self.prev_op_layer.append(op_layer)
@@ -338,15 +258,14 @@ class Operation_Layer:
 
     def record_cuda_event(self):
         if self.is_depended_on:
-            if self.cuda_event is None:
-                self.cuda_event = torch.cuda.Event(enable_timing=True)
             self.cuda_event.record(self.stream)
             # print("record_cuda_event: ", self.name, "cuda_event: ", self.cuda_event)
     
     def wait_cuda_event(self):
         events = []
         for op_layer in self.prev_op_layer:
-            if op_layer.cuda_event is not None and self.stream != op_layer.stream:
+            if self.stream != op_layer.stream:
                 events.append(op_layer.cuda_event)
+                # print("wait_cuda_event: ", self.name, "prev_op_layer: ", op_layer.name, "cuda_event: ", op_layer.cuda_event)
         for event in events:
             self.stream.wait_event(event)

@@ -1,10 +1,10 @@
 from numpy import isin
 import torch
-import sys
 import time
+import sqlite3
 from utils.prof_marker import prof_marker
 import platform_config
-from operations.operation_base import Operations, Operation_Device, Operation_Layer
+from operations.operation_base import Operations, Operation_Layer
 from core.IOWrapper import IOWrapper
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none, process_weight_layer
@@ -12,19 +12,19 @@ from core.processWeight import process_weight_none, process_weight_layer
 from operations.gemm.gemm_impls import GEMMTorchImpl, GEMMTritonImpl, GEMMCudaImpl
 
 class GEMM_N_Parallel(Operations):
-    def __init__(self, name, bias = False):
-        super().__init__(name)
+    def __init__(self, name, device, bias = False):
+        super().__init__(name, device)
         if bias:
             self.inputs = {
-                "A": IOWrapper(self, 'A'),
-                "C": IOWrapper(self, 'C')
+                "A": IOWrapper(self, 'A', device).is_input(),
+                "C": IOWrapper(self, 'C', device).is_input()
             }
         else:
             self.inputs = {
-                "A": IOWrapper(self, 'A')
+                "A": IOWrapper(self, 'A', device).is_input()
             }
         self.outputs = {
-            "D": IOWrapper(self, 'D')
+            "D": IOWrapper(self, 'D', device).is_output()
         }
         self.weights = {
             "B": WeightWrapper()
@@ -37,7 +37,7 @@ class GEMM_N_Parallel(Operations):
             self.beta = 0.0
         self.impl_map = {}
         self.init_impl_map()
-        self.op_device = GEMM_N_Parallel_Device
+        self.op_layer = GEMM_N_Parallel_Layer
 
     def setParameter(self, alpha = 1, beta = 0):
         self.alpha = alpha
@@ -54,20 +54,27 @@ class GEMM_N_Parallel(Operations):
         if platform_config.PLATFORM_CUDA:
             self.add_impl(GEMMCudaImpl)
     
-    def setShape(self, N, K, tp_size=1, strides=[]):
+    def setShape(self, N, K, tp_idx=0, tp_size=1):
+        self.tp_idx = tp_idx
         self.tp_size = tp_size
-        self.N = N // tp_size
+        # print("tp_idx", self.tp_idx, "tp_size", self.tp_size)
+        self.N = N
         self.K = K
-        print("name", self.name, "N:", self.N, "K:", self.K)
-        self.weights["B"].shape = (self.K, self.N)
-        self.updateChildrenIOShape()
+        self.tp_N = N // tp_size
+        self.tp_K = K
+        print("name", self.name, "N:", self.tp_N, "K:", self.tp_K)
+        self.weights["B"].shape = (self.tp_K, self.tp_N)
+        self.inputs["A"].init_shape((0, self.tp_K))
+        if self.bias:
+            self.inputs["C"].init_shape((0, N)) # bias is a whole buffer, processed in the impl
+        self.outputs["D"].init_shape((0, self.tp_N))
         return self
     
     def copy_nano(self, index):
-        new_op = GEMM_N_Parallel(f"{self.name}{index}", self.bias)
+        new_op = GEMM_N_Parallel(f"{self.name}{index}", self.device, self.bias)
         new_op.weights = self.weights
-        new_op.expand_all_gpu_and_layers(len(self.device_list), 32)
-        new_op.setShape(self.N, self.K, self.tp_size).setParameter(self.alpha, self.beta)
+        new_op.expand_layer(self.layer_list)
+        new_op.setShape(self.N, self.K, self.tp_idx, self.tp_size).setParameter(self.alpha, self.beta)
         new_op.set_stream(self.stream)
         
         self.nano_ops.append(new_op)
@@ -75,108 +82,143 @@ class GEMM_N_Parallel(Operations):
         return new_op
 
     def profile(self):
-        # print("Get into profile", self.name)
-        parameters_map = {
-            "M": 2,
-            "N": self.N,
-            "K": self.K,
-            "alpha": self.alpha,
-            "bias": self.bias,
-            "beta": self.beta
-        }
+        self.conn = sqlite3.connect('../profiling/GEMM_N_Parallel.db')
+        self.cursor = self.conn.cursor()
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
 
+        # print("Get into profile", self.name)
+        parameters_pairs = [
+            (6144, 4096, 1.0, False, 0.0), # KQV llama3-8B
+            # (10240 /8, 8192, 1.0, False, 0.0), # KQV llama3-70B TP8
+            # (4096, 4096, 1.0, True, 1.0), # O llama3-8B
+            # (8192 / 8, 8192, 1.0, True, 1.0), # O llama3-70B TP8
+            # (28672, 4096, 1.0, False, 0.0), # UG llama3-8B
+            # (57344 / 8, 8192, 1.0, False, 0.0), # UG llama3-70B TP8
+            # (4096, 14336, 1.0, True, 1.0), # D llama3-8B
+            # (8192 / 8, 28672, 1.0, True, 1.0), # D llama3-70B TP8
+            # (128256, 4096, 1.0, False, 0.0), # GetLogits llama3-8B
+            # (128256 / 8, 8192, 1.0, False, 0.0), # GetLogits llama3-70B TP8
+        ] # (N, K , alpha, bias, beta)
+        self.tp_size = 1
+        self.batch_size = 2
+        self.N = 4096
+        self.K = 4096
+        self.alpha = 1.0
+        self.bias = True
+        self.beta = 1.0
+        
         # check the similarity of the outputs
-        A = torch.randn((2, self.K), dtype=torch.float16, device='cuda')
+        A = torch.randn((self.batch_size, self.K), dtype=torch.float16, device='cuda')
         B = torch.randn((self.K, self.N), dtype=torch.float16, device='cuda')
-        C = torch.randn((2, self.N), dtype=torch.float16, device='cuda')
+        C = torch.zeros((self.batch_size, self.N), dtype=torch.float16, device='cuda')
         output_list = []
         for _, impl in self.impl_map.items():
             # print(impl.impl_tag_profile)
-            impl_instance = impl()
-            out = torch.zeros((2, self.N), dtype=torch.float16, device='cuda')
-            
-            impl_instance.config(impl.impl_tag_profile, parameters_map)
-            impl_instance.run(A, B, C, out)
+            impl_instance = impl(self, None, self.device)
+            out = torch.zeros((self.batch_size, self.N), dtype=torch.float16, device='cuda')
+            test_A = A.clone()
+            test_B = B.clone()
+            test_C = C.clone()
+            impl_instance.config(impl.impl_tag_profile, None)
+            impl_instance.run(test_A, test_B, test_C, out)
             output_list.append(out)
             # print("finish the implentation", impl_instance.category_tag)
-        
+            self.cursor.execute(f'''
+                DROP TABLE IF EXISTS "{impl.category_tag}";
+            ''')
+            self.cursor.execute(f'''
+            CREATE TABLE IF NOT EXISTS "{impl.category_tag}" (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT, 
+                M   INTEGER,
+                N INTEGER,
+                K INTEGER,
+                alpha REAL,
+                bias BOOLEAN,
+                beta REAL,
+                average_time_ms REAL,
+                GFLOPS REAL,
+                impl_tag TEXT
+            );
+            ''')
+
+        self.conn.commit()
         self.checkConsistencyBetweenImpl(output_list)
         # print("Finish checking consistency")
 
-        rounds = 100
-        batch_sizes = [2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 640, 768, 896, 1024]
-        for batch_size in batch_sizes:
-            parameters_map["M"] = batch_size
-            D = torch.zeros((batch_size, self.N), dtype=torch.float16, device='cuda')
-            for _, impl in self.impl_map.items():
-                impl_instance = impl()
-                impl_instance.config(impl.impl_tag_profile, parameters_map)
-                category_tag = impl_instance.category_tag
-                total_latency = 0
-                for round in range(rounds):
-                    A = torch.randn((batch_size, self.K), dtype=torch.float16, device='cuda')
-                    B = torch.randn((self.K, self.N), dtype=torch.float16, device='cuda')
-                    C = torch.randn((batch_size, self.N), dtype=torch.float16, device='cuda')
-                    # record the time
-                    start_time = time.time()
-                    impl_instance.run(A, B, C, D)
-                    if round > 0:
-                        total_latency += time.time() - start_time
-                average_time = total_latency / rounds
-                print("name: {}, batch_size: {}, average_time: {}".format(self.name + f"_{category_tag}", batch_size, average_time))
-                self.cursor.execute('''
-                    INSERT INTO performance (keyword, batch_size, average_time)
-                    VALUES (?, ?, ?)
-                    ''', (self.name + f"_{category_tag}", batch_size, average_time))
-        self.conn.commit()
+        for N, K, alpha, bias, beta in parameters_pairs:
+            self.N = N
+            self.K = K
+            self.alpha = alpha
+            self.bias = bias
+            self.beta = beta
 
-    def processWeight(self, global_weight_map, cached_weight_map, cached = False):
-        self.weights["B"].weight_map = {}
-        weight_wrapper = self.weights["B"]
+            rounds = 100
+            batch_sizes = [2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 640, 768, 896, 1024]
+            for batch_size in batch_sizes:
+                self.batch_size = batch_size
+                D = torch.zeros((self.batch_size, self.N), dtype=torch.float16, device='cuda')
+                for _, impl in self.impl_map.items():
+                    impl_instance = impl(self, None, self.device)
+                    impl_instance.config(impl.impl_tag_profile, None)
+                    category_tag = impl_instance.category_tag
+                    latency_list = torch.empty(rounds-1, dtype=torch.float32, device='cuda')
+                    for round in range(rounds):
+                        A = torch.randn((self.batch_size, self.K), dtype=torch.float16, device='cuda')
+                        B = torch.randn((self.K, self.N), dtype=torch.float16, device='cuda')
+                        C = torch.randn((self.batch_size, self.N), dtype=torch.float16, device='cuda')
+                        # record the time
+                        start.record()
+                        impl_instance.run(A, B, C, D)
+                        end.record()
+                        torch.cuda.synchronize()
+                        if round > 0:
+                            elapsed_ms = start.elapsed_time(end)
+                            latency_list[round - 1] = elapsed_ms
+                    # Calculate the average time
+                    print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {batch_size}, Average Time: {latency_list.mean().item()} ms, Variance: {latency_list.var().item()}, latency[0]: {latency_list[0].item()} ms")
+                    # print("latency list:", latency_list.tolist())
+                    average_time_ms = latency_list.mean().item()
+                    GFLOPS = (2 * batch_size * self.N * self.K) / average_time_ms / 1e6 # in GigaFLOPS
+                    self.cursor.execute(f'''
+                        INSERT INTO {category_tag} (M, N, K, alpha, bias, beta, average_time_ms, GFLOPS, impl_tag)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ''', (batch_size, self.N, self.K, self.alpha, self.bias, self.beta, average_time_ms, GFLOPS, impl_instance.impl_tag_profile))
+            self.conn.commit()
+
+    def processWeight(self, global_weight_map, cached_weight_map, cached, device):
         if not isinstance(self.weight_name, list):
             self.weight_name = [self.weight_name]
+        if not cached:
+            offset = self.tp_idx % self.tp_size
+            for l in self.layer_list:
+                weights_list = []
+                for name in self.weight_name:
+                    stride = global_weight_map[name.format(layer=l)].shape[0] // self.tp_size
+                    scope = (slice(offset * stride, (offset + 1) * stride), slice(None))
+                    weights_list.append(global_weight_map[name.format(layer=l)][scope].t())
+                cached_weight_map[f"{self.name}_layer_{l}"] = torch.cat(weights_list, dim=1).contiguous()
         if cached:
-            for device_id in self.device_list:
-                weight_wrapper.weight_map[device_id] = {}
-                for l in self.layer_list:
-                    weight_wrapper.weight_map[device_id][l] = cached_weight_map[f"{self.name}_device_{device_id}_layer_{l}"].to(f'cuda:{device_id}')
-                    assert weight_wrapper.weight_map[device_id][l].shape == weight_wrapper.shape, f"name = {self.weight_name}, expected shape = {weight_wrapper.shape}, layer = {l}, real shape = {weight_wrapper.weight_map[device_id][l].shape}"
-    
-        elif not cached:
-            for device_id in self.device_list:
-                weight_wrapper.weight_map[device_id] = {}
-                offset = device_id % self.tp_size
-                for l in self.layer_list:
-                    weights_list = []
-                    for name in self.weight_name:
-                        stride = global_weight_map[name.format(layer=l)].shape[0] // self.tp_size
-                        scope = (slice(offset * stride, (offset + 1) * stride), slice(None))
-                        weights_list.append(global_weight_map[name.format(layer=l)][scope].to(f'cuda:{device_id}').t())
-                    weight_wrapper.weight_map[device_id][l] = torch.cat(weights_list, dim=1).contiguous()
-
-                    cached_weight_map[f"{self.name}_device_{device_id}_layer_{l}"] = weight_wrapper.weight_map[device_id][l].to("cpu")
-                    assert weight_wrapper.weight_map[device_id][l].shape == weight_wrapper.shape, f"name = {self.weight_name}, expected shape = {weight_wrapper.shape}, layer = {l}, real shape = {weight_wrapper.weight_map[device_id][l].shape}"
+            self.weights["B"].weight_map = {}
+            weight_wrapper = self.weights["B"]
+            for l in self.layer_list:
+                weight_wrapper.weight_map[l] = cached_weight_map[f"{self.name}_layer_{l}"].to(device, non_blocking=True)
+                assert weight_wrapper.weight_map[l].shape == weight_wrapper.shape, f"name = {self.weight_name}, expected shape = {weight_wrapper.shape}, layer = {l}, real shape = {weight_wrapper.weight_map[l].shape}"
+            
         # torch.cuda.empty_cache()
         # device = torch.cuda.current_device()
         # reserved_memory = torch.cuda.memory_reserved(device)
         # print(f"Reserved memory: {reserved_memory / 1024 / 1024} MB")
-    
-class GEMM_N_Parallel_Device(Operation_Device):
-    def __init__(self, parent, device):
-        super().__init__(parent, device)
-        self.op_layer = GEMM_N_Parallel_Layer
 
-    def setShapeForIOWrappers(self):
-        self.inputs["A"].init_shape((0, self.parent.K))
-        if self.parent.bias:
-            self.inputs["C"].init_shape((0, self.parent.N))
-        self.outputs["D"].init_shape((0, self.parent.N))
-        
 
 class GEMM_N_Parallel_Layer(Operation_Layer):
-    def __init__(self, layer, op_device):
-        super().__init__(layer=layer, op_device=op_device)
+    def __init__(self, layer, base_op):
+        super().__init__(layer, base_op)
 
     def run(self):
         with prof_marker("GEMM_run"):
-            self.impl.run(self.weights["B"].weight_map[self.device_id][self.layer])
+            stride = self.parent.N // self.parent.tp_size
+            offset = self.parent.tp_idx * stride
+
+            C = self.inputs["C"].tensor[:, offset: offset + stride] if self.parent.bias else torch.empty((self.parent.batch_size, stride), dtype=torch.float16, device=self.device)
+            self.impl.run(self.inputs["A"].tensor, self.weights["B"].weight_map[self.layer], C, self.outputs["D"].tensor)

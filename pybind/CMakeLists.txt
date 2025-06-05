@@ -12,7 +12,6 @@ if(CMAKE_CUDA_ARCHITECTURES STREQUAL "90")
 endif()
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-# add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=0)
 
 #set(CMAKE_C_COMPILER "/usr/bin/gcc-11")
 #set(CMAKE_CXX_COMPILER "/usr/bin/g++-11")
@@ -33,13 +32,7 @@ execute_process(
   OUTPUT_VARIABLE TorchCMakePrefixPath
   OUTPUT_STRIP_TRAILING_WHITESPACE
 )
-
-# Get pybind11 CMake directory
-execute_process(
-  COMMAND python -m pybind11 --cmakedir
-  OUTPUT_VARIABLE PYBIND11_CMAKE_DIR
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-)
+set(Torch_DIR "${TorchCMakePrefixPath}/Torch")
 
 # Set paths
 list(APPEND CMAKE_PREFIX_PATH "${TorchCMakePrefixPath}")
@@ -131,3 +124,5 @@ add_pybind_module(bind_sample SOURCES src/bind_sample.cu)
 add_pybind_module(bind_gemm SOURCES src/bind_gemm.cu)
 target_link_libraries(bind_gemm PRIVATE gemm_lib)
 add_pybind_module(bind_ropeappend SOURCES src/bind_ropeappend.cu)
+add_pybind_module(bind_init_net SOURCES src/bind_init_net.cu)
+target_link_libraries(bind_init_net PRIVATE ${MSCCLPP_LIBRARY})
