@@ -5,9 +5,10 @@ if __name__ == '__main__':
     T0 = time.perf_counter()
     import torch.multiprocessing as mp
     import sys, os
+    import argparse
+
     sys.path.append("../")
     sys.path.append('../pybind/build')
-    os.environ["HF_HOME"] = "/code/hf"
     os.environ["CUDA_VISIBLE_DEVICES"] = "5, 6"
     # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
@@ -23,7 +24,12 @@ if __name__ == '__main__':
 
     print("import modules, ", time.perf_counter() - T0)
     mp.set_start_method('spawn')
-    
+
+    arg_parser = argparse.ArgumentParser()
+    arg_parser.add_argument("-l", "--load_hf_weight", type=bool, default=False, help="Load weights from huggingface")
+
+    args = arg_parser.parse_args()
+
     # print("initializing the modules and start mode setting, ", time.perf_counter() - T0)
     # tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-70B-Instruct")
@@ -46,15 +52,16 @@ if __name__ == '__main__':
 
     assert world_size == TP_size * PP_size * DP_size, f"world size {world_size} is not equal to TP size {TP_size} * PP size {PP_size} * DP size {DP_size}"
 
-    # pipeline_dict = dict(
-    #     [
-    #         (f"cuda:{i}", Pipeline(
-    #             TP_idx=i,
-    #             TP_size=TP_size,
-    #         )) for i in range(world_size)
-    #     ]
-    # )
-    # prepare_weight(pipeline_dict, weight_map_wzr)
+    if args.load_hf_weight:
+        pipeline_dict = dict(
+            [
+                (f"cuda:{i}", Pipeline(
+                    TP_idx=i,
+                    TP_size=TP_size,
+                )) for i in range(world_size)
+            ]
+        )
+        prepare_weight(pipeline_dict, weight_map_wzr)
 
     # print("finish update pipeline")
 

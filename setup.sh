@@ -1,15 +1,8 @@
-apt update
-apt install pybind11-dev
-apt install liburing-dev
-apt install libopenmpi-dev
-apt-get install nvidia-cuda-toolkit
-sysctl -w kernel.io_uring_disabled=0
-sysctl -w vm.nr_hugepages=65536
-
 git submodule init
 git submodule update
 
 conda install -c gurobi gurobi
+conda install -c conda-forge cmake=3.29
 
 pip install torch==2.7.0 torchvision==0.22.0+cu128 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cu128
 pip install nvtx
@@ -17,14 +10,6 @@ pip install loguru
 pip install transformers
 
 cd ..
-# install cmake 3.29.0
-CMAKE_INSTALLER="cmake-3.29.0-rc2-linux-x86_64.sh"
-if [[ ! -f "$CMAKE_INSTALLER" ]]; then
-  wget https://github.com/Kitware/CMake/releases/download/v3.29.0-rc2/$CMAKE_INSTALLER
-  chmod +x ./$CMAKE_INSTALLER
-fi
-./$CMAKE_INSTALLER --prefix=/usr/local --exclude-subdir
-
 # install nsight
 NSIGHT="NsightSystems-linux-cli-public-2025.1.1.131-3554042.deb"
 if [[ ! -f "$NSIGHT" ]]; then
@@ -66,14 +51,12 @@ cd ../..
 # login to huggingface
 cd ..
 mkdir -p hf
-export HF_HOME=$(pwd)/hf
+echo "export HF_HOME=$(pwd)/hf" >> ~/.bashrc
+source ~/.bashrc
+
 huggingface-cli login
 
 cd Nanoflow-python
 # load llama3-8B weights
 cd ./core
-python weightSaver.py
-
-# run tests
-cd ./entry
-python run_llama3.py
+python weightSaver.py --config_path=../config_all/llama3-8B/1024.json

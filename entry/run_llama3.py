@@ -5,7 +5,6 @@ sys.path.append("../")
 sys.path.append("../utils")
 sys.path.append('../pybind/build')
 
-os.environ["HF_HOME"] = "/code/hf"
 from utils.prof_marker import prof_marker
 from utils.frontend import requestManager
 from utils.util_functions import prepare_weight
@@ -18,10 +17,11 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "6"
 # from models.llama3_KVCacheTorch import Pipeline
 from models.llama3_FlashinferKVCache import Pipeline
 
-# arg_parser = argparse.ArgumentParser()
+arg_parser = argparse.ArgumentParser()
+arg_parser.add_argument("-l", "--load_hf_weight", type=bool, default=False, help="Load weights from huggingface")
 # arg_parser.add_argument("-t", "--trace_path", type=str, required=True, help="Request trace to read from")
 
-# args = arg_parser.parse_args()
+args = arg_parser.parse_args()
 
 tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
 # input_strings = ["Hi, who are you?"]
@@ -59,10 +59,11 @@ prefill_input_ids = [tokenizer.encode(prefill_context)[:640] for _ in range(1000
 weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
 # weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
 # weight_map_amd_kan = "/work1/kasikci/kanzhu/models/llama3-8b"
-pipeline_dict = {
-    "cuda:0" : Pipeline()
-}
-# prepare_weight(pipeline_dict, weight_map_wzr)
+if args.load_hf_weight:
+    pipeline_dict = {
+        "cuda:0" : Pipeline()
+    }
+    prepare_weight(pipeline_dict, weight_map_wzr)
 
 pipeline = Pipeline()
 pipeline.init(weight_map_wzr, cached=True)
