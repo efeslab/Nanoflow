@@ -1,5 +1,6 @@
 import torch
 import time
+import os
 import sqlite3
 
 import platform_config
@@ -7,6 +8,7 @@ from operations.operation_base import Operations, Operation_Layer
 from core.IOWrapper import IOWrapper
 from core.weightWrapper import WeightWrapper
 from core.processWeight import process_weight_no_transpose
+from utils.prof_marker import prof_marker
 
 from operations.impl_base import OperationImpl
 
@@ -53,73 +55,32 @@ class GenEmbedding(Operations):
         self.weights["embedding"].shape = (self.vocab_size, self.N)
         self.inputs["token"].init_shape((0,))
         self.outputs["output"].init_shape((0, self.N))
-    
-    
-    def profile(self):
-        self.conn = sqlite3.connect('../profiling/Embedding.db')
-        self.cursor = self.conn.cursor()
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
 
-        vocab_size = 128256
-        hidden_dim = 4096
-
-        # check the similarity of the outputs
-        self.batch_size = 2
-        tokens = torch.randint(vocab_size, (self.batch_size,), dtype=torch.int32, device='cuda')
-        embedding = torch.randn(vocab_size, hidden_dim, dtype=torch.float16, device='cuda')
-        output_list = []
+    def init_profile_database(self):
         for _, impl in self.impl_map.items():
-            out = torch.zeros((self.batch_size, hidden_dim), dtype=torch.float16, device='cuda')
-            impl(self, None, self.device).run(tokens, embedding, out)
-            output_list.append(out)
-            # Create a table to store performance data if it doesn't exist
-            self.cursor.execute(f'''
-                DROP TABLE IF EXISTS "{impl.category_tag}";
-            ''')
             self.cursor.execute(f'''
             CREATE TABLE IF NOT EXISTS "{impl.category_tag}" (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT, 
-                batch_size   INTEGER,
+                batch_size   INTEGER UNIQUE,
                 vocab_size INTEGER,
                 hidden_dim INTEGER,
                 average_time_ms REAL
             );
             ''')
 
-        self.conn.commit()
-        self.checkConsistencyBetweenImpl(output_list)
+    def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
+        print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {self.batch_size}, Average Time: {average_elapsed_ms} ms")
+        self.cursor.execute(f'''
+            INSERT OR IGNORE INTO {category_tag} (batch_size, vocab_size, hidden_dim, average_time_ms)
+            VALUES (?, ?, ?, ?)
+            ''', (self.batch_size, self.vocab_size, self.N, average_elapsed_ms))
 
-        print("Consistency check passed for GenEmbedding")
-        rounds = 100
-        batch_sizes = [2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 640, 768, 896, 1024]
-
-        for batch_size in batch_sizes:
-            self.batch_size = batch_size
-            output = torch.zeros((self.batch_size, hidden_dim), dtype=torch.float16, device='cuda')
-            for _, impl in self.impl_map.items():
-                impl_instance = impl(self, None, self.device)
-                category_tag = impl.category_tag
-                latency_list = torch.empty(rounds-1, dtype=torch.float32, device='cuda')
-                for round in range(rounds):
-                    tokens = torch.randint(vocab_size, (self.batch_size,), dtype=torch.int32, device='cuda')
-                    start.record()
-                    impl_instance.run(tokens, embedding, output)
-                    end.record()
-                    torch.cuda.synchronize()
-                    if round > 0:  # Skip the first round for warm-up
-                        elapsed_ms = start.elapsed_time(end)
-                        latency_list[round-1] = elapsed_ms
-                # Calculate the average time
-                print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {batch_size}, Average Time: {latency_list.mean().item()} ms, Variance: {latency_list.var().item()}, latency[0]: {latency_list[0].item()} ms")
-                # print("latency list:", latency_list.tolist())
-                average_time_ms = latency_list.mean().item()
-                self.cursor.execute(f'''
-                    INSERT INTO {category_tag} (batch_size, vocab_size, hidden_dim, average_time_ms)
-                    VALUES (?, ?, ?, ?)
-                    ''', (batch_size, vocab_size, hidden_dim, average_time_ms))
-        self.conn.commit()
+    def run(self, layer):
+        self.impl.run(self.inputs["token"].tensor, self.weights["embedding"].weight_map[layer], self.outputs["output"].tensor)
     
+    def profile_run(self):
+        self.run(self.layer_list[0])
+
     def processWeight(self, global_weight_map, cached_weight_map, cached, device):
         return process_weight_no_transpose(global_weight_map, self.weight_name, self.weights["embedding"], self.layer_list, cached_weight_map, cached, device)
 
@@ -128,4 +89,4 @@ class GenEmbedding_Layer(Operation_Layer):
         super().__init__(layer, base_op)
     
     def run(self):
-        self.impl.run(self.inputs["token"].tensor, self.weights["embedding"].weight_map[self.layer], self.outputs["output"].tensor)
+        self.parent.run(self.layer)

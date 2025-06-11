@@ -1,7 +1,7 @@
 from typing import List
 
 class OperationImpl:
-    category_tag = None
+    category_tag: str
     def __init__(self, op_base, stream, device):
         self.impl_tag = None
         self.op_base = op_base
@@ -14,7 +14,7 @@ class OperationImpl:
         self.weights = op_base.weights
     
     @staticmethod
-    def list_tags(self) -> List[str]:
+    def list_tags() -> List[str]:
         return [""]
     
     def config(self, impl_tag, parameter_map = {}):

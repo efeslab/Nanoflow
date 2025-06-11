@@ -37,7 +37,7 @@ class Pipeline():
         self.page_size = 64
         self.device = "cuda:0"
 
-    def set_work_dev(self, device):
+    def set_device(self, device):
         self.device = device
 
     def init(self, weight_path, cached=False):
@@ -318,7 +318,7 @@ class Pipeline():
                 # print("decode_batchsize: ", decode_batchsize)
                 self.clear_batch_size()
                 self.config_batch_size(decode_batchsize)
-                self.nanobatch_split(self.batch_size, decode_batchsize)
+                # self.nanobatch_split(self.batch_size, decode_batchsize)
                 self.update_allocate_buffers()
                 # print("finish update_allocate_buffers")
                 self.config_algorithm()
@@ -362,10 +362,6 @@ class Pipeline():
         for operation in self.operation_list:
             operation.profile()
 
-    def search_profile_data(self):
-        operation_base = Operations()
-        operation_base.search_profile_data()
-
     def run(self, device="cuda:0", file_name="llama3-8B-torch", filefolder_name="llama3-torch-cycle2"):
 
         temp_out = torch.zeros(self.batch_size, dtype=torch.int32, device='cuda')
@@ -373,7 +369,7 @@ class Pipeline():
         os.makedirs(f"./{filefolder_name}", exist_ok=True)
 
         self.executor.execute({}, temp_out)
-        # self.executor.print_debug(file_name, filefolder_name=filefolder_name, output=temp_out)
+        # self.executor.print_debug(temp_out, file_name, filefolder_name=filefolder_name)
 
         with prof_marker("after_execute_before_return"):
             temp_out = temp_out.cpu()
@@ -387,16 +383,14 @@ class Pipeline():
                 output.append((req_idx, new_token))
         return output
 
-if __name__ == "__main__":
-    # remove the file performance.db
-    try:
-        os.remove("performance.db")
-    except:
-        pass
-    pipeline = Pipeline()
-    pipeline.init_external_data()
-    pipeline.init_operations()
-    pipeline.init_set_shape()
-    pipeline.config_algorithm()
-    pipeline.profile()
-    pipeline.activation.search_profile_data()
+    def init_profile_data(self):
+        profile_dir = f"../profile_data/{self.pipeline_name}"
+        for operation in self.operation_list:
+            operation.init_profile(profile_dir)
+
+    def profile_run(self):
+        for operation in self.operation_list:
+            with prof_marker(f"{operation.name}"):
+                print("Operation name:", operation.name)
+                operation.profile()
+                operation.print_profile()

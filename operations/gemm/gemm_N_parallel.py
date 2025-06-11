@@ -39,7 +39,7 @@ class GEMM_N_Parallel(Operations):
         self.init_impl_map()
         self.op_layer = GEMM_N_Parallel_Layer
 
-    def setParameter(self, alpha = 1, beta = 0):
+    def setParameter(self, alpha: float = 1.0, beta: float = 0.0):
         self.alpha = alpha
         self.beta = beta
         if self.bias == False and self.beta != 0:
@@ -81,56 +81,12 @@ class GEMM_N_Parallel(Operations):
 
         return new_op
 
-    def profile(self):
-        self.conn = sqlite3.connect('../profiling/GEMM_N_Parallel.db')
-        self.cursor = self.conn.cursor()
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-
-        # print("Get into profile", self.name)
-        parameters_pairs = [
-            (6144, 4096, 1.0, False, 0.0), # KQV llama3-8B
-            # (10240 /8, 8192, 1.0, False, 0.0), # KQV llama3-70B TP8
-            # (4096, 4096, 1.0, True, 1.0), # O llama3-8B
-            # (8192 / 8, 8192, 1.0, True, 1.0), # O llama3-70B TP8
-            # (28672, 4096, 1.0, False, 0.0), # UG llama3-8B
-            # (57344 / 8, 8192, 1.0, False, 0.0), # UG llama3-70B TP8
-            # (4096, 14336, 1.0, True, 1.0), # D llama3-8B
-            # (8192 / 8, 28672, 1.0, True, 1.0), # D llama3-70B TP8
-            # (128256, 4096, 1.0, False, 0.0), # GetLogits llama3-8B
-            # (128256 / 8, 8192, 1.0, False, 0.0), # GetLogits llama3-70B TP8
-        ] # (N, K , alpha, bias, beta)
-        self.tp_size = 1
-        self.batch_size = 2
-        self.N = 4096
-        self.K = 4096
-        self.alpha = 1.0
-        self.bias = True
-        self.beta = 1.0
-        
-        # check the similarity of the outputs
-        A = torch.randn((self.batch_size, self.K), dtype=torch.float16, device='cuda')
-        B = torch.randn((self.K, self.N), dtype=torch.float16, device='cuda')
-        C = torch.zeros((self.batch_size, self.N), dtype=torch.float16, device='cuda')
-        output_list = []
+    def init_profile_database(self):
         for _, impl in self.impl_map.items():
-            # print(impl.impl_tag_profile)
-            impl_instance = impl(self, None, self.device)
-            out = torch.zeros((self.batch_size, self.N), dtype=torch.float16, device='cuda')
-            test_A = A.clone()
-            test_B = B.clone()
-            test_C = C.clone()
-            impl_instance.config(impl.impl_tag_profile, None)
-            impl_instance.run(test_A, test_B, test_C, out)
-            output_list.append(out)
-            # print("finish the implentation", impl_instance.category_tag)
-            self.cursor.execute(f'''
-                DROP TABLE IF EXISTS "{impl.category_tag}";
-            ''')
             self.cursor.execute(f'''
             CREATE TABLE IF NOT EXISTS "{impl.category_tag}" (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT, 
-                M   INTEGER,
+                M INTEGER UNIQUE,
                 N INTEGER,
                 K INTEGER,
                 alpha REAL,
@@ -142,49 +98,38 @@ class GEMM_N_Parallel(Operations):
             );
             ''')
 
-        self.conn.commit()
-        self.checkConsistencyBetweenImpl(output_list)
-        # print("Finish checking consistency")
+    def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
+        # Calculate the average time
+        print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {self.batch_size}, Average Time: {average_elapsed_ms} ms")
+        GFLOPS = (2 * self.batch_size * self.N * self.K) / average_elapsed_ms / 1e6 # in GigaFLOPS
+        self.cursor.execute(f'''
+            INSERT OR IGNORE INTO {category_tag} (M, N, K, alpha, bias, beta, average_time_ms, GFLOPS, impl_tag)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (self.batch_size, self.N, self.K, self.alpha, self.bias, self.beta, average_elapsed_ms, GFLOPS, impl_tag))
 
-        for N, K, alpha, bias, beta in parameters_pairs:
-            self.N = N
-            self.K = K
-            self.alpha = alpha
-            self.bias = bias
-            self.beta = beta
+    def init_impl_configs(self):
+        self.impl_configs_map = {}
+        for _, impl in self.impl_map.items():
+            category_tag = impl.category_tag
+            if category_tag == "cuda":
+                self.impl_configs_map[category_tag] = [
+                    ("SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", None)
+                ]
+            else:
+                self.impl_configs_map[category_tag] = [
+                    (None, None)
+                ]
 
-            rounds = 100
-            batch_sizes = [2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 640, 768, 896, 1024]
-            for batch_size in batch_sizes:
-                self.batch_size = batch_size
-                D = torch.zeros((self.batch_size, self.N), dtype=torch.float16, device='cuda')
-                for _, impl in self.impl_map.items():
-                    impl_instance = impl(self, None, self.device)
-                    impl_instance.config(impl.impl_tag_profile, None)
-                    category_tag = impl_instance.category_tag
-                    latency_list = torch.empty(rounds-1, dtype=torch.float32, device='cuda')
-                    for round in range(rounds):
-                        A = torch.randn((self.batch_size, self.K), dtype=torch.float16, device='cuda')
-                        B = torch.randn((self.K, self.N), dtype=torch.float16, device='cuda')
-                        C = torch.randn((self.batch_size, self.N), dtype=torch.float16, device='cuda')
-                        # record the time
-                        start.record()
-                        impl_instance.run(A, B, C, D)
-                        end.record()
-                        torch.cuda.synchronize()
-                        if round > 0:
-                            elapsed_ms = start.elapsed_time(end)
-                            latency_list[round - 1] = elapsed_ms
-                    # Calculate the average time
-                    print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {batch_size}, Average Time: {latency_list.mean().item()} ms, Variance: {latency_list.var().item()}, latency[0]: {latency_list[0].item()} ms")
-                    # print("latency list:", latency_list.tolist())
-                    average_time_ms = latency_list.mean().item()
-                    GFLOPS = (2 * batch_size * self.N * self.K) / average_time_ms / 1e6 # in GigaFLOPS
-                    self.cursor.execute(f'''
-                        INSERT INTO {category_tag} (M, N, K, alpha, bias, beta, average_time_ms, GFLOPS, impl_tag)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ''', (batch_size, self.N, self.K, self.alpha, self.bias, self.beta, average_time_ms, GFLOPS, impl_instance.impl_tag_profile))
-            self.conn.commit()
+    def run(self, layer):
+        with prof_marker("GEMM_run"):
+            stride = self.N // self.tp_size
+            offset = self.tp_idx * stride
+
+            C = self.inputs["C"].tensor[:, offset: offset + stride] if self.bias else torch.empty((self.batch_size, stride), dtype=torch.float16, device=self.device)
+            self.impl.run(self.inputs["A"].tensor, self.weights["B"].weight_map[layer], C, self.outputs["D"].tensor)
+
+    def profile_run(self):
+        self.run(self.layer_list[0])
 
     def processWeight(self, global_weight_map, cached_weight_map, cached, device):
         if not isinstance(self.weight_name, list):

@@ -34,7 +34,7 @@ class Pipeline():
         self.batch_size = None
         self.num_layers = 32
         self.layer_list = [i for i in range(self.num_layers)]
-        self.page_size = 80
+        self.page_size = 120
         self.device = "cuda:0"
 
     def set_device(self, device):
@@ -241,28 +241,28 @@ class Pipeline():
     def config_algorithm(self):
         gemm_tag = "cuda:SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto"
         self.gen_embedding.config_tag("cuda")
-        self.layerNormAttn.config_tag(["cuda", "cuda"])
-        # self.layerNormAttn.config_tag("cuda")
-        self.activation.config_tag(["cuda", "cuda"])
-        # self.activation.config_tag("cuda")
-        # self.kqv.config_tag(gemm_tag)
-        self.kqv.config_tag([gemm_tag, gemm_tag])
+        # self.layerNormAttn.config_tag(["cuda", "cuda"])
+        self.layerNormAttn.config_tag("cuda")
+        # self.activation.config_tag(["cuda", "cuda"])
+        self.activation.config_tag("cuda")
+        self.kqv.config_tag(gemm_tag)
+        # self.kqv.config_tag([gemm_tag, gemm_tag])
         # self.kqv.config_tag(["cuda:128_128_32_64_64_32_3_5_RowMajor_RowMajor_RowMajor", "cuda:128_128_32_64_64_32_3_5_RowMajor_RowMajor_RowMajor"])
         # self.kqv.config_tag("triton")
-        self.ropeAppend.config_tag(["cuda", "cuda"])
-        # self.ropeAppend.config_tag("cuda")
+        # self.ropeAppend.config_tag(["cuda", "cuda"])
+        self.ropeAppend.config_tag("cuda")
         self.decAttn.config_tag("batched_cuda")
         self.pfAttn.config_tag("batched_cuda")
-        # self.layerNormFFN.config_tag("cuda")
-        self.layerNormFFN.config_tag(["cuda", "cuda"])
-        # self.o.config_tag(gemm_tag)
-        self.o.config_tag([gemm_tag, gemm_tag])
+        self.layerNormFFN.config_tag("cuda")
+        # self.layerNormFFN.config_tag(["cuda", "cuda"])
+        self.o.config_tag(gemm_tag)
+        # self.o.config_tag([gemm_tag, gemm_tag])
         # self.o.config_tag(["cuda:128_128_32_64_64_32_1_5_RowMajor_RowMajor_RowMajor", "cuda:128_128_32_64_64_32_2_5_RowMajor_RowMajor_RowMajor"])
-        # self.ug.config_tag(gemm_tag)
-        self.ug.config_tag([gemm_tag, gemm_tag])
+        self.ug.config_tag(gemm_tag)
+        # self.ug.config_tag([gemm_tag, gemm_tag])
         # self.ug.config_tag(["cuda:128_128_32_64_64_32_1_5_RowMajor_RowMajor_RowMajor", "cuda:128_128_32_64_64_32_2_5_RowMajor_RowMajor_RowMajor"])
-        # self.d.config_tag(gemm_tag)
-        self.d.config_tag([gemm_tag, gemm_tag])
+        self.d.config_tag(gemm_tag)
+        # self.d.config_tag([gemm_tag, gemm_tag])
         # self.d.config_tag(["cuda:128_128_32_64_64_32_1_5_RowMajor_RowMajor_RowMajor", "cuda:128_128_32_64_64_32_2_5_RowMajor_RowMajor_RowMajor"])
         self.modelLayerNorm.config_tag("cuda")
         self.sample.config_tag("cuda")
@@ -333,7 +333,7 @@ class Pipeline():
                 # print("decode_batchsize: ", decode_batchsize)
                 self.clear_batch_size()
                 self.config_batch_size(decode_batchsize)
-                self.nanobatch_split(self.batch_size, decode_batchsize)
+                # self.nanobatch_split(self.batch_size, decode_batchsize)
                 self.update_allocate_buffers()
                 # print("finish update_allocate_buffers")
                 self.config_algorithm()
@@ -377,10 +377,6 @@ class Pipeline():
         for operation in self.operation_list:
             operation.profile()
 
-    def search_profile_data(self):
-        operation_base = Operations()
-        operation_base.search_profile_data()
-
     def run(self, file_name="./test_data/llama3-8B-flashinfer", filefolder_name="./test_data/llama3-8B-flashinfer_folder"):
 
         temp_out = torch.zeros(self.batch_size, dtype=torch.int32, device='cuda')
@@ -388,7 +384,7 @@ class Pipeline():
         os.makedirs(f"./{filefolder_name}", exist_ok=True)
 
         self.executor.execute({}, temp_out)
-        # self.executor.print_debug(file_name, filefolder_name=filefolder_name, output=temp_out)
+        # self.executor.print_debug(temp_out, file_name, filefolder_name=filefolder_name)
 
         with prof_marker("after_execute_before_return"):
             temp_out = temp_out.cpu()
@@ -401,17 +397,19 @@ class Pipeline():
                 # print(f"req_idx: {req_idx}, new_token: {new_token}")
                 output.append((req_idx, new_token))
         return output
+    
+    def init_profile_data(self):
+        profile_dir = f"../profile_data/{self.pipeline_name}"
+        for operation in self.operation_list:
+                operation.init_profile(profile_dir)
 
-if __name__ == "__main__":
-    # remove the file performance.db
-    try:
-        os.remove("performance.db")
-    except:
-        pass
-    pipeline = Pipeline()
-    pipeline.init_external_data()
-    pipeline.init_operations()
-    pipeline.init_set_shape()
-    pipeline.config_algorithm()
-    pipeline.profile()
-    pipeline.activation.search_profile_data()
+    def profile_run(self):
+        for operation in self.operation_list:
+            if operation.batch_size > 0:
+                with prof_marker(f"{operation.name}"):
+                    print("Operation name:", operation.name)
+                    operation.profile()
+    
+    def profile_print(self):
+        for operation in self.operation_list:
+            operation.print_profile()

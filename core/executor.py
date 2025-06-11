@@ -77,7 +77,7 @@ class Executor():
                 torch.cuda.synchronize()
                 output.copy_(op.inputs["tokens"].tensor)
 
-    def print_debug(self, filename="out.txt", filefolder_name = None, output=None):
+    def print_debug(self, output: torch.Tensor, filename="out.txt", filefolder_name = None):
         global tensor_list
         file = f"{filename}"
         with open(file, "w") as f:

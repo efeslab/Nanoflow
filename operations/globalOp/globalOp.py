@@ -19,16 +19,24 @@ class GlobalInput(Operations):
     def setShape(self):
         self.outputs["tokens"].init_shape((0,))
 
-    def profile(self):
+    def init_profile_database(self):
         pass
 
+    def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
+        pass
+
+    def run(self):
+        pass
+
+    def profile_run(self):
+        pass
 
 class GlobalInput_Layer(Operation_Layer):
     def __init__(self, layer, base_op):
         super().__init__(layer, base_op)
     
     def run(self):
-        pass
+        self.parent.run()
     
 
 class GlobalOutput(Operations):
@@ -46,7 +54,16 @@ class GlobalOutput(Operations):
         self.inputs["tokens"].init_shape((0,))
         self.outputs["new_token"].init_shape((0,))
 
-    def profile(self):
+    def init_profile_database(self):
+        pass
+
+    def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
+        pass
+
+    def run(self):
+        pass
+
+    def profile_run(self):
         pass
         
 
@@ -55,5 +72,5 @@ class GlobalOutput_Layer(Operation_Layer):
         super().__init__(layer, base_op)
 
     def run(self):
-        pass
+        self.parent.run()
     

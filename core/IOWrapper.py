@@ -2,7 +2,7 @@ import torch
 
 # To Do: delete the attributes that related to tensor that should not belong to a base IOWrapper anymore
 class IOWrapper:
-    def __init__(self, owner, name, device, dtype=torch.float16):
+    def __init__(self, owner, name: str, device: str, dtype: torch.dtype = torch.float16):
         self.owner = owner  # owner is now an Operations object or similar
         self.name = name
         self.device = device
@@ -21,7 +21,7 @@ class IOWrapper:
         self.tensor_shape = None # shape [0] is non-contiguous dimension, shape [1] is contiguous dimension
         self.batch_size = None
         self.tensor_offset = 0
-        self.whole_buffer: torch.Tensor = None  
+        self.whole_buffer: torch.Tensor
         self.is_input_wrapper = None
         self.is_output_wrapper = None
     

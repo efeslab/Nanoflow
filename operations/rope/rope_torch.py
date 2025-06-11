@@ -38,7 +38,7 @@ class RopeAppendTorchImpl(OperationImpl):
         else:
             raise ValueError(f"Unknown impl_tag: {impl_tag}")
     
-    def run(self, layer, kqv, KVCache, output, offset=0):
+    def run(self, layer, kqv, KVCache, output):
         with torch.cuda.stream(self.stream):
             # Determine the number of elements for each slice.
             layout_strides = [
@@ -175,6 +175,33 @@ class RopeAppendTorch(Operations):
 
         return new_op
 
+    def init_profile_database(self):
+        for _, impl in self.impl_map.items():
+            self.cursor.execute(f'''
+            CREATE TABLE IF NOT EXISTS "{impl.category_tag}" (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT, 
+                batch_size   INTEGER,
+                head_dim INTEGER,
+                num_qo_heads INTEGER,
+                num_kv_heads INTEGER,
+                use_kv_cache Boolean,
+                average_time_ms REAL
+            );
+            ''')
+    
+    def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
+        print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {self.batch_size}, Average Time: {average_elapsed_ms} ms")
+        self.cursor.execute(f'''
+            INSERT INTO {category_tag} (batch_size, head_dim, num_qo_heads, num_kv_heads, use_kv_cache, average_time_ms)
+            VALUES (?, ?, ?, ?)
+            ''', (self.batch_size, self.head_dim, self.num_qo_heads, self.num_kv_heads, impl_tag == "withKVCache", average_elapsed_ms))
+
+    def run(self, layer):
+        self.impl.run(layer, self.inputs["kqv"].tensor, self.externals["KVCache"], self.outputs["q"].tensor)
+
+    def profile_run(self):
+        self.run(self.layer_list[0])
+
     def profile(self):
         input_kqv = torch.randn(2, (self.num_qo_heads + 2 * self.num_kv_heads) * self.head_dim, dtype=torch.float16, device='cuda')
         output_list = []
@@ -187,11 +214,6 @@ class RopeAppendTorch(Operations):
                 output_list.append(out)
 
                 impl().run(0, self.head_dim, self.num_qo_heads, self.num_kv_heads, torch.tensor([0, 2], dtype=torch.int32).cuda(), input_kqv, [KVCacheTorch()], self.rope_type, self.theta, self.original_max_position_embeddings, self.low_freq_factor, self.high_freq_factor, self.factor, out, False)
-
-            elif category_tag == "cuda":
-                kv_pool = DistKVPool(1, self.num_kv_heads, self.head_dim, 2048, 7, 1)
-                batchde_kv = BatchedDistKVCache(kv_pool, 0)
-                impl().run(0, self.head_dim, self.num_qo_heads, self.num_kv_heads, torch.tensor([0, 2], dtype=torch.int32).cuda(), input_kqv, [batchde_kv], self.rope_type, self.theta, self.original_max_position_embeddings, self.low_freq_factor, self.high_freq_factor, self.factor, out, False)
 
             # print("out:", out)
             output_list.append(out)
@@ -242,5 +264,5 @@ class RopeAppendTorch_Layer(Operation_Layer):
         super().__init__(layer, base_op)
 
     def run(self):
-        self.impl.run(self.layer, self.inputs["kqv"].tensor, self.externals["KVCache"], self.outputs["q"].tensor, offset=0)
+        self.parent.run(self.layer)
         

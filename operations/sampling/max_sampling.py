@@ -25,7 +25,7 @@ if platform_config.PLATFORM_CUDA:
 
 
 class Sampling(Operations):
-    def __init__(self, name, device):
+    def __init__(self, name: str, device: str):
         super().__init__(name, device)
         self.inputs = {
             "logits": IOWrapper(self, 'logits', device).is_input(),
@@ -42,45 +42,34 @@ class Sampling(Operations):
         if platform_config.PLATFORM_CUDA:
             self.add_impl(SamplingCudaImpl)
     
-    def setShape(self, vocab_size):
+    def setShape(self, vocab_size: int):
         self.vocab_size = vocab_size
         self.inputs["logits"].init_shape((0, self.vocab_size))
         self.outputs["tokens"].init_shape((0,))
-        
-    def profile(self):
-        maxvals = torch.zeros(2, dtype=torch.float16, device='cuda')
-        # check the similarity of the outputs
-        logits = torch.randn(2, self.vocab_size, dtype=torch.float16, device='cuda')
-        output_list = []
-        for _, impl in self.impl_map.items():
-            out = torch.zeros((2,), dtype=torch.int32, device='cuda')
-            impl().run(logits, maxvals, out)
-            output_list.append(out)
-        self.checkConsistencyBetweenImpl(output_list)
 
-        rounds = 100
-        batch_sizes = [2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 640, 768, 896, 1024]
-        for batch_size in batch_sizes:
-            out = torch.zeros((batch_size,), dtype=torch.int32, device='cuda')
-            for _, impl in self.impl_map.items():
-                impl_instance = impl()
-                category_tag = impl_instance.category_tag
-                total_latency = 0
-                for round in range(rounds):
-                    logits = torch.randn((batch_size, self.vocab_size), dtype=torch.float16, device='cuda')
-                    # record the time
-                    start_time = time.time()
-                    impl_instance.run(logits, maxvals, out)
-                    if round > 0:
-                        total_latency += time.time() - start_time
-                average_time = total_latency / rounds
-                print("name: {}, batch_size: {}, average_time: {}".format(self.name + f"_{category_tag}", batch_size, average_time))
-                self.cursor.execute('''
-                    INSERT INTO performance (keyword, batch_size, average_time)
-                    VALUES (?, ?, ?)
-                    ''', (self.name + f"_{category_tag}", batch_size, average_time))
-        self.conn.commit()
-        
+    def init_profile_database(self):
+        for _, impl in self.impl_map.items():
+            self.cursor.execute(f'''
+            CREATE TABLE IF NOT EXISTS "{impl.category_tag}" (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT, 
+                batch_size   INTEGER UNIQUE,
+                vocab_size INTEGER,
+                average_time_ms REAL
+            );
+            ''')
+
+    def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
+        print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {self.batch_size}, Average Time: {average_elapsed_ms} ms")
+        self.cursor.execute(f'''
+            INSERT OR IGNORE INTO {category_tag} (batch_size, vocab_size, average_time_ms)
+            VALUES (?, ?, ?)
+            ''', (self.batch_size, self.vocab_size, average_elapsed_ms))
+
+    def run(self):
+        self.impl.run(self.inputs["logits"].tensor, self.outputs["tokens"].tensor)
+
+    def profile_run(self):
+        return self.run()
 
 class Sampling_Layer(Operation_Layer):
     def __init__(self, layer, base_op):

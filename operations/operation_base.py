@@ -1,18 +1,21 @@
-from unicodedata import category
+import os
+from typing import Type
 from operations.impl_base import OperationImpl
 import torch
-from abc import ABC, abstractmethod
+import sqlite3
+from core.IOWrapper import IOWrapper
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none
+from utils.prof_marker import prof_marker
 
-class Operations:
-    def __init__(self, name, device):
+class Operations():
+    def __init__(self, name: str, device: str):
         # should be initialized in the device class
-        self.inputs = {}
-        self.outputs = {}
-        self.weights = {}
+        self.inputs: dict[str, IOWrapper] = {}
+        self.outputs: dict[str, IOWrapper] = {}
+        self.weights: dict[str, WeightWrapper] = {}
         self.externals = {}
-        self.impl:OperationImpl = None
+        self.impl: OperationImpl
 
         # remain in this class
         self.name = name
@@ -25,24 +28,20 @@ class Operations:
         self.nano_ops = []
         self.nano_op_batchsizes = []
         self.isVirtual = False
-        self.stream = None
+        self.stream: torch.cuda.Stream
         self.batch_size = None
 
         self.device = device
         self.extra_dep = []
 
-        self.impl_map = {}
-        self.op_layer = None
+        self.impl_map: dict[str, Type[OperationImpl]] = {}
+        self.op_layer: Type[Operation_Layer]
         
     def init_impl_map(self):
         self.impl_map = {} 
     
-    def add_impl(self, impl):
-        # if impl is not a list, convert it to a list
-        if not isinstance(impl, list):
-            impl = [impl]
-        for i in impl:
-            self.impl_map[i.category_tag] = i
+    def add_impl(self, impl: Type[OperationImpl]):
+        self.impl_map[impl.category_tag] = impl
         
     def print_available_impl(self):
         print(self.impl_map.keys())
@@ -65,7 +64,7 @@ class Operations:
         self.weight_name = name
         return self
 
-    def setShape(self):
+    def setShape(self, *args, **kwargs):
         return None
 
     def processWeight(self, global_weight_map, weight_path, cached, device):
@@ -79,11 +78,106 @@ class Operations:
         self.last_layer_only = True
         return self
     
-    def print_profile(self):
-        assert hasattr(self, 'cursor'), "Profiling has not been run yet. Please call profile() first."
-        # print the profiling results
+    def init_profile_database(self):
+        """
+        Initialize the database for profiling results.
+        This method should create the necessary tables and prepare the database for storing profiling data.
+        """
+        raise NotImplementedError("This method should be implemented in the subclass.")
+
+    def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
+        """
+        Store the profiling results in the database.
+        This method should insert the profiling data into the appropriate tables.
+        """
+        raise NotImplementedError("This method should be implemented in the subclass.")
+
+    def init_impl_configs(self):
+        self.impl_configs_map = {}
         for _, impl in self.impl_map.items():
             category_tag = impl.category_tag
+            self.impl_configs_map[category_tag] = [
+                (None, None)
+            ]
+
+    def init_profile(self, profile_dir, append_model=False):
+        if not os.path.exists(profile_dir):
+            os.makedirs(profile_dir)
+        
+        self.conn = sqlite3.connect(os.path.join(profile_dir, f"{self.name}.db"))
+        self.cursor = self.conn.cursor()
+
+        if not append_model:
+            for _, impl in self.impl_map.items():
+                self.cursor.execute(f'''
+                    DROP TABLE IF EXISTS "{impl.category_tag}";
+                ''')
+
+        self.init_profile_database()
+        self.init_impl_configs()
+
+        self.conn.commit()
+    
+    def profile_update(self):
+        pass
+
+    def profile_run(self):
+        pass
+
+    def profile(self):
+        with prof_marker(f"batchsize:{self.batch_size}"):
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+
+            g = torch.cuda.CUDAGraph()
+            # test_output_list = []
+            for _, impl in self.impl_map.items():
+                self.impl = impl(self, self.stream, self.device)
+                category_tag = impl.category_tag
+
+                # loop in the impl configs
+                for impl_tag, para_map in self.impl_configs_map[category_tag]:
+                    self.impl.config(impl_tag, para_map)
+                    self.profile_update()
+                    g.reset()
+                    # warm up for 10 cycles.
+                    for _ in range(10):
+                        self.profile_run()
+
+                    # profile for 100 cycles.
+                    rounds = 100
+                    with torch.cuda.graph(g, stream=self.stream):
+                        for round in range(rounds):
+                            self.profile_run()
+
+                    start.record(self.stream)
+                    with torch.cuda.stream(self.stream):
+                        g.replay()
+                    end.record(self.stream)
+                    torch.cuda.synchronize()
+                    elapsed_ms = start.elapsed_time(end)
+                    average_elapsed_ms = elapsed_ms / rounds
+                    # Store to database
+                    self.store_profile_database(category_tag, impl_tag, average_elapsed_ms)
+                    # test_output_list.append(self.outputs["output"].tensor)
+            self.conn.commit()
+            # self.checkConsistencyBetweenImpl(test_output_list)
+
+    def print_profile(self):
+        if not hasattr(self, 'cursor'):
+            print(f"Profiling has not been run yet for operation {self.name}. Please call profile() first.")
+            return
+        # assert hasattr(self, 'cursor'), "Profiling has not been run yet. Please call profile() first."
+        # print the profiling results
+        print(f"Profiling results for operation {self.name}:")
+        for _, impl in self.impl_map.items():
+            category_tag = impl.category_tag
+            # if category_tag not in self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table';").fetchall():
+            if not self.cursor.execute(f'''
+                SELECT name FROM sqlite_master WHERE type='table' AND name="{category_tag}";
+            ''').fetchone():
+                print(f"No profiling results found for category: {category_tag}")
+                continue
             self.cursor.execute(f'''
                 SELECT * FROM {category_tag}
             ''')
@@ -93,7 +187,7 @@ class Operations:
             print(" | ".join(cols))            # header line
             for row in rows:
                 print(" | ".join(str(val) for val in row))
-        self.conn.close()
+        # self.conn.close()
             
     def config_tag(self, tag, parameter_map = {}):
         if self.isNanoSplit:

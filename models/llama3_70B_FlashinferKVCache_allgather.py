@@ -399,10 +399,6 @@ class Pipeline():
         for operation in self.operation_list:
             operation.profile()
 
-    def search_profile_data(self):
-        operation_base = Operations()
-        operation_base.search_profile_data()
-
     def run(self, file_name="out-tp-test", filefolder_name="llama3-kv-out-tp-test"):
 
         temp_out = torch.zeros(self.batch_size, dtype=torch.int32, device='cuda')
@@ -410,7 +406,7 @@ class Pipeline():
         os.makedirs(f"./{filefolder_name}", exist_ok=True)
 
         self.executor.execute({}, temp_out)
-        # self.executor.print_debug(file_name, filefolder_name=filefolder_name, output=temp_out)
+        # self.executor.print_debug(temp_out, file_name, filefolder_name=filefolder_name)
 
         with prof_marker("after_execute_before_return"):
             temp_out = temp_out.cpu()
@@ -426,17 +422,3 @@ class Pipeline():
 
     def terminate(self):
         dist.destroy_process_group()
-
-if __name__ == "__main__":
-    # remove the file performance.db
-    try:
-        os.remove("performance.db")
-    except:
-        pass
-    pipeline = Pipeline()
-    pipeline.init_external_data()
-    pipeline.init_operations()
-    pipeline.init_set_shape()
-    pipeline.config_algorithm()
-    pipeline.profile()
-    pipeline.activation.search_profile_data()

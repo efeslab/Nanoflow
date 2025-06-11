@@ -4,11 +4,9 @@ import math
 import time
 
 import platform_config
-from operations.rope.help_functions import apply_rope
 from operations.operation_base import Operations, Operation_Layer
 from core.IOWrapper import IOWrapper
-from core.weightWrapper import WeightWrapper    
-from core.processWeight import process_weight_none, process_weight_layer
+from core.weightWrapper import WeightWrapper
 from operations.impl_base import OperationImpl
 from kvcache.kv import KVCacheNone, KVCacheTorch, DistKVPool, BatchedDistKVCache
 from utils.prof_marker import prof_marker
@@ -23,7 +21,7 @@ if platform_config.PLATFORM_CUDA:
             super().__init__(op_base, stream, device)
             self.num_qo_heads = op_base.num_qo_heads // op_base.tp_size
             
-        def run(self, layer, kqv, k_data, v_data, output):
+        def run(self, kqv, k_data, v_data, output):
             with prof_marker("RopeAppendCuda: SplitRopeAppend"):
                 bind_ropeappend.splitRopeAppend(
                     k_data,
@@ -65,7 +63,7 @@ class RopeAppendFlashinfer(Operations):
         super().__init__(name, device)
         self.inputs = {"kqv": IOWrapper(self, "kqv", device).is_input()}
         self.outputs = {"q": IOWrapper(self, "q", device).is_output()}
-        self.externals = {"KVCache": None}
+        self.externals: dict[str, BatchedDistKVCache | KVCacheNone]
         
         # Save RoPE configuration.
         self.rope_type = rope_type
@@ -124,60 +122,32 @@ class RopeAppendFlashinfer(Operations):
 
         return new_op
 
-    def profile(self):
-        input_kqv = torch.randn(2, (self.num_qo_heads + 2 * self.num_kv_heads) * self.head_dim, dtype=torch.float16, device='cuda')
-        output_list = []
-        for category_tag, impl in self.impl_map.items():
-            out = torch.zeros((2, self.num_qo_heads * self.head_dim), dtype=torch.float16, device='cuda')
-            # print("name:", category_tag)
-            if category_tag == "cuda":
-                kv_pool = DistKVPool(1, self.num_kv_heads, self.head_dim, 2048, 7, 1)
-                batchde_kv = BatchedDistKVCache(kv_pool, 0)
-                impl().run(0, self.head_dim, self.num_qo_heads, self.num_kv_heads, torch.tensor([0, 2], dtype=torch.int32).cuda(), input_kqv, [batchde_kv], self.rope_type, self.theta, self.original_max_position_embeddings, self.low_freq_factor, self.high_freq_factor, self.factor, out, False)
+    def init_profile_database(self):
+        for _, impl in self.impl_map.items():
+            self.cursor.execute(f'''
+            CREATE TABLE IF NOT EXISTS "{impl.category_tag}" (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT, 
+                batch_size   INTEGER UNIQUE,
+                head_dim INTEGER,
+                num_qo_heads INTEGER,
+                num_kv_heads INTEGER,
+                average_time_ms REAL
+            );
+            ''')
+        self.k_ptr, self.v_ptr = self.externals["KVCache"].get_whole_kv_data(self.layer_list[0])
 
-            # print("out:", out)
-            output_list.append(out)
-        
-        self.checkConsistencyBetweenImpl(output_list)
-        # print("RopeAppend profile passed")
-        rounds = 100
-        batch_sizes = [2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 640, 768, 896, 1024]
-        for batch_size in batch_sizes:
-            output = torch.zeros((batch_size, self.num_qo_heads * self.head_dim), dtype=torch.float16, device='cuda')
-            for _, impl in self.impl_map.items():
-                impl_instance = impl()
-                category_tag = impl_instance.category_tag
-                if category_tag == "torch":
-                    kv_caches_choices = ['nokv', 'torch']
-                elif category_tag == "cuda":
-                    kv_caches_choices = ['flashinfer']
+    def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
+        print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {self.batch_size}, Average Time: {average_elapsed_ms} ms")
+        self.cursor.execute(f'''
+            INSERT OR IGNORE INTO {category_tag} (batch_size, head_dim, num_qo_heads, num_kv_heads, average_time_ms)
+            VALUES (?, ?, ?, ?, ?)
+            ''', (self.batch_size, self.head_dim, self.num_qo_heads, self.num_kv_heads, average_elapsed_ms))
 
-                total_latency = 0
-                for kv_choice in kv_caches_choices:
-                    for round in range(rounds):
-                        input_kqv = torch.randn(batch_size, (self.num_qo_heads + 2 * self.num_kv_heads) * self.head_dim, dtype=torch.float16, device='cuda')
-                        if kv_choice == 'nokv':
-                            kv_caches = [KVCacheNone()]
-                        elif kv_choice == 'torch':
-                            kv_caches = [KVCacheTorch()]
-                        elif kv_choice == 'flashinfer':
-                            kv_pool = DistKVPool(1, self.num_kv_heads, self.head_dim, 2048, 7, 1)
-                            batchde_kv = BatchedDistKVCache(kv_pool, 0)
-                            kv_caches = [batchde_kv]
-
-                        start_time = time.time()
-                        impl_instance.run(0, self.head_dim, self.num_qo_heads, self.num_kv_heads, torch.tensor([0, batch_size], dtype=torch.int32).cuda(), input_kqv, kv_caches, self.rope_type, self.theta, self.original_max_position_embeddings, self.low_freq_factor, self.high_freq_factor, self.factor, output, False)
-                        if round > 0:
-                            total_latency += time.time() - start_time
-
-                    average_time = total_latency / rounds
-                    print("name: {}, batch_size: {}, average_time: {}".format(self.name + f"_{category_tag}" + f"with_{kv_caches[0].name}", batch_size, average_time))
-                    self.cursor.execute('''
-                    INSERT INTO performance (keyword, batch_size, average_time)
-                    VALUES (?, ?, ?)
-                    ''', (self.name + f"_{category_tag}" + f"with_{kv_caches[0].name}", batch_size, average_time))
-        self.conn.commit()
+    def run(self, k_ptr, v_ptr):
+        self.impl.run(self.inputs["kqv"].tensor, k_ptr, v_ptr, self.outputs["q"].tensor)
     
+    def profile_run(self):
+        self.run(self.k_ptr, self.v_ptr)
 
 class RopeAppendFlashinfer_Layer(Operation_Layer):
     def __init__(self, layer, base_op):
@@ -185,5 +155,8 @@ class RopeAppendFlashinfer_Layer(Operation_Layer):
         self.k_data_ptr, self.v_data_ptr = base_op.externals["KVCache"].get_whole_kv_data(self.layer)
 
     def run(self):
-        self.impl.run(self.layer, self.inputs["kqv"].tensor, self.k_data_ptr, self.v_data_ptr, self.outputs["q"].tensor)
+        self.parent.run(
+            self.k_data_ptr,
+            self.v_data_ptr
+        )
         

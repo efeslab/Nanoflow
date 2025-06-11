@@ -9,6 +9,7 @@ from core.processWeight import process_weight_none, process_weight_layer
 from operations.impl_base import OperationImpl
 from kvcache.kv import KVCacheNone, KVCacheTorch, DistKVPool, BatchedDistKVCache
 from utils.util_functions import tensor_offset_to_req_idx
+import platform_config
 
 
 class DecAttnTorchImpl(OperationImpl):
@@ -60,6 +61,43 @@ class DecAttnTorchImpl(OperationImpl):
                 # Write the computed output into the operator's output tensor.
                 output[start:end, :].copy_(out)
 
+if platform_config.PLATFORM_CUDA:
+    import flashinfer
+    class DecAttnCudaImpl(OperationImpl):
+        category_tag = "cuda"
+        def __init__(self, op_base, stream, device):
+            super().__init__(op_base, stream, device)
+            self.num_qo_heads = op_base.num_qo_heads
+            self.num_kv_heads = op_base.num_kv_heads
+            self.head_dim = op_base.head_dim
+
+        def run(self, layer, qo_indicies,  Q, KVCache, output
+        ):
+            if Q.shape[0] == 0:
+                return
+            scale = 1.0 / (self.head_dim ** 0.5)
+            # Compute group size: how many query heads correspond to one key/value head.
+            group_size = self.num_qo_heads // self.num_kv_heads
+            for i in range(len(qo_indicies) - 1):
+                # Retrieve the query slice for this batch element.
+                start = qo_indicies[i]
+                end = qo_indicies[i + 1]
+
+                sub_q = Q[start:end, :]  # shape: [n_q, num_qo_heads * head_dim]
+                sub_q = sub_q.view(-1, self.num_qo_heads, self.head_dim)
+                
+                sub_k, sub_v = KVCache[layer].get(i) # [n_k, num_kv_heads * head_dim]
+
+                n_k = sub_k.shape[0]
+
+                sub_k = sub_k.view(n_k, self.num_kv_heads, self.head_dim)
+                sub_v = sub_v.view(n_k, self.num_kv_heads, self.head_dim)
+                sub_q = sub_q.squeeze(0)
+                out = flashinfer.single_decode_with_kv_cache(sub_q, sub_k, sub_v, use_tensor_cores=True)
+
+                out = out.reshape(-1, self.num_qo_heads * self.head_dim)
+                output[start:end, :].copy_(out)
+
 class DecAttnTorch(Operations):
     def __init__(self, name, device):
         super().__init__(name, device)
@@ -79,6 +117,8 @@ class DecAttnTorch(Operations):
 
     def init_impl_map(self):
         self.add_impl(DecAttnTorchImpl)
+        if platform_config.PLATFORM_CUDA:
+            self.add_impl(DecAttnCudaImpl)
     
     def setShape(self, num_kv_heads, num_qo_heads, head_dim, tp_size=1):
         self.num_kv_heads = num_kv_heads
@@ -172,6 +212,51 @@ class PFAttnTorchImpl(OperationImpl):
 
                 out = out.reshape(-1, self.num_qo_heads * self.head_dim)
                 # Write the computed output into th e operator's output tensor.
+                output[start:end, :].copy_(out)
+
+if platform_config.PLATFORM_CUDA:
+    import flashinfer
+    class PFAttnCudaImpl(OperationImpl):
+        category_tag = "cuda"
+        def __init__(self, op_base, stream, device):
+            super().__init__(op_base, stream, device)
+            self.num_qo_heads = op_base.num_qo_heads
+            self.num_kv_heads = op_base.num_kv_heads
+            self.head_dim = op_base.head_dim
+        def run(self, layer, qo_indicies, Q, KVCache, output
+        ):
+            if Q.shape[0] == 0:
+                return
+            # print("PFAttnCudaImpl")
+            # print("Q shape: ", Q.shape)
+            # print("Q: ", Q)
+            scale = 1.0 / (self.head_dim ** 0.5)
+            # Compute group size: how many query heads correspond to one key/value head.
+            group_size = self.num_qo_heads // self.num_kv_heads
+
+            for i in range(len(qo_indicies) - 1):
+                # Retrieve the query slice for this batch element.
+                start = qo_indicies[i]
+                end = qo_indicies[i + 1]
+                # Q is expected to be flattened as [n_total, num_qo_heads * head_dim];
+                # extract the sub-tensor corresponding to this batch element.
+                sub_q = Q[start:end, :]  # shape: [n_q, num_qo_heads * head_dim]
+                sub_q = sub_q.view(-1, self.num_qo_heads, self.head_dim)
+
+                sub_k, sub_v = KVCache[layer].get(i)
+                n_k = sub_k.shape[0]
+
+                # Reshape keys and values so that the head dimension is explicit.
+                # New shapes: [n_k, num_kv_heads, head_dim]
+                sub_k = sub_k.view(n_k, self.num_kv_heads, self.head_dim)
+                sub_v = sub_v.view(n_k, self.num_kv_heads, self.head_dim)
+                sub_q = sub_q.contiguous()
+                sub_k = sub_k.contiguous()
+                sub_v = sub_v.contiguous()
+                
+                out = flashinfer.single_prefill_with_kv_cache(sub_q, sub_k, sub_v, causal=True)
+                out = out.reshape(-1, self.num_qo_heads * self.head_dim)
+
                 output[start:end, :].copy_(out)
 
 class PFAttnTorch(Operations):

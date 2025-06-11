@@ -1,5 +1,5 @@
 git submodule init
-git submodule update
+git submodule update --recursive
 
 conda install -c gurobi gurobi
 conda install -c conda-forge cmake=3.29
@@ -19,19 +19,17 @@ fi
 
 cd Nanoflow-python
 
-cd ./3rdparty/cutlass
+cd 3rdparty/cutlass
 git checkout main
 cd ../..
 
 # build flashinfer
-cd ./3rdparty/flashinfer
-git submodule init
-git submodule update
+cd 3rdparty/flashinfer
 FLASHINFER_ENABLE_AOT=1 pip install -e . -v
 cd ../..
 
 # build mscclpp
-cd ./3rdparty/mscclpp
+cd 3rdparty/mscclpp
 git reset --hard cdaf3aea3d767ba65dd3b08984d76bd50615f92e
 mkdir -p build
 cd build
@@ -41,22 +39,13 @@ make install/fast
 cd ../../../
 
 # build kernels
-cd ./pybind
+cd pybind
 mkdir build
 cd build/
 cmake ..
 make -j 256
 cd ../..
 
-# login to huggingface
-cd ..
-mkdir -p hf
-echo "export HF_HOME=$(pwd)/hf" >> ~/.bashrc
-source ~/.bashrc
-
-huggingface-cli login
-
-cd Nanoflow-python
 # load llama3-8B weights
-cd ./core
+cd core
 python weightSaver.py --config_path=../config_all/llama3-8B/1024.json

@@ -42,6 +42,14 @@ chmod +x ./installAnaconda.sh
 # restart the terminal
 source ~/.bashrc
 
+# login to huggingface
+mkdir -p hf
+echo "export HF_HOME=$(pwd)/hf" >> ~/.bashrc
+source ~/.bashrc
+
+huggingface-cli login
+
+# set up the environment
 cd Nanoflow-python
 yes | bash setup.sh
 ```
