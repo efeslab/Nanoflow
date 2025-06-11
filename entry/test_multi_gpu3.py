@@ -26,7 +26,7 @@ if __name__ == '__main__':
     mp.set_start_method('spawn')
 
     arg_parser = argparse.ArgumentParser()
-    arg_parser.add_argument("-l", "--load_hf_weight", type=bool, default=False, help="Load weights from huggingface")
+    arg_parser.add_argument("-l", "--load_hf_weight", action="store_true", help="Load weights from huggingface")
 
     args = arg_parser.parse_args()
 
@@ -41,7 +41,7 @@ if __name__ == '__main__':
         output_strings[idx] = ids
     # print("tokenize the inputs, initialize the output dict, ", time.perf_counter() - T0)
 
-    weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
+    weight_map_wzr = "/storage/ziren/framework-test/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
 
     
     world_size = torch.cuda.device_count()

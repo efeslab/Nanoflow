@@ -170,7 +170,6 @@ class RopeAppendTorch(Operations):
         new_op.externals = self.externals
         new_op.expand_layer(self.layer_list)
         new_op.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim, self.tp_size)
-        new_op.set_stream(self.stream)
         self.nano_ops.append(new_op)
 
         return new_op

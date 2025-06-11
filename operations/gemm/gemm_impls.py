@@ -16,10 +16,10 @@ class GEMMTorchImpl(OperationImpl):
     
     def run(self, A, B, C, D):
         with torch.cuda.stream(self.stream):
-            if self.bias:
-                D.copy_(A.matmul(B) * self.alpha + C * self.beta)
+            if self.bias or self.alpha:
+                torch.addmm(C, A, B, beta=self.beta, alpha=self.alpha, out=D)
             else:
-                D.copy_(A.matmul(B) * self.alpha)
+                torch.matmul(A, B, out=D)
 
 class GEMMTritonImpl(OperationImpl):
     category_tag = "triton"

@@ -75,7 +75,6 @@ class GEMM_N_Parallel(Operations):
         new_op.weights = self.weights
         new_op.expand_layer(self.layer_list)
         new_op.setShape(self.N, self.K, self.tp_idx, self.tp_size).setParameter(self.alpha, self.beta)
-        new_op.set_stream(self.stream)
         
         self.nano_ops.append(new_op)
 

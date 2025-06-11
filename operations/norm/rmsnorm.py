@@ -61,7 +61,6 @@ class LayerNorm(Operations):
         new_op.weights = self.weights
         new_op.expand_layer(self.layer_list)
         new_op.setShape(self.hidden_dim)
-        new_op.set_stream(self.stream)
 
         self.nano_ops.append(new_op)
 

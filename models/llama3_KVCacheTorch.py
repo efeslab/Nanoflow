@@ -47,7 +47,6 @@ class Pipeline():
         self.init_dependency()
         self.init_set_shape()
         self.init_set_weight(weight_path, cached)
-        self.config_streams()
 
     def init_streams(self):
         GEMM_STREAM = torch.cuda.Stream()
@@ -239,38 +238,40 @@ class Pipeline():
 
     def config_algorithm(self):
         self.gen_embedding.config_tag("torch")
-        self.layerNormAttn.config_tag("torch")
-        self.activation.config_tag("torch")
-        self.kqv.config_tag("torch")
+        self.layerNormAttn.config_tag(["torch", "torch"])
+        self.activation.config_tag(["torch", "torch"])
+        self.kqv.config_tag(["torch", "torch"])
         # self.kqv.config_tag("triton")
-        self.ropeAppend.config_tag("torch:withKVCache")
+        self.ropeAppend.config_tag(["torch:withKVCache", "torch:withKVCache"])
         self.decAttn.config_tag("torch")
         self.pfAttn.config_tag("torch")
-        self.layerNormFFN.config_tag("torch")
-        self.o.config_tag("torch")
-        self.ug.config_tag("torch")
-        self.d.config_tag("torch")
+        self.layerNormFFN.config_tag(["torch", "torch"])
+        self.o.config_tag(["torch", "torch"])
+        self.ug.config_tag(["torch", "torch"])
+        self.d.config_tag(["torch", "torch"])
         self.modelLayerNorm.config_tag("torch")
         self.sample.config_tag("torch")
         self.getLogits.config_tag("torch")
 
+
     def config_streams(self):
         self.global_input.set_stream(self.streams["GEMM"])
         self.gen_embedding.set_stream(self.streams["GEMM"])
-        self.layerNormAttn.set_stream(self.streams["GEMM"])
-        self.activation.set_stream(self.streams["GEMM"])
-        self.kqv.set_stream(self.streams["GEMM"])
-        self.ropeAppend.set_stream(self.streams["GEMM"])
+        self.layerNormAttn.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        self.activation.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        self.kqv.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        self.ropeAppend.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
         self.decAttn.set_stream(self.streams["GEMV"])
         self.pfAttn.set_stream(self.streams["GEMV"])
-        self.layerNormFFN.set_stream(self.streams["GEMM"])
-        self.o.set_stream(self.streams["GEMM"])
-        self.ug.set_stream(self.streams["GEMM"])
-        self.d.set_stream(self.streams["GEMM"])
+        self.layerNormFFN.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        self.o.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        self.ug.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        self.d.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
         self.modelLayerNorm.set_stream(self.streams["GEMM"])
         self.sample.set_stream(self.streams["GEMM"])
         self.getLogits.set_stream(self.streams["GEMM"])
         self.global_output.set_stream(self.streams["GEMM"])
+
 
     def nanobatch_split(self, total_batchsize, decode_batchsize):
         op_nanobatch_info_map = {
@@ -321,6 +322,7 @@ class Pipeline():
                 # self.nanobatch_split(self.batch_size, decode_batchsize)
                 self.update_allocate_buffers()
                 # print("finish update_allocate_buffers")
+                self.config_streams()
                 self.config_algorithm()
                 self.init_executor()
         with prof_marker("update_step_3"):

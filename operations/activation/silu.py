@@ -56,7 +56,6 @@ class Activation(Operations):
         new_op = Activation(f"{self.name}{index}", self.device)
         new_op.expand_layer(self.layer_list)
         new_op.setShape(self.N, self.tp_idx, self.tp_size)
-        new_op.set_stream(self.stream)
 
         self.nano_ops.append(new_op)
 

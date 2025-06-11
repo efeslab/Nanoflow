@@ -61,7 +61,6 @@ class Pipeline():
         self.init_dependency()
         self.init_set_shape()
         self.init_set_weight(weight_path, cached)
-        self.config_streams()
 
     def init_streams(self):
         GEMM_STREAM = torch.cuda.Stream()
@@ -356,6 +355,7 @@ class Pipeline():
                 self.config_batch_size()
                 self.update_allocate_buffers()
                 # print("finish update_allocate_buffers")
+                self.config_streams()
                 self.config_algorithm()
                 self.init_executor()
         with prof_marker("update_step_3"):

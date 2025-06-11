@@ -18,8 +18,7 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 from models.llama3_FlashinferKVCache import Pipeline
 
 arg_parser = argparse.ArgumentParser()
-arg_parser.add_argument("-l", "--load_hf_weight", type=bool, default=False, help="Load weights from huggingface")
-# arg_parser.add_argument("-t", "--trace_path", type=str, required=True, help="Request trace to read from")
+arg_parser.add_argument("-l", "--load_hf_weight", action="store_true", help="Load weights from huggingface")
 
 args = arg_parser.parse_args()
 
