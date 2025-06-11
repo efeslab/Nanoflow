@@ -18,7 +18,6 @@ def worker(start_time, rank, world_size, shared_batch_size, shared_array, barrie
     pipeline.init_set_weight(weight_map_wzr, cached=True)
 
     pipeline.init_streams()
-    pipeline.config_streams()
     pipeline.config_network(rank)
     pipeline.update_network_ops()
     
