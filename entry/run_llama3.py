@@ -13,9 +13,8 @@ from transformers import AutoTokenizer
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
-# from models.llama3_NoKVCacheTorch import Pipeline
-# from models.llama3_KVCacheTorch import Pipeline
-from models.llama3_FlashinferKVCache import Pipeline
+from models.llama3_KVCacheTorch import Pipeline
+# from models.llama3_FlashinferKVCache import Pipeline
 
 arg_parser = argparse.ArgumentParser()
 arg_parser.add_argument("-l", "--load_hf_weight", action="store_true", help="Load weights from huggingface")

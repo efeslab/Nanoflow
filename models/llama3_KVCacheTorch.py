@@ -32,6 +32,7 @@ class Pipeline():
         self.hidden_dim = 4096
         self.intermediate_dim = 14 * 1024
         self.batch_size = None
+        self.decode_batch_size = None
         self.num_layers = 32
         self.layer_list = [i for i in range(self.num_layers)]
         self.page_size = 64
@@ -301,7 +302,7 @@ class Pipeline():
         for operation in new_operation_list:
             self.op_layers.extend(operation.children)
     
-    def update(self, new_input_infos, decode_batchsize=0):
+    def update(self, new_input_infos, decode_batch_size=0):
         self.input_req_idx = []
         self.input_ids = []
         with prof_marker("update_step_0"):
@@ -313,13 +314,14 @@ class Pipeline():
             # concatenate input_ids into a single tensor
             flattened = [item for sublist in self.input_ids for item in sublist]
         with prof_marker("update_step_2"):
-            if len(flattened) != self.batch_size:
+            if len(flattened) != self.batch_size or decode_batch_size != self.decode_batch_size:
                 self.batch_size = len(flattened)
+                self.decode_batch_size = decode_batch_size
                 # print(f"batch_size: {self.batch_size}")
                 # print("decode_batchsize: ", decode_batchsize)
                 self.clear_batch_size()
-                self.config_batch_size(decode_batchsize)
-                # self.nanobatch_split(self.batch_size, decode_batchsize)
+                self.config_batch_size(decode_batch_size)
+                self.nanobatch_split(self.batch_size, decode_batch_size)
                 self.update_allocate_buffers()
                 # print("finish update_allocate_buffers")
                 self.config_streams()
@@ -333,11 +335,11 @@ class Pipeline():
         with prof_marker("update_step_5"):
             self.cumsum_input = torch.cat([torch.tensor([0], dtype=torch.int32, device='cpu'), torch.cumsum(request_length, dim=0, dtype=torch.int32)]).tolist()
         with prof_marker("update_step_6"):
-            self.kv_cache.update(self.cumsum_input, self.input_req_idx, decode_batchsize)
+            self.kv_cache.update(self.cumsum_input, self.input_req_idx, decode_batch_size)
         with prof_marker("update_step_7"):
             self.global_input.outputs["tokens"].tensor.copy_(input_tensor)
         with prof_marker("update_step_8"):
-            self.ropeAppend.update(self.cumsum_input, decode_batchsize)
+            self.ropeAppend.update(self.cumsum_input, decode_batch_size)
         with prof_marker("update_step_9"):
             self.decAttn.update(self.cumsum_input)
         with prof_marker("update_step_10"):
