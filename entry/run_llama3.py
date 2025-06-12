@@ -202,6 +202,8 @@ def profile_one_cycle():
     prefill_input_ids = [prefill_context_ids[:input_length] for _ in range(1000)]
     # initialize the reqs for first 384 requests
     decode_inputs = []
+
+    pipeline.config_algorithm()
     for i in range(decode_batch_size):
         input = [(i, prefill_input_ids[i])]
         pipeline.update(input)

@@ -85,7 +85,7 @@ class GEMM_N_Parallel(Operations):
             self.cursor.execute(f'''
             CREATE TABLE IF NOT EXISTS "{impl.category_tag}" (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT, 
-                M INTEGER UNIQUE,
+                M INTEGER,
                 N INTEGER,
                 K INTEGER,
                 alpha REAL,
@@ -93,7 +93,8 @@ class GEMM_N_Parallel(Operations):
                 beta REAL,
                 average_time_ms REAL,
                 GFLOPS REAL,
-                impl_tag TEXT
+                impl_tag TEXT,
+                UNIQUE (M, impl_tag)
             );
             ''')
 
@@ -111,8 +112,11 @@ class GEMM_N_Parallel(Operations):
         for _, impl in self.impl_map.items():
             category_tag = impl.category_tag
             if category_tag == "cuda":
+                from pybind.src.generate_gemm.genGEMM import GetAllH100GemmCanonicalNames
+                names = GetAllH100GemmCanonicalNames()
+                # print(f"GetAllH100GemmCanonicalNames: {names}")
                 self.impl_configs_map[category_tag] = [
-                    ("SM90_128_256_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", None)
+                    (name, None) for name in names if "RowMajor_RowMajor_RowMajor" in name
                 ]
             else:
                 self.impl_configs_map[category_tag] = [

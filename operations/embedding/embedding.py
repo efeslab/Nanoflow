@@ -81,8 +81,8 @@ class GenEmbedding(Operations):
     def profile_run(self):
         self.run(self.layer_list[0])
 
-    def processWeight(self, global_weight_map, cached_weight_map, cached, device):
-        return process_weight_no_transpose(global_weight_map, self.weight_name, self.weights["embedding"], self.layer_list, cached_weight_map, cached, device)
+    def processWeight(self, global_weight_map, weight_path, cached, device):
+        return process_weight_no_transpose(global_weight_map, self.weight_name, self.weights["embedding"], self.layer_list, weight_path, cached, device)
 
 class GenEmbedding_Layer(Operation_Layer):
     def __init__(self, layer, base_op):

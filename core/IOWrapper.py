@@ -38,8 +38,6 @@ class IOWrapper:
         # check dtype must be the same
         if self.dtype != next_wrapper.dtype:
             raise Exception(f"Error: {self.fullName} and {next_wrapper.fullName} has different dtype")
-        
-        return next_wrapper
 
     def __rshift__(self, next_wrapper):
         depend_on_prev = False
@@ -50,7 +48,7 @@ class IOWrapper:
             elif len(next_wrapper) == 3:
                 next_wrapper, depend_on_prev, depend_on_next = next_wrapper
         # print("IOWrapper __rshift__", depend_on_prev)
-        return self.chain(next_wrapper, depend_on_prev, depend_on_next)
+        self.chain(next_wrapper, depend_on_prev, depend_on_next)
     
     def toStr(self):
         # name, prev = [], next = []

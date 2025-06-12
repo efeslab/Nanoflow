@@ -25,6 +25,13 @@ ElementOutput* gemm_output = nullptr;
 
 void configGEMM(const std::string& gemm_tag, const std::string& gemm_name, int M, int N, int K, float alpha, float beta) {
 
+  auto it = gemm_map.find(gemm_name);
+    if (it != gemm_map.end()) {
+        // if your wrapper has a GPU-side destroy, call it here:
+        delete it->second;      // free host + GPU resources in the dtor
+        gemm_map.erase(it);
+    }
+
   BaseGEMMWrapper* gemm_wrapper = generateGEMM(gemm_tag);
   gemm_wrapper->set_shape(M, N, K);
   gemm_wrapper->set_alpha(alpha);

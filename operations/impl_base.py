@@ -1,8 +1,11 @@
-from typing import List
+from typing import List, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from operations.operation_base import Operations
 
 class OperationImpl:
     category_tag: str
-    def __init__(self, op_base, stream, device):
+    def __init__(self, op_base: "Operations", stream, device):
         self.impl_tag = None
         self.op_base = op_base
         self.stream = stream

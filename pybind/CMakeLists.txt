@@ -66,7 +66,7 @@ add_compile_options(-Wunused-variable)
 
 # --------------- Build GEMM Libraries -----------------#
 
-set (GEMM_BASE_SRC "${CMAKE_SOURCE_DIR}/src/generate-gemm")
+set (GEMM_BASE_SRC "${CMAKE_SOURCE_DIR}/src/generate_gemm")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${GEMM_BASE_SRC}/genGEMM.py ${GEMM_BASE_SRC}/gemmFactory.in)
 execute_process(COMMAND make WORKING_DIRECTORY ${GEMM_BASE_SRC})
 file(GLOB GEMM_SRC "${GEMM_BASE_SRC}/*.cu")
