@@ -8,8 +8,11 @@ from core.weightWrapper import WeightWrapper
 from core.processWeight import process_weight_none
 from utils.prof_marker import prof_marker
 
+import gurobipy as gp
+from gurobipy import GRB
+
 class Operations():
-    def __init__(self, name: str, device: str):
+    def __init__(self, name: str, device: str, nano_idx=None):
         # should be initialized in the device class
         self.inputs: dict[str, IOWrapper] = {}
         self.outputs: dict[str, IOWrapper] = {}
@@ -18,7 +21,12 @@ class Operations():
         self.impl: OperationImpl
 
         # remain in this class
-        self.name = name
+        if nano_idx is not None:
+            self.name = f"{name}{nano_idx}"
+            self.original_name = name
+        else:
+            self.name = name
+            self.original_name = name
         self.first_layer_only = False
         self.last_layer_only = False
         self.weight_name = None
@@ -30,6 +38,7 @@ class Operations():
         self.isVirtual = False
         self.stream: torch.cuda.Stream
         self.sm_count: int | None = None
+        self.tensor_offset = None
         self.batch_size = None
 
         self.device = device
@@ -86,6 +95,17 @@ class Operations():
         """
         raise NotImplementedError("This method should be implemented in the subclass.")
 
+    def check_profiled(self, category_tag):
+        self.cursor.execute(f'''
+            SELECT * FROM {category_tag}
+            WHERE batch_size = ?
+        ''', (self.batch_size,))
+        row = self.cursor.fetchone()
+        if row is not None:
+            print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {self.batch_size} already profiled.")
+            return True
+        return False
+
     def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
         """
         Store the profiling results in the database.
@@ -101,14 +121,13 @@ class Operations():
                 (None, None)
             ]
 
-    def init_profile(self, profile_dir, append_model=False):
+    def init_profile(self, profile_dir, append_mode, only_decode):
         if not os.path.exists(profile_dir):
             os.makedirs(profile_dir)
         
         self.conn = sqlite3.connect(os.path.join(profile_dir, f"{self.name}.db"))
         self.cursor = self.conn.cursor()
-
-        if not append_model:
+        if not append_mode:
             for _, impl in self.impl_map.items():
                 self.cursor.execute(f'''
                     DROP TABLE IF EXISTS "{impl.category_tag}";
@@ -125,7 +144,7 @@ class Operations():
     def profile_run(self):
         pass
 
-    def profile(self):
+    def profile(self, only_decode):
         with prof_marker(f"batchsize:{self.batch_size}"):
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
@@ -135,7 +154,10 @@ class Operations():
             for _, impl in self.impl_map.items():
                 self.impl = impl(self, self.stream, self.device)
                 category_tag = impl.category_tag
-
+                is_profiled = self.check_profiled(category_tag)
+                if is_profiled:
+                    # If already profiled, we can skip profiling
+                    continue
                 # loop in the impl configs
                 for impl_tag, para_map in self.impl_configs_map[category_tag]:
                     self.impl.config(impl_tag, para_map)
@@ -278,10 +300,15 @@ class Operation_Layer:
         self.externals = base_op.externals
         self.parent = base_op
         self.device = base_op.device
-        self.prev_op_layer = []
+        self.prev_op_layer: list[Operation_Layer] = []
         self.cuda_event = torch.cuda.Event(enable_timing=True) 
         self.is_depended_on = False
 
+        # for auto search
+        self.duration_map = {}
+        self.start_time: gp.Var
+        self.end_time: gp.Var
+    
     @property
     def impl(self):
         return self.parent.impl
@@ -291,8 +318,16 @@ class Operation_Layer:
         return self.parent.stream
 
     @property
+    def tensor_offset(self):
+        return self.parent.tensor_offset
+
+    @property
     def batch_size(self):
         return self.parent.batch_size
+
+    @property
+    def original_name(self):
+        return self.parent.original_name
 
     @property
     def prerequisites(self):
@@ -374,3 +409,19 @@ class Operation_Layer:
                 # print("wait_cuda_event: ", self.name, "prev_op_layer: ", op_layer.name, "cuda_event: ", op_layer.cuda_event)
         for event in events:
             self.stream.wait_event(event)
+
+    # for auto search
+    def initVariables(self, model: gp.Model):
+        self.start_time = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_start")
+        self.end_time = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_end")
+        # print(f"init_Variables: {self.name}, start_time: {self.start_time}, end_time: {self.end_time}")
+        model.addConstr(self.end_time == self.start_time + self.duration_map[(self.batch_size, 1)], name=f"{self.name}_end_time")
+
+    def __str__(self) -> str:
+        # Color codes for terminal output
+        COLOR_YELLOW = "\033[33m"
+        COLOR_GREEN = "\033[32m"
+        COLOR_BLUE = "\033[34m"
+        COLOR_RESET = "\033[0m"
+        s = f"{COLOR_BLUE}{self.name}{COLOR_RESET} start: {self.start_time.X:.3f} end: {self.end_time.X:.3f} batch_size: {round(self.batch_size)}"
+        return s

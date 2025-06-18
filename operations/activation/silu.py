@@ -25,8 +25,8 @@ if config.PLATFORM_CUDA:
                 bind_silu_multiply.silu_multiply(x, output, self.stream_handle)
 
 class Activation(Operations):
-    def __init__(self, name, device):
-        super().__init__(name, device)
+    def __init__(self, name, device, nano_idx=None):
+        super().__init__(name, device, nano_idx)
         self.inputs = {
             "input": IOWrapper(self, 'input', device).is_input(),
         }
@@ -53,7 +53,7 @@ class Activation(Operations):
         self.outputs["output"].init_shape((0, tp_N))
     
     def copy_nano(self, index):
-        new_op = Activation(f"{self.name}{index}", self.device)
+        new_op = Activation(self.name, self.device, nano_idx=index)
         new_op.expand_layer(self.layer_list)
         new_op.setShape(self.N, self.tp_idx, self.tp_size)
 

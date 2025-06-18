@@ -30,8 +30,8 @@ if platform_config.PLATFORM_CUDA:
                 bind_rms_norm.rms_norm(output, x, weight, epsilon, self.stream_handle)
 
 class LayerNorm(Operations):
-    def __init__(self, name, device):
-        super().__init__(name, device)
+    def __init__(self, name, device, nano_idx=None):
+        super().__init__(name, device, nano_idx)
         self.inputs = {
             "input": IOWrapper(self, 'input', device).is_input(),
         }
@@ -57,7 +57,7 @@ class LayerNorm(Operations):
         self.outputs["output"].init_shape((0, self.hidden_dim))
     
     def copy_nano(self, index):
-        new_op = LayerNorm(f"{self.name}{index}", self.device)
+        new_op = LayerNorm(self.name, self.device, nano_idx=index)
         new_op.weights = self.weights
         new_op.expand_layer(self.layer_list)
         new_op.setShape(self.hidden_dim)

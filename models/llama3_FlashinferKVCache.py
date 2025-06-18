@@ -74,9 +74,16 @@ class Pipeline():
             "GEMM_WITH_DC": (gemm_stream_with_dc, gemm_stream_with_dc_sm),
         }
 
-    def init_external_data(self):
-        self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048 * 16, self.page_size, 1, self.device)
+    def init_external_data(self, for_test=False):
+        if for_test:
+            self.kv_cache = KVCacheNone()
+            return
+        self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048* 28, self.page_size, 1, self.device)
         self.kv_cache = BatchedDistKVCache(self.kv_pool)
+    
+    def reset_kv_cache(self):
+        self.kv_pool.reset()
+        self.kv_cache.reset()
 
     def init_operations(self):
         self.global_input    = GlobalInput("GlobalInput", self.device).first_only()
@@ -254,28 +261,28 @@ class Pipeline():
     def config_algorithm(self):
         gemm_tag = "torch"
         self.gen_embedding.config_tag("cuda")
-        self.layerNormAttn.config_tag(["cuda", "cuda"])
-        # self.layerNormAttn.config_tag("cuda")
-        self.activation.config_tag(["cuda", "cuda"])
-        # self.activation.config_tag("cuda")
-        # self.kqv.config_tag(gemm_tag)
-        self.kqv.config_tag([gemm_tag, gemm_tag])
+        self.layerNormAttn.config_tag("cuda")
+        # self.layerNormAttn.config_tag(["cuda", "cuda"])
+        self.activation.config_tag("cuda")
+        # self.activation.config_tag(["cuda", "cuda"])
+        self.kqv.config_tag(gemm_tag)
+        # self.kqv.config_tag([gemm_tag, gemm_tag])
         # self.kqv.config_tag(["cuda:128_128_32_64_64_32_3_5_RowMajor_RowMajor_RowMajor", "cuda:128_128_32_64_64_32_3_5_RowMajor_RowMajor_RowMajor"])
         # self.kqv.config_tag("triton")
-        self.ropeAppend.config_tag(["cuda", "cuda"])
-        # self.ropeAppend.config_tag("cuda")
+        self.ropeAppend.config_tag("cuda")
+        # self.ropeAppend.config_tag(["cuda", "cuda"])
         self.decAttn.config_tag("batched_cuda")
         self.pfAttn.config_tag("batched_cuda")
-        # self.layerNormFFN.config_tag("cuda")
-        self.layerNormFFN.config_tag(["cuda", "cuda"])
-        # self.o.config_tag(gemm_tag)
-        self.o.config_tag([gemm_tag, gemm_tag])
+        self.layerNormFFN.config_tag("cuda")
+        # self.layerNormFFN.config_tag(["cuda", "cuda"])
+        self.o.config_tag(gemm_tag)
+        # self.o.config_tag([gemm_tag, gemm_tag])
         # self.o.config_tag(["cuda:128_128_32_64_64_32_1_5_RowMajor_RowMajor_RowMajor", "cuda:128_128_32_64_64_32_2_5_RowMajor_RowMajor_RowMajor"])
-        # self.ug.config_tag(gemm_tag)
-        self.ug.config_tag([gemm_tag, gemm_tag])
+        self.ug.config_tag(gemm_tag)
+        # self.ug.config_tag([gemm_tag, gemm_tag])
         # self.ug.config_tag(["cuda:128_128_32_64_64_32_1_5_RowMajor_RowMajor_RowMajor", "cuda:128_128_32_64_64_32_2_5_RowMajor_RowMajor_RowMajor"])
-        # self.d.config_tag(gemm_tag)
-        self.d.config_tag([gemm_tag, gemm_tag])
+        self.d.config_tag(gemm_tag)
+        # self.d.config_tag([gemm_tag, gemm_tag])
         # self.d.config_tag(["cuda:128_128_32_64_64_32_1_5_RowMajor_RowMajor_RowMajor", "cuda:128_128_32_64_64_32_2_5_RowMajor_RowMajor_RowMajor"])
         self.modelLayerNorm.config_tag("cuda")
         self.sample.config_tag("cuda")
@@ -311,16 +318,18 @@ class Pipeline():
             "Activation": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
             "D": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
         }
-        extra_links = {
-            # TODO: add extra links for virtual ops
-            # "KQV0": ("KQV1", False, False),
-            # "RopeAppend0": ("RopeAppend1", False, False),
-            "RopeAppend0": ("O1", False, False),
-            "RopeAppend1": ("O0", False, True),
-        }
+        # extra_links = {
+        #     # TODO: add extra links for virtual ops
+        #     # "KQV0": ("KQV1", False, False),
+        #     # "RopeAppend0": ("RopeAppend1", False, False),
+        #     "RopeAppend0": ("O1", False, False),
+        #     "RopeAppend1": ("O0", False, True),
+        # }
+        extra_links = {}
 
         new_operation_list, addtional_virtual_ops = split_nanobatch(self.operation_list, op_nanobatch_info_map, extra_links)
         self.op_for_buffer_allocation = []
+        self.new_operation_list = new_operation_list
         self.op_layers = []
         for op in new_operation_list + self.virtual_operation_list + addtional_virtual_ops:
             print("op.name", op.name)
@@ -347,7 +356,7 @@ class Pipeline():
                 # print("decode_batchsize: ", decode_batchsize)
                 self.clear_batch_size()
                 self.config_batch_size(decode_batch_size)
-                self.nanobatch_split(self.batch_size, decode_batch_size)
+                # self.nanobatch_split(self.batch_size, decode_batch_size)
                 self.update_allocate_buffers()
                 # print("finish update_allocate_buffers")
                 self.config_streams()
@@ -413,18 +422,18 @@ class Pipeline():
                 output.append((req_idx, new_token))
         return output
     
-    def init_profile_data(self):
+    def init_profile_data(self, append_mode=False, only_decode=True):
         profile_dir = f"../profile_data/{self.pipeline_name}"
         for operation in self.operation_list:
-                operation.init_profile(profile_dir)
+                operation.init_profile(profile_dir, append_mode, only_decode)
 
-    def profile_run(self):
+    def profile_run(self, only_decode=False):
         for operation in self.operation_list:
             if operation.batch_size > 0:
                 with prof_marker(f"{operation.name}"):
                     print("Operation name:", operation.name)
-                    operation.profile()
-    
+                    operation.profile(only_decode=only_decode)
+
     def profile_print(self):
         for operation in self.operation_list:
             operation.print_profile()

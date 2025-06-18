@@ -18,6 +18,9 @@ class KVCacheNone():
         self.name = 'No KV Cache'
         self.cache = {}
     
+    def reset(self):
+        self.cache = {}
+
     def put(self, layer, idx, key, value):
         self.cache[(layer, idx)] = (key, value)
 
@@ -136,24 +139,13 @@ class DistKVPool:
         idx = self._free.pop()
         return idx
 
-    def put_for_profile(self, layer: int, batch_size: int, k: torch.Tensor, v: torch.Tensor):
-        needed_pages = (batch_size + self.page_size - 1) // self.page_size
-        last_offset = batch_size % self.page_size
-        k_t = k.transpose(0, 1)
-        v_t = v.transpose(0, 1)
-        assert needed_pages <= self.num_free_pages(layer), "Out of memory"
-        for i in range(needed_pages - 1):
-            idx = self.alloc_page(layer)
-            self.k_data[layer, idx] = k_t[:, i * self.page_size : (i + 1) * self.page_size, :]
-            self.v_data[layer, idx] = v_t[:, i * self.page_size : (i + 1) * self.page_size, :]
-        idx = self.alloc_page(layer)
-        self.k_data[layer, idx, :, :last_offset, :] = k_t[:, (needed_pages - 1) * self.page_size : needed_pages * self.page_size + last_offset, :]
-        self.v_data[layer, idx, :, :last_offset, :] = v_t[:, (needed_pages - 1) * self.page_size : needed_pages * self.page_size + last_offset, :]
-
     def free_page(self,  idx: int):
         # assert 0 <= idx < self._buf[0].size(1), "Invalid page index"
         assert idx not in self._free
         self._free.add(idx)
+    
+    def reset(self):
+        self._free = set(range(self.capacity))
         
 class DistKVCache:
     """
@@ -212,6 +204,14 @@ class BatchedDistKVCache():
 
     def get_pool(self):
         return self._pool
+
+    def reset(self):
+        self.cache = {}
+        self.kv_indptr = torch.tensor([0], dtype=torch.int32, device=self.device)
+        self.kv_indices = torch.tensor([], dtype=torch.int32, device=self.device)
+        self.kv_last_page_len = torch.tensor([], dtype=torch.int32, device=self.device)
+        self.rev_input_indptr = torch.tensor([], dtype=torch.int32, device=self.device)
+        self.per_token_offset = torch.tensor([], dtype=torch.int32, device=self.device)
 
     def pre_allocate(self, idx: int, num_tokens: int):
         if idx not in self.cache:
@@ -281,6 +281,7 @@ class BatchedDistKVCache():
             self.pre_allocate(global_req_idx, 1)
             seq_len = self.get_seqlen(global_req_idx)
             per_token_offset_tensor[temp_idx] = seq_len - 1
+            # print("decode batch, req_idx:", global_req_idx, "seq_len:", seq_len)
 
         for temp_idx in range(decode_batchsize, len(cumsum_input) - 1):
             global_req_idx = input_req_idx[temp_idx]

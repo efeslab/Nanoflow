@@ -30,6 +30,7 @@ Follow these steps to obtain a Gurobi license and configure it so your Docker co
 mkdir -p ~/gurobi/license
 mv /path/to/downloaded/gurobi.lic ~/gurobi/license/
 ls ~/gurobi/license
+echo "export GRB_LICENSE_FILE=$(pwd)/gurobi.lic" >> ~/.bashrc
 ```
 
 ## Install Dependencies

@@ -13,8 +13,8 @@ from transformers import AutoTokenizer
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
-from models.llama3_KVCacheTorch import Pipeline
-# from models.llama3_FlashinferKVCache import Pipeline
+# from models.llama3_KVCacheTorch import Pipeline
+from models.llama3_FlashinferKVCache import Pipeline
 
 arg_parser = argparse.ArgumentParser()
 arg_parser.add_argument("-l", "--load_hf_weight", action="store_true", help="Load weights from huggingface")
@@ -196,27 +196,32 @@ def profile_one_cycle():
 
     # test for decode
     total_batch_sizes = [2, 4, 8, 16, 32, 64, 128, 256, 384]
+    # total_batch_sizes = [384]
     # prepare the decode inputs for a special input_length
     input_length = 1024
+    output_length = 512
     prefill_input_ids = [prefill_context_ids[:input_length] for _ in range(1000)]
-    # initialize the reqs for first 384 requests
-    decode_inputs = []
-
-    pipeline.config_algorithm()
-    for i in range(decode_batch_size):
-        input = [(i, prefill_input_ids[i])]
-        pipeline.update(input)
-        new_tokens = pipeline.run()
-        decode_inputs.extend(new_tokens)
-        print("new_tokens: ", new_tokens)
 
     for total_batch_size in total_batch_sizes:
-        print("total_batch_size: ", total_batch_size)
-        tmp_decode_inputs = decode_inputs[:total_batch_size]
-        pipeline.update(tmp_decode_inputs, total_batch_size)
-        pipeline.profile_run()
+        decode_inputs = []
+        pipeline.reset_kv_cache()
+        # pipeline.config_algorithm()
+        # initialize the reqs for first {total_batch_size} requests
+        for i in range(total_batch_size):
+            input = [(i, prefill_input_ids[i])]
+            pipeline.update(input)
+            new_tokens = pipeline.run()
+            decode_inputs.extend(new_tokens)
+            print("new_tokens: ", new_tokens)
+            print("total_batch_size: ", total_batch_size)
 
-    pipeline.profile_print()
+        # decode profiling from input_length to input_length + output_length
+        for i in range(output_length):
+            print("Cycle: ", i)
+            pipeline.update(decode_inputs, total_batch_size)
+            pipeline.profile_run()
+
+    # pipeline.profile_print()
 
 test_correctness()
 # test_correctness(use_kv_cache=False)

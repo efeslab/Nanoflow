@@ -12,8 +12,8 @@ from core.processWeight import process_weight_none, process_weight_layer
 from operations.gemm.gemm_impls import GEMMTorchImpl, GEMMTritonImpl, GEMMCudaImpl
 
 class GEMM_K_Parallel(Operations):
-    def __init__(self, name, device, bias = False):
-        super().__init__(name, device)
+    def __init__(self, name, device, bias = False, nano_idx=None):
+        super().__init__(name, device, nano_idx)
         if bias:
             self.inputs = {
                 "A": IOWrapper(self, 'A', device).is_input(),
@@ -39,7 +39,7 @@ class GEMM_K_Parallel(Operations):
         self.init_impl_map()
         self.op_layer = GEMM_K_Parallel_Layer
 
-    def setParameter(self, alpha = 1, beta = 0):
+    def setParameter(self, alpha = 1.0, beta = 0.0):
         self.alpha = alpha
         self.beta = beta
         if self.bias == False and self.beta != 0:
@@ -71,7 +71,7 @@ class GEMM_K_Parallel(Operations):
         return self
     
     def copy_nano(self, index):
-        new_op = GEMM_K_Parallel(f"{self.name}{index}", self.device, self.bias)
+        new_op = GEMM_K_Parallel(self.name, self.device, self.bias, nano_idx=index)
         new_op.weights = self.weights
         new_op.expand_layer(self.layer_list)
         new_op.setShape(self.N, self.K, self.tp_idx, self.tp_size).setParameter(self.alpha, self.beta)

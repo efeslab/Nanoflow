@@ -12,8 +12,8 @@ from core.processWeight import process_weight_none, process_weight_layer
 from operations.gemm.gemm_impls import GEMMTorchImpl, GEMMTritonImpl, GEMMCudaImpl
 
 class GEMM_N_Parallel(Operations):
-    def __init__(self, name, device, bias = False):
-        super().__init__(name, device)
+    def __init__(self, name, device, bias = False, nano_idx=None):
+        super().__init__(name, device, nano_idx)
         if bias:
             self.inputs = {
                 "A": IOWrapper(self, 'A', device).is_input(),
@@ -71,7 +71,7 @@ class GEMM_N_Parallel(Operations):
         return self
     
     def copy_nano(self, index):
-        new_op = GEMM_N_Parallel(f"{self.name}{index}", self.device, self.bias)
+        new_op = GEMM_N_Parallel(self.name, self.device, self.bias, nano_idx=index)
         new_op.weights = self.weights
         new_op.expand_layer(self.layer_list)
         new_op.setShape(self.N, self.K, self.tp_idx, self.tp_size).setParameter(self.alpha, self.beta)
@@ -85,7 +85,7 @@ class GEMM_N_Parallel(Operations):
             self.cursor.execute(f'''
             CREATE TABLE IF NOT EXISTS "{impl.category_tag}" (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT, 
-                M INTEGER,
+                batch_size   INTEGER,
                 N INTEGER,
                 K INTEGER,
                 alpha REAL,
@@ -94,7 +94,7 @@ class GEMM_N_Parallel(Operations):
                 average_time_ms REAL,
                 GFLOPS REAL,
                 impl_tag TEXT,
-                UNIQUE (M, impl_tag)
+                UNIQUE (batch_size, impl_tag)
             );
             ''')
 
@@ -103,7 +103,7 @@ class GEMM_N_Parallel(Operations):
         print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {self.batch_size}, Average Time: {average_elapsed_ms} ms")
         GFLOPS = (2 * self.batch_size * self.N * self.K) / average_elapsed_ms / 1e6 # in GigaFLOPS
         self.cursor.execute(f'''
-            INSERT OR IGNORE INTO {category_tag} (M, N, K, alpha, bias, beta, average_time_ms, GFLOPS, impl_tag)
+            INSERT OR IGNORE INTO {category_tag} (batch_size, N, K, alpha, bias, beta, average_time_ms, GFLOPS, impl_tag)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (self.batch_size, self.N, self.K, self.alpha, self.bias, self.beta, average_elapsed_ms, GFLOPS, impl_tag))
 

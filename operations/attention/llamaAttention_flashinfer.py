@@ -112,22 +112,37 @@ class DecAttnFlashinfer(Operations):
             self.cursor.execute(f'''
             CREATE TABLE IF NOT EXISTS "{impl.category_tag}" (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT, 
-                batch_size   INTEGER UNIQUE,
+                batch_size   INTEGER,
+                seq_len INTEGER,
                 head_dim INTEGER,
                 num_qo_heads INTEGER,
                 num_kv_heads INTEGER,
-                average_time_ms REAL
+                average_time_ms REAL,
+                UNIQUE(batch_size, seq_len)
             );
             ''')
         self.k_data_ptr, self.v_data_ptr = self.externals["KVCache"].get_whole_kv_data(self.layer_list[0])
         self.kv_tuple = tuple([self.k_data_ptr, self.v_data_ptr])
 
+    def check_profiled(self, category_tag):
+        self.cursor.execute(f'''
+            SELECT * FROM {category_tag}
+            WHERE batch_size = ? AND seq_len = ?
+        ''', (self.batch_size, self.externals["KVCache"].get_seqlen(0)))
+        row = self.cursor.fetchone()
+        if row is not None:
+            print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {self.batch_size}, Seq Len: {self.externals['KVCache'].get_seqlen(0)} already profiled.")
+            return True
+        return False
+
     def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
         print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {self.batch_size}, Average Time: {average_elapsed_ms} ms")
+        seq_len = self.externals["KVCache"].get_seqlen(0) - 1
+        print(f"seq_len: {seq_len}")
         self.cursor.execute(f'''
-            INSERT OR IGNORE INTO {category_tag} (batch_size, head_dim, num_qo_heads, num_kv_heads, average_time_ms)
-            VALUES (?, ?, ?, ?, ?)
-            ''', (self.batch_size, self.head_dim, self.num_qo_heads, self.num_kv_heads, average_elapsed_ms))
+            INSERT OR IGNORE INTO {category_tag} (batch_size, seq_len, head_dim, num_qo_heads, num_kv_heads, average_time_ms)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ''', (self.batch_size, seq_len, self.head_dim, self.num_qo_heads, self.num_kv_heads, average_elapsed_ms))
 
     def run(self, kv_tuple):
         self.impl.run(self.inputs["Q"].tensor, kv_tuple, self.outputs["output"].tensor)

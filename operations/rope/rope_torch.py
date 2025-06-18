@@ -109,6 +109,7 @@ class RopeAppendTorch(Operations):
         low_freq_factor=1.0,
         high_freq_factor=4.0,
         original_max_position_embeddings=8192,
+        nano_idx=None
     ):
         """
         Args:
@@ -120,7 +121,7 @@ class RopeAppendTorch(Operations):
             high_freq_factor (float): Upper bound frequency factor (llama3).
             original_max_position_embeddings (int): The original maximum context length used in pretraining.
         """
-        super().__init__(name, device)
+        super().__init__(name, device, nano_idx)
         self.inputs = {"kqv": IOWrapper(self, "kqv", device).is_input()}
         self.outputs = {"q": IOWrapper(self, "q", device).is_output()}
         self.externals = {"KVCache": None}
@@ -166,7 +167,7 @@ class RopeAppendTorch(Operations):
             self.input_req_idx = self.externals["KVCache"].input_req_idx[start_req_idx:end_req_idx]
 
     def copy_nano(self, index):
-        new_op = RopeAppendTorch(f"{self.name}{index}", self.device, self.rope_type, self.theta, self.factor, self.low_freq_factor, self.high_freq_factor, self.original_max_position_embeddings)
+        new_op = RopeAppendTorch(self.name, self.device, self.rope_type, self.theta, self.factor, self.low_freq_factor, self.high_freq_factor, self.original_max_position_embeddings, nano_idx=index)
         new_op.externals = self.externals
         new_op.expand_layer(self.layer_list)
         new_op.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim, self.tp_size)
