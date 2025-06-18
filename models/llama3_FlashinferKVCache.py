@@ -1,4 +1,5 @@
 import torch
+from torch.cuda.streams import ExternalStream
 import os
 
 from operations.operation_base import Operations
@@ -18,7 +19,21 @@ from core.executor import Executor
 from core.nanobatchSplit import split_nanobatch
 from utils.prof_marker import prof_marker
 
+import bind_green_ctx
 
+
+def create_greenctx(
+    sm_a: float, sm_b: float, device_id: int
+) -> tuple[ExternalStream, ExternalStream, int, int]:
+    """Create two green context streams based on the specified percentages of sm_a and sm_b."""
+    res = bind_green_ctx.create_greenctx_stream_by_percent(sm_a, sm_b, device_id)
+    stream_a = ExternalStream(
+        stream_ptr=res[0], device=torch.device(f"cuda:{device_id}")
+    )
+    stream_b = ExternalStream(
+        stream_ptr=res[1], device=torch.device(f"cuda:{device_id}")
+    )
+    return stream_a, stream_b, res[2], res[3]
 
 class Pipeline():
     def __init__(self):
@@ -32,10 +47,9 @@ class Pipeline():
         self.hidden_dim = 4096
         self.intermediate_dim = 14 * 1024
         self.batch_size = None
-        self.decode_batch_size = None
         self.num_layers = 32
         self.layer_list = [i for i in range(self.num_layers)]
-        self.page_size = 120
+        self.page_size = 16
         self.device = "cuda:0"
 
     def set_device(self, device):
@@ -50,19 +64,18 @@ class Pipeline():
         self.init_set_weight(weight_path, cached)
 
     def init_streams(self):
-        GEMM_STREAM = torch.cuda.Stream()
-        GEMV_STREAM = torch.cuda.Stream()
-        NETWORK_STREAM = torch.cuda.Stream()
-        OTHER_STREAM = torch.cuda.Stream()
+        gemm_stream_with_pf, pf_stream, gemm_stream_with_pf_sm, pf_stream_sm = create_greenctx(0.85, 0.15, 0)
+        gemm_stream_with_dc, dc_stream, gemm_stream_with_dc_sm, dc_stream_sm = create_greenctx(0.7, 0.3, 0)
         self.streams = {
-            "GEMM": GEMM_STREAM,
-            "GEMV": GEMV_STREAM,
-            "NETWORK": NETWORK_STREAM,
-            "OTHER": OTHER_STREAM
+            "GEMM": (torch.cuda.Stream(), gemm_stream_with_pf_sm + pf_stream_sm),
+            "PF_ATTN": (pf_stream, pf_stream_sm),
+            "DC_ATTN": (dc_stream, dc_stream_sm),
+            "GEMM_WITH_PF": (gemm_stream_with_pf, gemm_stream_with_pf_sm),
+            "GEMM_WITH_DC": (gemm_stream_with_dc, gemm_stream_with_dc_sm),
         }
 
     def init_external_data(self):
-        self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048* 2, self.page_size, 1, self.device)
+        self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048 * 16, self.page_size, 1, self.device)
         self.kv_cache = BatchedDistKVCache(self.kv_pool)
 
     def init_operations(self):
@@ -269,25 +282,23 @@ class Pipeline():
         self.getLogits.config_tag(gemm_tag)
         # self.getLogits.config_tag("cuda:128_256_32_64_64_32_1_3_RowMajor_RowMajor_RowMajor")
 
-
     def config_streams(self):
         self.global_input.set_stream(self.streams["GEMM"])
         self.gen_embedding.set_stream(self.streams["GEMM"])
-        self.layerNormAttn.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
-        self.activation.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
-        self.kqv.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
-        self.ropeAppend.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
-        self.decAttn.set_stream(self.streams["GEMV"])
-        self.pfAttn.set_stream(self.streams["GEMV"])
-        self.layerNormFFN.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
-        self.o.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
-        self.ug.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
-        self.d.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        self.layerNormAttn.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
+        self.kqv.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
+        self.ropeAppend.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
+        self.decAttn.set_stream(self.streams["DC_ATTN"])
+        self.pfAttn.set_stream(self.streams["PF_ATTN"])
+        self.layerNormFFN.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
+        self.o.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
+        self.ug.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
+        self.activation.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
+        self.d.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
         self.modelLayerNorm.set_stream(self.streams["GEMM"])
         self.sample.set_stream(self.streams["GEMM"])
         self.getLogits.set_stream(self.streams["GEMM"])
         self.global_output.set_stream(self.streams["GEMM"])
-
 
     def nanobatch_split(self, total_batchsize, decode_batchsize):
         op_nanobatch_info_map = {

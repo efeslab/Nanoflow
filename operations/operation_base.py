@@ -29,6 +29,7 @@ class Operations():
         self.nano_op_batchsizes = []
         self.isVirtual = False
         self.stream: torch.cuda.Stream
+        self.sm_count: int | None = None
         self.batch_size = None
 
         self.device = device
@@ -117,7 +118,7 @@ class Operations():
         self.init_impl_configs()
 
         self.conn.commit()
-    
+
     def profile_update(self):
         pass
 
@@ -228,7 +229,7 @@ class Operations():
         return tag_list
 
 
-    def set_stream(self, stream: torch.cuda.Stream | list[torch.cuda.Stream]) -> None:
+    def set_stream(self, stream: tuple[torch.cuda.Stream, int | None] | list[tuple[torch.cuda.Stream, int | None]]) -> None:
         if self.isNanoSplit:
             assert isinstance(stream, list), "Stream must be a list of streams"
             for i, nano_op in enumerate(self.nano_ops):
@@ -236,7 +237,8 @@ class Operations():
         else:
             print(f"Setting stream for {self.name} (isNanoSplit: {self.isNanoSplit}) to {stream}")
             assert not isinstance(stream, list), "Stream must be a single stream"
-            self.stream = stream
+            self.stream = stream[0]
+            self.sm_count = stream[1]
 
 
     def append_dependency(self, extra_dep):

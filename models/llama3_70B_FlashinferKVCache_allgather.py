@@ -68,10 +68,10 @@ class Pipeline():
         NETWORK_STREAM = torch.cuda.Stream()
         OTHER_STREAM = torch.cuda.Stream()
         self.streams = {
-            "GEMM": GEMM_STREAM,
-            "GEMV": GEMV_STREAM,
-            "NETWORK": NETWORK_STREAM,
-            "OTHER": OTHER_STREAM
+            "GEMM": (GEMM_STREAM, None),
+            "GEMV": (GEMV_STREAM, None),
+            "NETWORK": (NETWORK_STREAM, None),
+            "OTHER": (OTHER_STREAM, None)
         }
 
     def init_external_data(self):
