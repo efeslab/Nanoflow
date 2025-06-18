@@ -1,4 +1,6 @@
 #include <cuda.h>
+#include <cublas_v2.h>
+#include <ATen/cuda/CUDAContext.h>
 #include <iostream>
 #include <vector>
 
@@ -27,6 +29,16 @@
                 << err_str << std::endl;                                       \
       exit(1);                                                                 \
     }                                                                          \
+  } while (0)
+
+#define CUBLAS_RT(call)                                                                            \
+  do {                                                                                             \
+    cublasStatus_t _status = (call);                                                               \
+    if (_status != CUBLAS_STATUS_SUCCESS) {                                                        \
+      std::cerr << "ERROR: CUBLAS RT call \"" << #call << "\" in line " << __LINE__ << " of file " \
+                << __FILE__ << " failed with " << cublasGetStatusString(_status) << std::endl;     \
+      exit(1);                                                                                     \
+    }                                                                                              \
   } while (0)
 
 #define ASSERT(condition, message)                                             \
@@ -98,7 +110,14 @@ std::vector<int64_t> CreateGreenCtxStreamByPercent(float smA, float smB,
   return vec;
 }
 
+void SetCublasSMCountTarget(int sm_target) {
+  cublasHandle_t handle = at::cuda::getCurrentCUDABlasHandle();
+  CUBLAS_RT(cublasSetSmCountTarget(handle, sm_target));
+}
+
 PYBIND11_MODULE(bind_green_ctx, m) {
   m.def("create_greenctx_stream_by_percent", &CreateGreenCtxStreamByPercent,
-                    "Create stream with green context");
+        "Create stream with green context");
+  m.def("set_cublas_sm_count_target", &SetCublasSMCountTarget,
+        "Set cublas sm count target");
 }
