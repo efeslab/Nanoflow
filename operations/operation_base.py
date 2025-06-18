@@ -38,7 +38,6 @@ class Operations():
         self.isVirtual = False
         self.stream: torch.cuda.Stream
         self.sm_count: int | None = None
-        self.tensor_offset = None
         self.batch_size = None
 
         self.device = device
@@ -316,10 +315,6 @@ class Operation_Layer:
     @property
     def stream(self):
         return self.parent.stream
-
-    @property
-    def tensor_offset(self):
-        return self.parent.tensor_offset
 
     @property
     def batch_size(self):

@@ -154,11 +154,6 @@ class BufferAllocator():
                 for wrapper in wrappers:
                     wrapper.set_whole_buffer(whole_buffer)
                     wrapper.set_tensor_offset(0)
-                    if not wrapper.owner.isVirtual:
-                        if wrapper.owner.tensor_offset is not None:
-                            assert wrapper.owner.tensor_offset == 0, f"{wrapper.owner.name} has already been allocated with offset {wrapper.owner.tensor_offset}"
-                        else:
-                            wrapper.owner.tensor_offset = 0
                     # print(f"set {wrapper.fullName}, offset: 0")
                 continue
 
@@ -220,11 +215,6 @@ class BufferAllocator():
                 for wrapper in wrappers:
                     wrapper.set_whole_buffer(whole_buffer)
                     wrapper.set_tensor_offset(int(variables[wrapper.fullName].X))
-                    if not wrapper.owner.isVirtual:
-                        if wrapper.owner.tensor_offset is not None:
-                            assert wrapper.owner.tensor_offset == int(variables[wrapper.fullName].X), f"{wrapper.owner.name} has already been allocated with offset {wrapper.owner.tensor_offset}"
-                        else:
-                            wrapper.owner.tensor_offset = int(variables[wrapper.fullName].X)
                     # print(f"set {wrapper.fullName}, offset: {int(variables[wrapper.fullName].X)}")
             else:
                 print(f"No optimal solution found for component {comp}.")

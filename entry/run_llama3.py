@@ -37,7 +37,6 @@ input_ids = [tokenizer.encode(s) for s in input_strings]
 
 global_batch_size = 1024
 decode_batch_size = 384
-prefill_batch_size = 640
 
 # new_input_ids = []
 # for req in request_manager.available_request_queue:
