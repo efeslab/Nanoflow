@@ -97,11 +97,11 @@ class Operations():
     def check_profiled(self, category_tag):
         self.cursor.execute(f'''
             SELECT * FROM {category_tag}
-            WHERE batch_size = ?
-        ''', (self.batch_size,))
+            WHERE batch_size = ? AND sm_count = ?
+        ''', (self.batch_size, self.sm_count))
         row = self.cursor.fetchone()
         if row is not None:
-            print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {self.batch_size} already profiled.")
+            print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {self.batch_size}, SM Count: {self.sm_count} already profiled.")
             return True
         return False
 
@@ -406,11 +406,48 @@ class Operation_Layer:
             self.stream.wait_event(event)
 
     # for auto search
-    def initVariables(self, model: gp.Model):
+    def initVariables(self, model: gp.Model, full_sm_count: int):
         self.start_time = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_start")
         self.end_time = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_end")
         # print(f"init_Variables: {self.name}, start_time: {self.start_time}, end_time: {self.end_time}")
-        model.addConstr(self.end_time == self.start_time + self.duration_map[(self.batch_size, 1)], name=f"{self.name}_end_time")
+        model.addConstr(self.end_time == self.start_time + self.duration_map[(self.batch_size, full_sm_count)], name=f"{self.name}_end_time")
+
+    def initVariablesStageTwo(self, model: gp.Model, sm_counts: list[int]):
+        self.start_time = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_start")
+        self.end_time = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_end")
+        self.p_vars: dict[int, gp.Var] = {}  # Variables for p choices
+        self.durations: dict[int, float] = {}  # Duration in units for each p
+        self.p_choice = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_p_choice")
+
+
+        for sm_count in sm_counts:
+            self.p_vars[sm_count] = model.addVar(vtype=GRB.BINARY, name=f"{self.name}_p_{sm_count}")
+            if sm_count == 76:
+                self.p_vars[sm_count].Start = 1  # Force p_56 to be chosen
+            else:
+                self.p_vars[sm_count].Start = 0
+            duration = self.duration_map[(self.batch_size, sm_count)]
+            self.durations[sm_count] = duration
+
+    def addInternalConstraintsStageTwo(self, model: gp.Model):
+        model.addConstr(
+            gp.quicksum(self.p_vars.values()) == 1,
+            name=f"{self.name}_p_choice_sum"
+        )
+
+        model.addConstr(
+            self.end_time == self.start_time + gp.quicksum(
+                self.p_vars[sm_count] * self.durations[sm_count] for sm_count in self.p_vars
+            ),
+            name=f"{self.name}_end_time"
+        )
+        
+        model.addConstr(
+            self.p_choice == gp.quicksum(
+                sm_count * self.p_vars[sm_count] for sm_count in self.p_vars
+            ),
+            name=f"{self.name}_p_choice_value"
+        )
 
     def __str__(self) -> str:
         # Color codes for terminal output

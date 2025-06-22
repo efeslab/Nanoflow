@@ -86,6 +86,7 @@ class GEMM_N_Parallel(Operations):
             CREATE TABLE IF NOT EXISTS "{impl.category_tag}" (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT, 
                 batch_size   INTEGER,
+                sm_count INTEGER,
                 N INTEGER,
                 K INTEGER,
                 alpha REAL,
@@ -94,18 +95,18 @@ class GEMM_N_Parallel(Operations):
                 average_time_ms REAL,
                 GFLOPS REAL,
                 impl_tag TEXT,
-                UNIQUE (batch_size, impl_tag)
+                UNIQUE (batch_size, sm_count, impl_tag)
             );
             ''')
 
     def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
         # Calculate the average time
-        print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {self.batch_size}, Average Time: {average_elapsed_ms} ms")
+        print(f"Name: {self.name}, Category: {category_tag}, impl_tag: {impl_tag}, Batch Size: {self.batch_size}, Average Time: {average_elapsed_ms} ms")
         GFLOPS = (2 * self.batch_size * self.N * self.K) / average_elapsed_ms / 1e6 # in GigaFLOPS
         self.cursor.execute(f'''
-            INSERT OR IGNORE INTO {category_tag} (batch_size, N, K, alpha, bias, beta, average_time_ms, GFLOPS, impl_tag)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (self.batch_size, self.N, self.K, self.alpha, self.bias, self.beta, average_elapsed_ms, GFLOPS, impl_tag))
+            INSERT OR IGNORE INTO {category_tag} (batch_size, sm_count, N, K, alpha, bias, beta, average_time_ms, GFLOPS, impl_tag)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (self.batch_size, self.sm_count, self.N, self.K, self.alpha, self.bias, self.beta, average_elapsed_ms, GFLOPS, impl_tag))
 
     def init_impl_configs(self):
         self.impl_configs_map = {}
@@ -116,6 +117,8 @@ class GEMM_N_Parallel(Operations):
                 names = GetAllH100GemmCanonicalNames()
                 # print(f"GetAllH100GemmCanonicalNames: {names}")
                 self.impl_configs_map[category_tag] = [
+                    # ("SM90_256_128_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", None),
+                    # ("SM90_256_128_64_2_1_1_1_RowMajor_RowMajor_RowMajor_warpspecialized_cooperative_epi_nosmem", None),
                     (name, None) for name in names if "RowMajor_RowMajor_RowMajor" in name
                 ]
             else:

@@ -11,7 +11,7 @@ from utils.util_functions import prepare_weight
 from transformers import AutoTokenizer
 
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "7"
 
 # from models.llama3_KVCacheTorch import Pipeline
 from models.llama3_FlashinferKVCache import Pipeline
@@ -185,40 +185,49 @@ def test_one_cycle():
 def profile_one_cycle():
     pipeline.init_profile_data()
 
-    # test for prefill
-    total_batch_sizes = [2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 640, 768, 896, 1024]
-    for idx, total_batch_size in enumerate(total_batch_sizes):
-        input = [(decode_batch_size + idx, prefill_context_ids[:total_batch_size])]
+    stream_names = [ f"TEST_{i}" for i in range(1, 11) ]
+    for stream_name in stream_names:
+        print(f"Stream: {stream_name}")
 
-        pipeline.update(input)
-        pipeline.profile_run()
+        pipeline.batch_size = None
+        # test for prefill
+        total_batch_sizes = [2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 640, 768, 896, 1024]
+        # total_batch_sizes = [1024]
+        for idx, total_batch_size in enumerate(total_batch_sizes):
+            input = [(decode_batch_size + idx, prefill_context_ids[:total_batch_size])]
 
-    # test for decode
-    total_batch_sizes = [2, 4, 8, 16, 32, 64, 128, 256, 384]
-    # total_batch_sizes = [384]
-    # prepare the decode inputs for a special input_length
-    input_length = 1024
-    output_length = 512
-    prefill_input_ids = [prefill_context_ids[:input_length] for _ in range(1000)]
-
-    for total_batch_size in total_batch_sizes:
-        decode_inputs = []
-        pipeline.reset_kv_cache()
-        # pipeline.config_algorithm()
-        # initialize the reqs for first {total_batch_size} requests
-        for i in range(total_batch_size):
-            input = [(i, prefill_input_ids[i])]
-            pipeline.update(input)
-            new_tokens = pipeline.run()
-            decode_inputs.extend(new_tokens)
-            print("new_tokens: ", new_tokens)
-            print("total_batch_size: ", total_batch_size)
-
-        # decode profiling from input_length to input_length + output_length
-        for i in range(output_length):
-            print("Cycle: ", i)
-            pipeline.update(decode_inputs, total_batch_size)
+            pipeline.update(input, is_profile=True, stream_name=stream_name)
             pipeline.profile_run()
+
+        # test for decode
+        total_batch_sizes = [2, 4, 8, 16, 32, 64, 128, 256, 384]
+        # total_batch_sizes = [384]
+        # prepare the decode inputs for a special input_length
+        input_length = 1024
+        output_length = 512
+        prefill_input_ids = [prefill_context_ids[:input_length] for _ in range(1000)]
+
+        pipeline.batch_size = None
+        for total_batch_size in total_batch_sizes:
+            decode_inputs = []
+            pipeline.reset_kv_cache()
+            # pipeline.config_algorithm()
+            # initialize the reqs for first {total_batch_size} requests
+            for i in range(total_batch_size):
+                input = [(i, prefill_input_ids[i])]
+                pipeline.update(input)
+                new_tokens = pipeline.run()
+                decode_inputs.extend(new_tokens)
+                print("new_tokens: ", new_tokens)
+                print("total_batch_size: ", total_batch_size)
+
+            pipeline.batch_size = None
+            # decode profiling from input_length to input_length + output_length
+            for i in range(output_length + 1):
+                print("Cycle: ", i)
+                pipeline.update(decode_inputs, total_batch_size, is_profile=True, stream_name=stream_name)
+                if i % 128 == 0:
+                    pipeline.profile_run()
 
     # pipeline.profile_print()
 

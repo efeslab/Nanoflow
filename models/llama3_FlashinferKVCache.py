@@ -66,6 +66,18 @@ class Pipeline():
     def init_streams(self):
         gemm_stream_with_pf, pf_stream, gemm_stream_with_pf_sm, pf_stream_sm = create_greenctx(0.85, 0.15, 0)
         gemm_stream_with_dc, dc_stream, gemm_stream_with_dc_sm, dc_stream_sm = create_greenctx(0.7, 0.3, 0)
+
+        # Create green context streams for testing
+        test_stream_01, test_stream_09, test_stream_01_sm, test_stream_09_sm = create_greenctx(0.1, 0.9, 0)
+        test_stream_02, test_stream_08, test_stream_02_sm, test_stream_08_sm = create_greenctx(0.2, 0.8, 0)
+        test_stream_03, test_stream_07, test_stream_03_sm, test_stream_07_sm = create_greenctx(0.3, 0.7, 0)
+        test_stream_04, test_stream_06, test_stream_04_sm, test_stream_06_sm = create_greenctx(0.4, 0.6, 0)
+        test_stream_05, _, test_stream_05_sm, _ = create_greenctx(0.5, 0.5, 0)
+
+        print("test_stream_01_sm:", test_stream_01_sm, "test_stream_09_sm:", test_stream_09_sm)
+        test_9, test_1, test_9_sm, test_1_sm = create_greenctx(0.9, 0.1, 0)
+        print("test_9_sm:", test_9_sm, "test_1_sm:", test_1_sm)
+
         self.streams = {
             "GEMM": (torch.cuda.Stream(), gemm_stream_with_pf_sm + pf_stream_sm),
             "PF_ATTN": (pf_stream, pf_stream_sm),
@@ -73,6 +85,24 @@ class Pipeline():
             "GEMM_WITH_PF": (gemm_stream_with_pf, gemm_stream_with_pf_sm),
             "GEMM_WITH_DC": (gemm_stream_with_dc, gemm_stream_with_dc_sm),
         }
+
+        self.profile_streams = {
+            "TEST_1": (test_stream_01, test_stream_01_sm),
+            "TEST_2": (test_stream_02, test_stream_02_sm),
+            "TEST_3": (test_stream_03, test_stream_03_sm),
+            "TEST_4": (test_stream_04, test_stream_04_sm),
+            "TEST_5": (test_stream_05, test_stream_05_sm),
+            "TEST_6": (test_stream_06, test_stream_06_sm),
+            "TEST_7": (test_stream_07, test_stream_07_sm),
+            "TEST_8": (test_stream_08, test_stream_08_sm),
+            "TEST_9": (test_stream_09, test_stream_09_sm),
+            "TEST_10": (torch.cuda.Stream(), gemm_stream_with_pf_sm + pf_stream_sm)
+        }
+        self.sm_counts = [test_stream_01_sm, test_stream_02_sm, test_stream_03_sm, test_stream_04_sm, test_stream_05_sm,
+                    test_stream_06_sm, test_stream_07_sm, test_stream_08_sm, test_stream_09_sm,
+                    gemm_stream_with_pf_sm + pf_stream_sm]
+
+
 
     def init_external_data(self, for_test=False):
         if for_test:
@@ -304,6 +334,30 @@ class Pipeline():
         self.getLogits.set_stream(self.streams["GEMM"])
         self.global_output.set_stream(self.streams["GEMM"])
 
+        # self.global_input.set_stream(self.streams["GEMM"])
+        # self.gen_embedding.set_stream(self.streams["GEMM"])
+        # self.layerNormAttn.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        # self.kqv.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        # self.ropeAppend.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        # self.decAttn.set_stream(self.streams["DC_ATTN"])
+        # self.pfAttn.set_stream(self.streams["DC_ATTN"])
+        # self.layerNormFFN.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        # self.o.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        # self.ug.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        # self.activation.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        # self.d.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        # self.modelLayerNorm.set_stream(self.streams["GEMM"])
+        # self.sample.set_stream(self.streams["GEMM"])
+        # self.getLogits.set_stream(self.streams["GEMM"])
+        # self.global_output.set_stream(self.streams["GEMM"])
+
+        # for operation in self.operation_list:
+        #     operation.set_stream(self.streams["GEMM"])
+    
+    def profile_config_streams(self, stream_tuple):
+        for operation in self.operation_list:
+            operation.set_stream(stream_tuple)
+
     def nanobatch_split(self, total_batchsize, decode_batchsize):
         op_nanobatch_info_map = {
             "LayerNormAttn": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
@@ -334,7 +388,7 @@ class Pipeline():
         for operation in new_operation_list:
             self.op_layers.extend(operation.children)
     
-    def update(self, new_input_infos, decode_batch_size=0):
+    def update(self, new_input_infos, decode_batch_size=0, is_profile=False, stream_name:str="GEMM"):
         self.input_req_idx = []
         self.input_ids = []
         with prof_marker("update_step_0"):
@@ -356,7 +410,10 @@ class Pipeline():
                 self.nanobatch_split(self.batch_size, decode_batch_size)
                 self.update_allocate_buffers()
                 # print("finish update_allocate_buffers")
-                self.config_streams()
+                if is_profile:
+                    self.profile_config_streams(self.profile_streams[stream_name])
+                else:
+                    self.config_streams()
                 self.config_algorithm()
                 self.init_executor()
         with prof_marker("update_step_3"):

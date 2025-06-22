@@ -71,7 +71,8 @@ class LayerNorm(Operations):
             self.cursor.execute(f'''
             CREATE TABLE IF NOT EXISTS "{impl.category_tag}" (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                batch_size   INTEGER UNIQUE,
+                batch_size   INTEGER,
+                sm_count INTEGER,
                 hidden_dim INTEGER,
                 average_time_ms REAL
             );
@@ -80,9 +81,9 @@ class LayerNorm(Operations):
     def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
         print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {self.batch_size}, Average Time: {average_elapsed_ms} ms")
         self.cursor.execute(f'''
-            INSERT OR IGNORE INTO {category_tag} (batch_size, hidden_dim, average_time_ms)
-            VALUES (?, ?, ?)
-            ''', (self.batch_size, self.hidden_dim, average_elapsed_ms))
+            INSERT OR IGNORE INTO {category_tag} (batch_size, sm_count, hidden_dim, average_time_ms)
+            VALUES (?, ?, ?, ?)
+            ''', (self.batch_size, self.sm_count, self.hidden_dim, average_elapsed_ms))
 
     def run(self, layer):
         self.impl.run(self.inputs["input"].tensor, self.weights["weight"].weight_map[layer], self.outputs["output"].tensor, epsilon = 1e-5)

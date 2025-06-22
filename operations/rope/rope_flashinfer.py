@@ -127,7 +127,8 @@ class RopeAppendFlashinfer(Operations):
             self.cursor.execute(f'''
             CREATE TABLE IF NOT EXISTS "{impl.category_tag}" (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT, 
-                batch_size   INTEGER UNIQUE,
+                batch_size   INTEGER,
+                sm_count INTEGER,
                 head_dim INTEGER,
                 num_qo_heads INTEGER,
                 num_kv_heads INTEGER,
@@ -139,9 +140,9 @@ class RopeAppendFlashinfer(Operations):
     def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
         print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {self.batch_size}, Average Time: {average_elapsed_ms} ms")
         self.cursor.execute(f'''
-            INSERT OR IGNORE INTO {category_tag} (batch_size, head_dim, num_qo_heads, num_kv_heads, average_time_ms)
-            VALUES (?, ?, ?, ?, ?)
-            ''', (self.batch_size, self.head_dim, self.num_qo_heads, self.num_kv_heads, average_elapsed_ms))
+            INSERT OR IGNORE INTO {category_tag} (batch_size, sm_count, head_dim, num_qo_heads, num_kv_heads, average_time_ms)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ''', (self.batch_size, self.sm_count, self.head_dim, self.num_qo_heads, self.num_kv_heads, average_elapsed_ms))
 
     def run(self, k_ptr, v_ptr):
         self.impl.run(self.inputs["kqv"].tensor, k_ptr, v_ptr, self.outputs["q"].tensor)

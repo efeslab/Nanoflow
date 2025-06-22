@@ -52,7 +52,8 @@ class Sampling(Operations):
             self.cursor.execute(f'''
             CREATE TABLE IF NOT EXISTS "{impl.category_tag}" (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT, 
-                batch_size   INTEGER UNIQUE,
+                batch_size   INTEGER,
+                sm_count INTEGER,
                 vocab_size INTEGER,
                 average_time_ms REAL
             );
@@ -61,9 +62,9 @@ class Sampling(Operations):
     def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
         print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {self.batch_size}, Average Time: {average_elapsed_ms} ms")
         self.cursor.execute(f'''
-            INSERT OR IGNORE INTO {category_tag} (batch_size, vocab_size, average_time_ms)
-            VALUES (?, ?, ?)
-            ''', (self.batch_size, self.vocab_size, average_elapsed_ms))
+            INSERT OR IGNORE INTO {category_tag} (batch_size, sm_count, vocab_size, average_time_ms)
+            VALUES (?, ?, ?, ?)
+            ''', (self.batch_size, self.sm_count, self.vocab_size, average_elapsed_ms))
 
     def run(self):
         self.impl.run(self.inputs["logits"].tensor, self.outputs["tokens"].tensor)
