@@ -49,6 +49,7 @@ pipeline.nanobatch_split(global_batch_size, decode_batch_size)
 pipeline.update_allocate_buffers()
 
 # set streams
+pipeline.config_category()
 pipeline.config_streams()
 
 
@@ -115,7 +116,7 @@ for layer_op in all_layered_ops:
 sequence_nano = {}
 category_nano_op_map: dict[str, list[Operation_Layer]] = defaultdict(list)
 for layer_op in all_layered_ops:
-    category_nano_op_map[str(layer_op.stream.cuda_stream)].append(layer_op)
+    category_nano_op_map[layer_op.category].append(layer_op)
 
 for nano_ops in category_nano_op_map.values():
     for op_1, op_2 in itertools.combinations(nano_ops, 2):
@@ -190,7 +191,7 @@ from matplotlib import pyplot as plt
 # and each NanoOperation has the required attributes.
 
 # Extract unique operation types
-operation_types = sorted(set(n.stream.cuda_stream for n in all_layered_ops))
+operation_types = sorted(set(n.category for n in all_layered_ops))
 y_positions = {op_type: i for i, op_type in enumerate(operation_types)}
 
 fig, ax = plt.subplots(figsize=(30, 6))
@@ -201,7 +202,7 @@ for n in all_layered_ops:
     start_time = n.start_time.X
     duration = n.duration_map[(n.batch_size, full_sm_counts)]  # Assuming duration is stored in a map with batch size as key
     batch_size = n.batch_size
-    op_type = n.stream.cuda_stream 
+    op_type = n.category
 
     y_position = y_positions[op_type]
     
@@ -298,7 +299,7 @@ for layer_op in second_stage_nano_ops:
 # Create sequantial constraints for the second stage
 category_nano_op_map_stage_two: dict[str, list[Operation_Layer]] = defaultdict(list)
 for layer_op in second_stage_nano_ops:
-    category_nano_op_map_stage_two[str(layer_op.stream.cuda_stream)].append(layer_op)
+    category_nano_op_map_stage_two[layer_op.category].append(layer_op)
 
 # prepare overlapping constraints
 M = 10
@@ -373,7 +374,7 @@ second_stage_model.optimize()
 # and each NanoOperation has the required attributes.
 
 # Extract unique operation types
-operation_types = sorted(set(n.stream.cuda_stream for n in all_layered_ops))
+operation_types = sorted(set(n.category for n in all_layered_ops))
 y_positions = {op_type: i for i, op_type in enumerate(operation_types)}
 
 fig, ax = plt.subplots(figsize=(30, 6))
@@ -384,7 +385,7 @@ for n in second_stage_nano_ops:
     start_time = n.start_time.X
     duration = n.duration_map[(n.batch_size, n.p_choice.X)]  # Assuming duration is stored in a map with batch size as key
     batch_size = n.batch_size
-    op_type = n.stream.cuda_stream 
+    op_type = n.category
 
     y_position = y_positions[op_type]
     
@@ -406,6 +407,8 @@ ax.grid(True, linestyle="--", alpha=0.6)
 plt.tight_layout()
 plt.savefig("nano_operations_timeline_second_stage.png")
 
+output_op_infos: dict[str, dict] = {}
+
 for op in second_stage_nano_ops:
     p_value = op.p_choice.X
     duration = 0.0
@@ -413,8 +416,35 @@ for op in second_stage_nano_ops:
         duration += op.duration_map[(op.batch_size, sm_count)] * op.p_vars[sm_count].X
     start_time = op.start_time.X
     finish_time = op.end_time.X
+    str_extra_dep = [(elem0.name, elem1, elem2) for elem0, elem1, elem2 in op.parent.extra_dep]
+    output_op_infos[op.name] = {
+        "batch_size": op.batch_size,
+        "start_time": start_time,
+        "finish_time": finish_time,
+        "p_value": p_value,
+        "duration": duration,
+        "extra_dep": str_extra_dep,
+    }
 
     print(f'{op.name} starts {start_time:.3f} end {start_time + duration:.3f} p {p_value}, duration {duration}')
+
+output_overlap_map: defaultdict[str, dict[str, int]] = defaultdict(dict)
+
+for (op1_name, op2_name), is_overlap in is_overlapping.items():
+    if is_overlap.X > 0.5:  # If the operations overlap
+        output_overlap_map[op1_name][op2_name] = 1
+    else:
+        output_overlap_map[op1_name][op2_name] = 0
+
+import json
+# Save the output to a JSON file
+output_data = {
+    "operations": output_op_infos,
+    "overlaps": output_overlap_map
+}
+with open("search_result.json", "w") as f:
+    json.dump(output_data, f, indent=4)
+
 
 print("delta_maps of LayerNormAttn0_0 and PFAttn_0:", delta_maps.get(("LayerNormAttn0_0", "PFAttn_0"), None))
 print(is_overlapping.get(("LayerNormAttn0_0", "PFAttn_0"), None))

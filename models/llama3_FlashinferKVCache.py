@@ -67,6 +67,58 @@ class Pipeline():
         gemm_stream_with_pf, pf_stream, gemm_stream_with_pf_sm, pf_stream_sm = create_greenctx(0.85, 0.15, 0)
         gemm_stream_with_dc, dc_stream, gemm_stream_with_dc_sm, dc_stream_sm = create_greenctx(0.7, 0.3, 0)
 
+        # Create green context streams for GEMV streams
+        GEMV_stream_01, GEMV_stream_09, GEMV_stream_01_sm, GEMV_stream_09_sm = create_greenctx(0.1, 0.9, 0)
+        GEMV_stream_02, GEMV_stream_08, GEMV_stream_02_sm, GEMV_stream_08_sm = create_greenctx(0.2, 0.8, 0)
+        GEMV_stream_03, GEMV_stream_07, GEMV_stream_03_sm, GEMV_stream_07_sm = create_greenctx(0.3, 0.7, 0)
+        GEMV_stream_04, GEMV_stream_06, GEMV_stream_04_sm, GEMV_stream_06_sm = create_greenctx(0.4, 0.6, 0)
+        GEMV_stream_05_0, GEMV_stream_05_1, GEMV_stream_05_0_sm, GEMV_stream_05_1_sm = create_greenctx(0.5, 0.5, 0)
+        GEMV_stream_10 = torch.cuda.Stream()
+        full_sm = GEMV_stream_01_sm + GEMV_stream_09_sm
+
+        # Create green context streams for GEMM streams
+        GEMM_stream_01, GEMM_stream_09, GEMM_stream_01_sm, GEMM_stream_09_sm = create_greenctx(0.1, 0.9, 0)
+        GEMM_stream_02, GEMM_stream_08, GEMM_stream_02_sm, GEMM_stream_08_sm = create_greenctx(0.2, 0.8, 0)
+        GEMM_stream_03, GEMM_stream_07, GEMM_stream_03_sm, GEMM_stream_07_sm = create_greenctx(0.3, 0.7, 0)
+        GEMM_stream_04, GEMM_stream_06, GEMM_stream_04_sm, GEMM_stream_06_sm = create_greenctx(0.4, 0.6, 0)
+        GEMM_stream_05_0, GEMM_stream_05_1, GEMM_stream_05_0_sm, GEMM_stream_05_1_sm = create_greenctx(0.5, 0.5, 0)
+        GEMM_stream_10 = torch.cuda.Stream()
+
+
+        self.streams = {
+            "GEMM_Test": (torch.cuda.Stream(), gemm_stream_with_pf_sm + pf_stream_sm),
+            "PF_ATTN": (pf_stream, pf_stream_sm),
+            "DC_ATTN": (dc_stream, dc_stream_sm),
+            "GEMM_WITH_PF": (gemm_stream_with_pf, gemm_stream_with_pf_sm),
+            "GEMM_WITH_DC": (gemm_stream_with_dc, gemm_stream_with_dc_sm),
+            "GEMV": {
+                GEMV_stream_01_sm: (GEMV_stream_01, GEMV_stream_01_sm),
+                GEMV_stream_02_sm: (GEMV_stream_02, GEMV_stream_02_sm),
+                GEMV_stream_03_sm: (GEMV_stream_03, GEMV_stream_03_sm),
+                GEMV_stream_04_sm: (GEMV_stream_04, GEMV_stream_04_sm),
+                GEMV_stream_05_0_sm: (GEMV_stream_05_0, GEMV_stream_05_0_sm),
+                GEMV_stream_05_1_sm: (GEMV_stream_05_1, GEMV_stream_05_1_sm),
+                GEMV_stream_06_sm: (GEMV_stream_06, GEMV_stream_06_sm),
+                GEMV_stream_07_sm: (GEMV_stream_07, GEMV_stream_07_sm),
+                GEMV_stream_08_sm: (GEMV_stream_08, GEMV_stream_08_sm),
+                GEMV_stream_09_sm: (GEMV_stream_09, GEMV_stream_09_sm),
+                full_sm: (GEMV_stream_10, full_sm)
+            },
+            "GEMM": {
+                GEMM_stream_01_sm: (GEMM_stream_01, GEMM_stream_01_sm),
+                GEMM_stream_02_sm: (GEMM_stream_02, GEMM_stream_02_sm),
+                GEMM_stream_03_sm: (GEMM_stream_03, GEMM_stream_03_sm),
+                GEMM_stream_04_sm: (GEMM_stream_04, GEMM_stream_04_sm),
+                GEMM_stream_05_0_sm: (GEMM_stream_05_0, GEMM_stream_05_0_sm),
+                GEMM_stream_05_1_sm: (GEMM_stream_05_1, GEMM_stream_05_1_sm),
+                GEMM_stream_06_sm: (GEMM_stream_06, GEMM_stream_06_sm),
+                GEMM_stream_07_sm: (GEMM_stream_07, GEMM_stream_07_sm),
+                GEMM_stream_08_sm: (GEMM_stream_08, GEMM_stream_08_sm),
+                GEMM_stream_09_sm: (GEMM_stream_09, GEMM_stream_09_sm),
+                full_sm: (GEMM_stream_10, full_sm)
+            }
+        }
+
         # Create green context streams for testing
         test_stream_01, test_stream_09, test_stream_01_sm, test_stream_09_sm = create_greenctx(0.1, 0.9, 0)
         test_stream_02, test_stream_08, test_stream_02_sm, test_stream_08_sm = create_greenctx(0.2, 0.8, 0)
@@ -77,14 +129,6 @@ class Pipeline():
         print("test_stream_01_sm:", test_stream_01_sm, "test_stream_09_sm:", test_stream_09_sm)
         test_9, test_1, test_9_sm, test_1_sm = create_greenctx(0.9, 0.1, 0)
         print("test_9_sm:", test_9_sm, "test_1_sm:", test_1_sm)
-
-        self.streams = {
-            "GEMM": (torch.cuda.Stream(), gemm_stream_with_pf_sm + pf_stream_sm),
-            "PF_ATTN": (pf_stream, pf_stream_sm),
-            "DC_ATTN": (dc_stream, dc_stream_sm),
-            "GEMM_WITH_PF": (gemm_stream_with_pf, gemm_stream_with_pf_sm),
-            "GEMM_WITH_DC": (gemm_stream_with_dc, gemm_stream_with_dc_sm),
-        }
 
         self.profile_streams = {
             "TEST_1": (test_stream_01, test_stream_01_sm),
@@ -316,43 +360,60 @@ class Pipeline():
         self.sample.config_tag("cuda")
         self.getLogits.config_tag(gemm_tag)
 
-    def config_streams(self):
-        self.global_input.set_stream(self.streams["GEMM"])
-        self.gen_embedding.set_stream(self.streams["GEMM"])
-        self.layerNormAttn.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
-        self.kqv.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
-        self.ropeAppend.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
-        self.decAttn.set_stream(self.streams["DC_ATTN"])
-        self.pfAttn.set_stream(self.streams["PF_ATTN"])
-        self.layerNormFFN.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
-        self.o.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
-        self.ug.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
-        self.activation.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
-        self.d.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
-        self.modelLayerNorm.set_stream(self.streams["GEMM"])
-        self.sample.set_stream(self.streams["GEMM"])
-        self.getLogits.set_stream(self.streams["GEMM"])
-        self.global_output.set_stream(self.streams["GEMM"])
+    def config_category(self):
+        self.global_input.set_category("GEMM")
+        self.gen_embedding.set_category("GEMM")
+        self.layerNormAttn.set_category("GEMM")
+        self.kqv.set_category("GEMM")
+        self.ropeAppend.set_category("GEMM")
+        self.decAttn.set_category("GEMV")
+        self.pfAttn.set_category("GEMV")
+        self.layerNormFFN.set_category("GEMM")
+        self.o.set_category("GEMM")
+        self.ug.set_category("GEMM")
+        self.activation.set_category("GEMM")
+        self.d.set_category("GEMM")
+        self.modelLayerNorm.set_category("GEMM")
+        self.sample.set_category("GEMM")
+        self.getLogits.set_category("GEMM")
 
+    def config_streams(self):
         # self.global_input.set_stream(self.streams["GEMM"])
         # self.gen_embedding.set_stream(self.streams["GEMM"])
-        # self.layerNormAttn.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
-        # self.kqv.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
-        # self.ropeAppend.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        # self.layerNormAttn.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
+        # self.kqv.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
+        # self.ropeAppend.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
         # self.decAttn.set_stream(self.streams["DC_ATTN"])
-        # self.pfAttn.set_stream(self.streams["DC_ATTN"])
-        # self.layerNormFFN.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
-        # self.o.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
-        # self.ug.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
-        # self.activation.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
-        # self.d.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        # self.pfAttn.set_stream(self.streams["PF_ATTN"])
+        # self.layerNormFFN.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
+        # self.o.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
+        # self.ug.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
+        # self.activation.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
+        # self.d.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
         # self.modelLayerNorm.set_stream(self.streams["GEMM"])
         # self.sample.set_stream(self.streams["GEMM"])
         # self.getLogits.set_stream(self.streams["GEMM"])
         # self.global_output.set_stream(self.streams["GEMM"])
 
+        self.global_input.set_stream(self.streams["GEMM_Test"])
+        self.gen_embedding.set_stream(self.streams["GEMM_Test"])
+        self.layerNormAttn.set_stream([self.streams["GEMM_Test"], self.streams["GEMM_Test"]])
+        self.kqv.set_stream([self.streams["GEMM_Test"], self.streams["GEMM_Test"]])
+        self.ropeAppend.set_stream([self.streams["GEMM_Test"], self.streams["GEMM_Test"]])
+        self.decAttn.set_stream(self.streams["DC_ATTN"])
+        self.pfAttn.set_stream(self.streams["DC_ATTN"])
+        self.layerNormFFN.set_stream([self.streams["GEMM_Test"], self.streams["GEMM_Test"]])
+        self.o.set_stream([self.streams["GEMM_Test"], self.streams["GEMM_Test"]])
+        self.ug.set_stream([self.streams["GEMM_Test"], self.streams["GEMM_Test"]])
+        self.activation.set_stream([self.streams["GEMM_Test"], self.streams["GEMM_Test"]])
+        self.d.set_stream([self.streams["GEMM_Test"], self.streams["GEMM_Test"]])
+        self.modelLayerNorm.set_stream(self.streams["GEMM_Test"])
+        self.sample.set_stream(self.streams["GEMM_Test"])
+        self.getLogits.set_stream(self.streams["GEMM_Test"])
+        self.global_output.set_stream(self.streams["GEMM_Test"])
+
         # for operation in self.operation_list:
-        #     operation.set_stream(self.streams["GEMM"])
+        #     operation.set_stream(self.streams["GEMM_Test"])
     
     def profile_config_streams(self, stream_tuple):
         for operation in self.operation_list:
@@ -388,7 +449,7 @@ class Pipeline():
         for operation in new_operation_list:
             self.op_layers.extend(operation.children)
     
-    def update(self, new_input_infos, decode_batch_size=0, is_profile=False, stream_name:str="GEMM"):
+    def update(self, new_input_infos, decode_batch_size=0, is_profile=False, stream_name:str="GEMM_Test"):
         self.input_req_idx = []
         self.input_ids = []
         with prof_marker("update_step_0"):
@@ -407,7 +468,7 @@ class Pipeline():
                 # print("decode_batchsize: ", decode_batchsize)
                 self.clear_batch_size()
                 self.config_batch_size(decode_batch_size)
-                self.nanobatch_split(self.batch_size, decode_batch_size)
+                # self.nanobatch_split(self.batch_size, decode_batch_size)
                 self.update_allocate_buffers()
                 # print("finish update_allocate_buffers")
                 if is_profile:

@@ -31,6 +31,7 @@ class Operations():
         self.last_layer_only = False
         self.weight_name = None
         self.tag = "torch"
+        self.category = None
         self.children = []
         self.isNanoSplit = False
         self.nano_ops = []
@@ -250,6 +251,13 @@ class Operations():
         return tag_list
 
 
+    def set_category(self, category: str) -> None:
+        if self.isNanoSplit:
+            for i, nano_op in enumerate(self.nano_ops):
+                nano_op.set_category(category)
+        else:
+            self.category = category
+
     def set_stream(self, stream: tuple[torch.cuda.Stream, int | None] | list[tuple[torch.cuda.Stream, int | None]]) -> None:
         if self.isNanoSplit:
             assert isinstance(stream, list), "Stream must be a list of streams"
@@ -313,6 +321,10 @@ class Operation_Layer:
         return self.parent.impl
 
     @property
+    def category(self):
+        return self.parent.category
+
+    @property
     def stream(self):
         return self.parent.stream
 
@@ -365,12 +377,6 @@ class Operation_Layer:
                         depend_on_next.append(next_layer or dep_wrapper.prev_depend_on_next_layer[idx])
                 elif dep_wrapper.is_output_wrapper:
                     for idx, input_wrapper in enumerate(dep_wrapper.owner.inputs.values()):
-                        # if "Rope" in self.name: 
-                        #     print("input_wrapper.name: ", input_wrapper.name)
-                        #     print("input_wrapper.tensor_offset: ", input_wrapper.tensor_offset)
-                        #     print("input_wrapper.batch_size: ", input_wrapper.batch_size)
-                        #     print("dep_wrapper.tensor_offset: ", dep_wrapper.tensor_offset)
-                        #     print("dep_wrapper.batch_size: ", dep_wrapper.batch_size)
                         if input_wrapper.is_intersect(dep_wrapper):
                             # if "Rope" in self.name: 
                             #     print("added")
@@ -378,6 +384,8 @@ class Operation_Layer:
                             depend_on_prev.append(prev_layer)
                             depend_on_next.append(next_layer)
         # print("prerequisites: ", self.name, "dep: ", [dep[0].name for dep in dep])
+        # unique dep
+        dep = list(set(dep))
         return dep
     
     def reset_op_cuda_status(self):
