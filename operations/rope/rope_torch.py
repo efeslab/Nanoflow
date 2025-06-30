@@ -3,13 +3,13 @@ import torch
 import time
 
 import platform_config
-from operations.rope.help_functions import apply_rope # type: ignore[import]
-from operations.operation_base import Operations, Operation_Device, Operation_Layer
+from operations.rope.help_functions import apply_rope
+from operations.operation_base import Operations, Operation_Layer
 from core.IOWrapper import IOWrapper
 from operations.impl_base import OperationImpl
 from kvcache.kv import KVCacheNone, KVCacheTorch, DistKVPool, BatchedDistKVCache
 from utils.prof_marker import prof_marker
-from utils.help_functions import tensor_offset_to_req_idx
+from utils.util_functions import tensor_offset_to_req_idx
 
 
 def _apply_rotary_emb_torch(
@@ -27,8 +27,8 @@ def _apply_rotary_emb_torch(
 
 class RopeAppendTorchImpl(OperationImpl):
     category_tag = "torch"
-    def __init__(self, op_base, stream, device_id):
-        super().__init__(op_base, stream, device_id)
+    def __init__(self, op_base, stream, device):
+        super().__init__(op_base, stream, device)
         self.rope_type = op_base.rope_type
         if self.rope_type == "llama3":
             self.base = 500000.0
@@ -38,8 +38,8 @@ class RopeAppendTorchImpl(OperationImpl):
         self.low_freq_factor = op_base.low_freq_factor
         self.high_freq_factor = op_base.high_freq_factor
         self.factor = op_base.factor
-        self.num_kv_heads = op_base.num_kv_heads
-        self.num_qo_heads = op_base.num_qo_heads
+        self.num_kv_heads = op_base.num_kv_heads // op_base.tp_size
+        self.num_qo_heads = op_base.num_qo_heads // op_base.tp_size
         self.head_dim = op_base.head_dim
     
     def config(self, impl_tag, parameter_map):
@@ -50,7 +50,7 @@ class RopeAppendTorchImpl(OperationImpl):
         else:
             raise ValueError(f"Unknown impl_tag: {impl_tag}")
     
-    def run(self, layer, kqv, KVCache, output, offset=0):
+    def run(self, layer, kqv, KVCache, output):
         with torch.cuda.stream(self.stream):
             # Determine the number of elements for each slice.
             layout_strides = [
@@ -114,12 +114,14 @@ class RopeAppendTorch(Operations):
     def __init__(
         self,
         name,
+        device,
         rope_type="llama3",
         theta=10000.0,
         factor=8.0,
         low_freq_factor=1.0,
         high_freq_factor=4.0,
         original_max_position_embeddings=8192,
+        nano_idx=None
     ):
         """
         Args:
@@ -131,9 +133,9 @@ class RopeAppendTorch(Operations):
             high_freq_factor (float): Upper bound frequency factor (llama3).
             original_max_position_embeddings (int): The original maximum context length used in pretraining.
         """
-        super().__init__(name)
-        self.inputs = {"kqv": IOWrapper(self, "kqv")}
-        self.outputs = {"q": IOWrapper(self, "q")}
+        super().__init__(name, device, nano_idx)
+        self.inputs = {"kqv": IOWrapper(self, "kqv", device).is_input()}
+        self.outputs = {"q": IOWrapper(self, "q", device).is_output()}
         self.externals = {"KVCache": None}
         
         # Save RoPE configuration.
@@ -146,39 +148,71 @@ class RopeAppendTorch(Operations):
 
         self.impl_map = {}
         self.init_impl_map()
-        self.op_device = RopeAppendTorch_Device
+        self.op_layer = RopeAppendTorch_Layer
 
     def init_impl_map(self):
         self.add_impl(RopeAppendTorchImpl)
 
     def setShape(self, num_kv_heads, num_qo_heads, head_dim, tp_size=1):
-        self.num_kv_heads = num_kv_heads // tp_size
-        self.num_qo_heads = num_qo_heads // tp_size
+        self.num_kv_heads = num_kv_heads
+        self.num_qo_heads = num_qo_heads
         self.head_dim = head_dim
-        self.updateChildrenIOShape()
+        self.tp_size = tp_size
+        self.inputs["kqv"].init_shape((
+            0,
+            (self.num_qo_heads + 2 * self.num_kv_heads) * self.head_dim // self.tp_size,
+        ))
+        # The output "q" has shape [batch_size, num_qo_heads * head_dim]
+        self.outputs["q"].init_shape((0, self.num_qo_heads * self.head_dim // self.tp_size))
 
-    def update(self, qo_indicies, decode_batchsize, device_id):
+    def update(self, qo_indicies, decode_batchsize):
         if self.isNanoSplit:
             for nano_op in self.nano_ops:
-                nano_op.update(qo_indicies, decode_batchsize, device_id)
+                nano_op.update(qo_indicies, decode_batchsize)
         else:
             """Stores the starting indices for the query/key segments."""
-            io_device = self.children[device_id].inputs["kqv"]
-            start_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset)
-            end_req_idx = tensor_offset_to_req_idx(qo_indicies, io_device.tensor_offset + io_device.batch_size)
+            io = self.inputs["kqv"]
+            start_req_idx = tensor_offset_to_req_idx(qo_indicies, io.tensor_offset)
+            end_req_idx = tensor_offset_to_req_idx(qo_indicies, io.tensor_offset + io.batch_size)
 
-            self.qo_indicies = torch.tensor(qo_indicies[start_req_idx:end_req_idx + 1]) - io_device.tensor_offset
+            self.qo_indicies = torch.tensor(qo_indicies[start_req_idx:end_req_idx + 1]) - io.tensor_offset
             self.input_req_idx = self.externals["KVCache"].input_req_idx[start_req_idx:end_req_idx]
 
     def copy_nano(self, index):
-        new_op = RopeAppendTorch(f"{self.name}{index}", self.rope_type, self.theta, self.factor, self.low_freq_factor, self.high_freq_factor, self.original_max_position_embeddings)
+        new_op = RopeAppendTorch(self.name, self.device, self.rope_type, self.theta, self.factor, self.low_freq_factor, self.high_freq_factor, self.original_max_position_embeddings, nano_idx=index)
         new_op.externals = self.externals
-        new_op.expand_all_gpu_and_layers(len(self.device_list), 32)
-        new_op.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim)
-        new_op.set_stream(self.stream)
+        new_op.expand_layer(self.layer_list)
+        new_op.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim, self.tp_size)
         self.nano_ops.append(new_op)
 
         return new_op
+
+    def init_profile_database(self):
+        for _, impl in self.impl_map.items():
+            self.cursor.execute(f'''
+            CREATE TABLE IF NOT EXISTS "{impl.category_tag}" (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT, 
+                batch_size   INTEGER,
+                head_dim INTEGER,
+                num_qo_heads INTEGER,
+                num_kv_heads INTEGER,
+                use_kv_cache Boolean,
+                average_time_ms REAL
+            );
+            ''')
+    
+    def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
+        print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {self.batch_size}, Average Time: {average_elapsed_ms} ms")
+        self.cursor.execute(f'''
+            INSERT INTO {category_tag} (batch_size, head_dim, num_qo_heads, num_kv_heads, use_kv_cache, average_time_ms)
+            VALUES (?, ?, ?, ?)
+            ''', (self.batch_size, self.head_dim, self.num_qo_heads, self.num_kv_heads, impl_tag == "withKVCache", average_elapsed_ms))
+
+    def run(self, layer):
+        self.impl.run(layer, self.inputs["kqv"].tensor, self.externals["KVCache"], self.outputs["q"].tensor)
+
+    def profile_run(self):
+        self.run(self.layer_list[0])
 
     def profile(self):
         input_kqv = torch.randn(2, (self.num_qo_heads + 2 * self.num_kv_heads) * self.head_dim, dtype=torch.float16, device='cuda')
@@ -192,11 +226,6 @@ class RopeAppendTorch(Operations):
                 output_list.append(out)
 
                 impl().run(0, self.head_dim, self.num_qo_heads, self.num_kv_heads, torch.tensor([0, 2], dtype=torch.int32).cuda(), input_kqv, [KVCacheTorch()], self.rope_type, self.theta, self.original_max_position_embeddings, self.low_freq_factor, self.high_freq_factor, self.factor, out, False)
-
-            elif category_tag == "cuda":
-                kv_pool = DistKVPool(1, self.num_kv_heads, self.head_dim, 2048, 7, 1)
-                batchde_kv = BatchedDistKVCache(kv_pool, 0)
-                impl().run(0, self.head_dim, self.num_qo_heads, self.num_kv_heads, torch.tensor([0, 2], dtype=torch.int32).cuda(), input_kqv, [batchde_kv], self.rope_type, self.theta, self.original_max_position_embeddings, self.low_freq_factor, self.high_freq_factor, self.factor, out, False)
 
             # print("out:", out)
             output_list.append(out)
@@ -240,26 +269,12 @@ class RopeAppendTorch(Operations):
                     VALUES (?, ?, ?)
                     ''', (self.name + f"_{category_tag}" + f"with_{kv_caches[0].name}", batch_size, average_time))
         self.conn.commit()
-    
-class RopeAppendTorch_Device(Operation_Device):
-    def __init__(self, parent, device):
-        super().__init__(parent, device)
-        self.op_layer = RopeAppendTorch_Layer
-
-    def setShapeForIOWrappers(self):
-        # The input tensor "kqv" is assumed to have a flattened layout:
-        # [batch_size, (num_qo_heads + 2 * num_kv_heads) * head_dim]
-        self.inputs["kqv"].init_shape((
-            0,
-            (self.parent.num_qo_heads + 2 * self.parent.num_kv_heads) * self.parent.head_dim,
-        ))
-        # The output "q" has shape [batch_size, num_qo_heads * head_dim]
-        self.outputs["q"].init_shape((0, self.parent.num_qo_heads * self.parent.head_dim))
+        
 
 class RopeAppendTorch_Layer(Operation_Layer):
-    def __init__(self, layer, op_device):
-        super().__init__(layer, op_device)
+    def __init__(self, layer, base_op):
+        super().__init__(layer, base_op)
 
     def run(self):
-        self.impl.run(self.layer, self.inputs["kqv"].tensor, self.externals["KVCache"], self.outputs["q"].tensor, offset=0)
+        self.parent.run(self.layer)
         

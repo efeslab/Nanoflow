@@ -43,3 +43,5 @@ Anaconda3-20*
 *.gz
 **/build/*
 cached_weights
+gurobi.lic
+profile_data

@@ -5,6 +5,7 @@ from operations.virtualOp.virtual_ops import Redist
 def split_nanobatch(op_list: List[Operations], op_nano_info_map, extra_links):
     nano_op_list = []
     additional_virtual_ops = []
+    device = op_list[0].device
     for op in op_list:
         if op.name not in op_nano_info_map:
             nano_op_list.append(op)
@@ -19,26 +20,23 @@ def split_nanobatch(op_list: List[Operations], op_nano_info_map, extra_links):
         redists_in = []
         redists_out = []
         for key, value in op.inputs.items():
-            op_redist = Redist(f"Nano_Dist_{op.name}_{key}", 1, num_nano_op)
+            op_redist = Redist(f"Nano_Dist_{op.name}_{key}", device, 1, num_nano_op)
             op_redist.clear_inputs_and_outputs_links()
             op_redist.set_input(value)
-            op_redist.expand_gpu(len(op.device_list))
             redists_in.append(op_redist)
             additional_virtual_ops.append(op_redist)
 
         for key, value in op.outputs.items():
             # print(f"Nano_Dist_{op.name}_{key}")
-            op_redist = Redist(f"Nano_Dist_{op.name}_{key}", num_nano_op, 1)
+            op_redist = Redist(f"Nano_Dist_{op.name}_{key}", device, num_nano_op, 1)
             op_redist.clear_inputs_and_outputs_links()
             op_redist.set_output(value)
-            op_redist.expand_gpu(len(op.device_list))
             redists_out.append(op_redist)
             additional_virtual_ops.append(op_redist)
 
         for i in range(num_nano_op):
             copied_op = op.copy_nano(i)
-            for child in copied_op.children:
-                child.setBatchSize(batch_range[i])
+            copied_op.setBatchSize(batch_range[i])
 
             for j, (key, value) in enumerate(copied_op.inputs.items()):
                 redists_in[j].outputs[f"output_{i}"] >> value

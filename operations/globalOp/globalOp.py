@@ -1,70 +1,76 @@
 import torch
 from transformers import AutoTokenizer
-from operations.operation_base import Operations, Operation_Device, Operation_Layer
+from operations.operation_base import Operations, Operation_Layer
 from core.IOWrapper import IOWrapper
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none, process_weight_layer
 
 class GlobalInput(Operations):
-    def __init__(self, name):
-        super().__init__(name)
+    def __init__(self, name, device):
+        super().__init__(name, device)
         self.inputs = {
             # "new_token": IOWrapper(self, 'new_token', dtype=torch.int32)
         }
         self.outputs = {
-            "tokens": IOWrapper(self, 'tokens', dtype=torch.int32)
+            "tokens": IOWrapper(self, 'tokens', device, dtype=torch.int32).is_output()
         }
-        self.op_device = GlobalInput_Device
+        self.op_layer = GlobalInput_Layer
     
-    def profile(self):
+    def setShape(self):
+        self.outputs["tokens"].init_shape((0,))
+
+    def init_profile_database(self):
         pass
 
+    def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
+        pass
 
-class GlobalInput_Device(Operation_Device):
-    def __init__(self, parent, device):
-        super().__init__(parent, device) 
-        self.op_layer = GlobalInput_Layer
-
-    def setShapeForIOWrappers(self):
-        self.outputs["tokens"].init_shape((0,))
-        # self.outputs["tokens"].tensor[:self.batch_size].copy_(torch.tensor([0] * self.batch_size, dtype=torch.int32))
-
-class GlobalInput_Layer(Operation_Layer):
-    def __init__(self, layer, op_device):
-        super().__init__(layer=layer, op_device=op_device)
-    
     def run(self):
         pass
+
+    def profile_run(self):
+        pass
+
+class GlobalInput_Layer(Operation_Layer):
+    def __init__(self, layer, base_op):
+        super().__init__(layer, base_op)
+    
+    def run(self):
+        self.parent.run()
     
 
 class GlobalOutput(Operations):
-    def __init__(self, name):
-        super().__init__(name)
+    def __init__(self, name, device):
+        super().__init__(name, device)
         self.inputs = {
-            "tokens": IOWrapper(self, 'tokens', dtype=torch.int32)
+            "tokens": IOWrapper(self, 'tokens', device, dtype=torch.int32).is_input(),
         }
         self.outputs = {
-            "new_token": IOWrapper(self, 'new_token', dtype=torch.int32)
+            "new_token": IOWrapper(self, 'new_token', device, dtype=torch.int32).is_output()
         }
-        self.model_name = "meta-llama/Meta-Llama-3-8B-Instruct"
-        self.op_device = GlobalOutput_Device
-
-    def profile(self):
-        pass
-
-class GlobalOutput_Device(Operation_Device):
-    def __init__(self, parent, device):
-        super().__init__(parent, device)      
         self.op_layer = GlobalOutput_Layer
 
-    def setShapeForIOWrappers(self):
+    def setShape(self):
         self.inputs["tokens"].init_shape((0,))
         self.outputs["new_token"].init_shape((0,))
 
-class GlobalOutput_Layer(Operation_Layer):
-    def __init__(self, layer, op_device):
-        super().__init__(layer=layer, op_device=op_device)
+    def init_profile_database(self):
+        pass
+
+    def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
+        pass
 
     def run(self):
         pass
+
+    def profile_run(self):
+        pass
+        
+
+class GlobalOutput_Layer(Operation_Layer):
+    def __init__(self, layer, base_op):
+        super().__init__(layer, base_op)
+
+    def run(self):
+        self.parent.run()
     

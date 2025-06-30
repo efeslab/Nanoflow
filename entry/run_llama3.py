@@ -7,7 +7,9 @@ sys.path.append('../pybind/build')
 
 from utils.prof_marker import prof_marker
 from utils.frontend import requestManager
+from utils.util_functions import prepare_weight
 from transformers import AutoTokenizer
+from input_test import prefill_context
 
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 # os.environ["CUDA_VISIBLE_DEVICES"] = "7"
@@ -17,7 +19,10 @@ from models.llama3_KVCacheFA import Pipeline
 
 arg_parser = argparse.ArgumentParser()
 arg_parser.add_argument("-l", "--load_hf_weight", action="store_true", help="Load weights from huggingface")
+arg_parser = argparse.ArgumentParser()
+arg_parser.add_argument("-l", "--load_hf_weight", action="store_true", help="Load weights from huggingface")
 
+args = arg_parser.parse_args()
 args = arg_parser.parse_args()
 
 tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
@@ -54,6 +59,12 @@ prefill_context_ids = tokenizer.encode(prefill_context * 10) # which length is 1
 # weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
 # weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
 weight_map_amd_kan = "/app/models/llama3-8b"
+if args.load_hf_weight:
+    pipeline_dict = {
+        "cuda:0" : Pipeline()
+    }
+    prepare_weight(pipeline_dict, weight_map_amd_kan)
+
 pipeline = Pipeline()
 if args.load_hf_weight:
     pipeline_dict = {
@@ -69,6 +80,8 @@ pipeline.init(weight_map_amd_kan, cached=True)
 # print(f"Reserved memory: {reserved_memory / 1024 / 1024} MB")
 # pipeline.config()
 def test_performance():
+    input_length = 1024
+    prefill_input_ids = [prefill_context_ids[:input_length] for _ in range(1000)]
     input_length = 1024
     prefill_input_ids = [prefill_context_ids[:input_length] for _ in range(1000)]
     output_strings = {}
@@ -88,27 +101,24 @@ def test_performance():
     decode_inputs.extend([(decode_batch_size, prefill_input_ids[decode_batch_size])])
     pipeline.update(decode_inputs, decode_batch_size)
 
-    with torch.profiler.profile(
-        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
-    ) as prof:
-        for i in range(decode_batch_size, decode_batch_size + 5):
-            print("Cycle: ", i - decode_batch_size)
-            next_prefill_idx = i + 1
-            new_tokens = pipeline.run()
-            with prof_marker(f"after_execute_step_4"):
-                for req_idx, new_token in new_tokens:
-                    output_strings[req_idx].extend(new_token)
-            # print("new_tokens: ", new_tokens)
-            with prof_marker(f"after_execute_step_5"):
-                new_tokens = new_tokens[:-1]
-                decode_batchsize = len(new_tokens)
-                assert decode_batchsize == decode_batch_size
-            with prof_marker(f"after_execute_step_6"):
-                output_strings[next_prefill_idx] = prefill_input_ids[next_prefill_idx]
-            with prof_marker(f"after_execute_step_7"):
-                new_tokens.extend([(next_prefill_idx, prefill_input_ids[next_prefill_idx])])
-            with prof_marker(f"after_execute_step_8"):
-                pipeline.update(new_tokens, decode_batchsize)
+    for i in range(decode_batch_size, decode_batch_size + 50):
+        print("Cycle: ", i - decode_batch_size)
+        next_prefill_idx = i + 1
+        new_tokens = pipeline.run()
+        with prof_marker(f"after_execute_step_4"):
+            for req_idx, new_token in new_tokens:
+                output_strings[req_idx].extend(new_token)
+        # print("new_tokens: ", new_tokens)
+        with prof_marker(f"after_execute_step_5"):
+            new_tokens = new_tokens[:-1]
+            decode_batchsize = len(new_tokens)
+            assert decode_batchsize == decode_batch_size
+        with prof_marker(f"after_execute_step_6"):
+            output_strings[next_prefill_idx] = prefill_input_ids[next_prefill_idx]
+        with prof_marker(f"after_execute_step_7"):
+            new_tokens.extend([(next_prefill_idx, prefill_input_ids[next_prefill_idx])])
+        with prof_marker(f"after_execute_step_8"):
+            pipeline.update(new_tokens, decode_batchsize)
 
     output_text = tokenizer.batch_decode(list(output_strings.values())[:1], skip_special_tokens=True)
     print(output_text)
@@ -184,8 +194,56 @@ def test_one_cycle():
     output_text = tokenizer.batch_decode(list(output_strings.values()), skip_special_tokens=True)
     print(output_text)
 
+def profile_one_cycle():
+    pipeline.init_profile_data()
 
-# test_correctness()
+    stream_names = [ f"TEST_{i}" for i in range(1, 11) ]
+    for stream_name in stream_names:
+        print(f"Stream: {stream_name}")
+
+        pipeline.batch_size = None
+        # test for prefill
+        total_batch_sizes = [2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 640, 768, 896, 1024]
+        # total_batch_sizes = [1024]
+        for idx, total_batch_size in enumerate(total_batch_sizes):
+            input = [(decode_batch_size + idx, prefill_context_ids[:total_batch_size])]
+
+            pipeline.update(input, is_profile=True, stream_name=stream_name)
+            pipeline.profile_run()
+
+        # test for decode
+        total_batch_sizes = [2, 4, 8, 16, 32, 64, 128, 256, 384]
+        # total_batch_sizes = [384]
+        # prepare the decode inputs for a special input_length
+        input_length = 1024
+        output_length = 512
+        prefill_input_ids = [prefill_context_ids[:input_length] for _ in range(1000)]
+
+        pipeline.batch_size = None
+        for total_batch_size in total_batch_sizes:
+            decode_inputs = []
+            pipeline.reset_kv_cache()
+            # pipeline.config_algorithm()
+            # initialize the reqs for first {total_batch_size} requests
+            for i in range(total_batch_size):
+                input = [(i, prefill_input_ids[i])]
+                pipeline.update(input)
+                new_tokens = pipeline.run()
+                decode_inputs.extend(new_tokens)
+                print("new_tokens: ", new_tokens)
+                print("total_batch_size: ", total_batch_size)
+
+            pipeline.batch_size = None
+            # decode profiling from input_length to input_length + output_length
+            for i in range(output_length + 1):
+                print("Cycle: ", i)
+                pipeline.update(decode_inputs, total_batch_size, is_profile=True, stream_name=stream_name)
+                if i % 128 == 0:
+                    pipeline.profile_run()
+
+    # pipeline.profile_print()
+
+test_correctness()
 # test_correctness(use_kv_cache=False)
 test_performance()
 # test_one_cycle()

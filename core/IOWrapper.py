@@ -1,13 +1,11 @@
-from enum import Enum
-import numpy as np
 import torch
-from collections import defaultdict
 
 # To Do: delete the attributes that related to tensor that should not belong to a base IOWrapper anymore
 class IOWrapper:
-    def __init__(self, owner, name, dtype=torch.float16):
+    def __init__(self, owner, name: str, device: str, dtype: torch.dtype = torch.float16):
         self.owner = owner  # owner is now an Operations object or similar
         self.name = name
+        self.device = device
         self.prev = []
         self.next = []
         self.prev_depend_on_prev_layer = []
@@ -16,11 +14,16 @@ class IOWrapper:
         self.nano_dist_next = []
         self.nano_dist_prev_depend_on_prev_layer = []
         self.nano_dist_prev_depend_on_next_layer = []
-        self.shape = None # shape [0] is non-contiguous dimension, shape [1] is contiguous dimension
+
         self.ptr = 0
         self.transform = None
         self.dtype = dtype
-        self.children = []  # [IOWrapper_Device]
+        self.tensor_shape = None # shape [0] is non-contiguous dimension, shape [1] is contiguous dimension
+        self.batch_size = None
+        self.tensor_offset = 0
+        self.whole_buffer: torch.Tensor
+        self.is_input_wrapper = None
+        self.is_output_wrapper = None
     
     @property
     def fullName(self):
@@ -35,11 +38,6 @@ class IOWrapper:
         # check dtype must be the same
         if self.dtype != next_wrapper.dtype:
             raise Exception(f"Error: {self.fullName} and {next_wrapper.fullName} has different dtype")
-        
-        return next_wrapper
-    
-    def append_child(self, child_wrapper):
-        self.children.append(child_wrapper)
 
     def __rshift__(self, next_wrapper):
         depend_on_prev = False
@@ -50,27 +48,12 @@ class IOWrapper:
             elif len(next_wrapper) == 3:
                 next_wrapper, depend_on_prev, depend_on_next = next_wrapper
         # print("IOWrapper __rshift__", depend_on_prev)
-        return self.chain(next_wrapper, depend_on_prev, depend_on_next)
+        self.chain(next_wrapper, depend_on_prev, depend_on_next)
     
     def toStr(self):
         # name, prev = [], next = []
         return f"{self.fullName}, prev = {[p.fullName for p in self.prev]}, next = {[n.fullName for n in self.next]}"
-    
 
-class IOWrapper_Device:
-    def __init__(self, owner, name, device_id, dtype=torch.float16, base_wrapper=None):
-        self.owner = owner  # owner is now an Operations object or similar
-        self.name = name
-        self.device_id = device_id
-        self.dtype = dtype
-        self.base_wrapper = base_wrapper
-        self.tensor_shape = None # shape [0] is non-contiguous dimension, shape [1] is contiguous dimension
-        self.batch_size = None
-        self.tensor_offset = 0
-        self.whole_buffer: torch.Tensor = None  
-        self.is_input_wrapper = False
-        self.is_output_wrapper = False
-    
     def set_whole_buffer(self, buffer):
         self.whole_buffer = buffer
 
@@ -88,7 +71,7 @@ class IOWrapper_Device:
         self.is_output_wrapper = True
         return self
     
-    def is_intersect(self, other: "IOWrapper_Device"):
+    def is_intersect(self, other: "IOWrapper"):
         if not torch.equal(self.whole_buffer, other.whole_buffer):
             return False
         if self.batch_size == 0 or other.batch_size == 0:
@@ -108,29 +91,24 @@ class IOWrapper_Device:
         return self.whole_buffer[self.tensor_offset : self.tensor_offset + self.batch_size]
 
     @property
-    def fullName(self):
-        owner_name = self.owner.name if hasattr(self.owner, "name") else str(self.owner)
-        return f"{owner_name}_{self.name}"
-
-    @property
-    def next(self):
+    def actual_next(self):
         # print("base_wrapper.name", self.base_wrapper.name)
         # print("base_wrapper.owner.name", self.base_wrapper.owner.name)
         # for io_base in self.base_wrapper.next + self.base_wrapper.nano_dist_next:
         #     print("io_base.owner.name", io_base.owner.name)
         #     print("io_base.fullName", io_base.fullName)
         #     print("io_base.children", io_base.children)
-        return [io_base.children[self.device_id] for io_base in self.base_wrapper.next] + [io_base.children[self.device_id] for io_base in self.base_wrapper.nano_dist_next]
+        return [io for io in self.next + self.nano_dist_next]
     
     @property
-    def prev(self):
+    def actual_prev(self):
         
-        return [io_base.children[self.device_id] for io_base in self.base_wrapper.prev] + [io_base.children[self.device_id] for io_base in self.base_wrapper.nano_dist_prev]
+        return [io for io in self.prev + self.nano_dist_prev]
     
     @property
-    def prev_depend_on_prev_layer(self):
-        return self.base_wrapper.prev_depend_on_prev_layer + self.base_wrapper.nano_dist_prev_depend_on_prev_layer
+    def actual_prev_depend_on_prev_layer(self):
+        return self.prev_depend_on_prev_layer + self.nano_dist_prev_depend_on_prev_layer
 
     @property
-    def prev_depend_on_next_layer(self):
-        return self.base_wrapper.prev_depend_on_next_layer + self.base_wrapper.nano_dist_prev_depend_on_next_layer
+    def actual_prev_depend_on_next_layer(self):
+        return self.prev_depend_on_next_layer + self.nano_dist_prev_depend_on_next_layer

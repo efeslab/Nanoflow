@@ -1,59 +1,57 @@
-from unicodedata import category
+import os
+from typing import Type
 from operations.impl_base import OperationImpl
 import torch
 import sqlite3
-from abc import ABC, abstractmethod
+from core.IOWrapper import IOWrapper
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none
-from core.IOWrapper import IOWrapper_Device
+from utils.prof_marker import prof_marker
 
-class Operations:
-    def __init__(self, name):
+import gurobipy as gp
+from gurobipy import GRB
+
+class Operations():
+    def __init__(self, name: str, device: str, nano_idx=None):
         # should be initialized in the device class
-        self.inputs = {}
-        self.outputs = {}
-        self.weights = {}
+        self.inputs: dict[str, IOWrapper] = {}
+        self.outputs: dict[str, IOWrapper] = {}
+        self.weights: dict[str, WeightWrapper] = {}
         self.externals = {}
-        self.impl:OperationImpl = None
+        self.impl: OperationImpl
 
         # remain in this class
-        self.name = name
+        if nano_idx is not None:
+            self.name = f"{name}{nano_idx}"
+            self.original_name = name
+        else:
+            self.name = name
+            self.original_name = name
         self.first_layer_only = False
         self.last_layer_only = False
         self.weight_name = None
         self.tag = "torch"
+        self.category = None
         self.children = []
         self.isNanoSplit = False
         self.nano_ops = []
         self.nano_op_batchsizes = []
         self.isVirtual = False
-        self.stream = None
+        self.stream: torch.cuda.Stream
+        self.sm_count: int | None = None
+        self.batch_size = None
 
-        # Connect to the database
-        # self.conn = sqlite3.connect('performance.db')
-        # self.cursor = self.conn.cursor()
-        # # Create a table to store performance data if it doesn't exist
-        # # self.cursor.execute('''
-        # #     CREATE TABLE IF NOT EXISTS performance (
-        # #         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        # #         keyword TEXT,
-        # #         batch_size INTEGER,
-        # #         average_time REAL
-        # #     )
-        # # ''')
-        # self.conn.commit()
-        self.impl_map = {}
-        self.op_device = None
+        self.device = device
+        self.extra_dep = []
+
+        self.impl_map: dict[str, Type[OperationImpl]] = {}
+        self.op_layer: Type[Operation_Layer]
         
     def init_impl_map(self):
         self.impl_map = {} 
     
-    def add_impl(self, impl):
-        # if impl is not a list, convert it to a list
-        if not isinstance(impl, list):
-            impl = [impl]
-        for i in impl:
-            self.impl_map[i.category_tag] = i
+    def add_impl(self, impl: Type[OperationImpl]):
+        self.impl_map[impl.category_tag] = impl
         
     def print_available_impl(self):
         print(self.impl_map.keys())
@@ -63,6 +61,7 @@ class Operations:
             raise Exception("No implementation found")
         for i in range(len(outputs)):
             for j in range(i + 1, len(outputs)):
+                print(f"Checking consistency between outputs {i} and {j} for operation {self.name}")
                 close_elements = torch.isclose(outputs[i], outputs[j], rtol=1e-01, atol=1e-03)
                 assert torch.all(close_elements), f"Outputs from different implementations are not close: {outputs[i]} and {outputs[j]}"
 
@@ -75,15 +74,11 @@ class Operations:
         self.weight_name = name
         return self
 
-    def setShape(self):
-        self.updateChildrenIOShape()
-    
-    def updateChildrenIOShape(self):
-        for op_device in self.children:
-            op_device.setShapeForIOWrappers()
+    def setShape(self, *args, **kwargs):
+        return None
 
-    def processWeight(self, global_weight_map, weight_path, cached = False):
-        return process_weight_none(global_weight_map, self.weight_name, None, self.device_list, self.layer_list, weight_path, cached)
+    def processWeight(self, global_weight_map, weight_path, cached, device):
+        return process_weight_none(global_weight_map, self.weight_name, None, self.layer_list, weight_path, cached, device)
     
     def first_only(self):
         self.first_layer_only = True
@@ -93,24 +88,140 @@ class Operations:
         self.last_layer_only = True
         return self
     
-    def search_profile_data(self):
-        self.cursor.execute('''
-            SELECT * FROM performance
-        ''')
-        rows = self.cursor.fetchall()
-        for row in rows:
-            print(row)
+    def init_profile_database(self):
+        """
+        Initialize the database for profiling results.
+        This method should create the necessary tables and prepare the database for storing profiling data.
+        """
+        raise NotImplementedError("This method should be implemented in the subclass.")
+
+    def check_profiled(self, category_tag):
+        self.cursor.execute(f'''
+            SELECT * FROM {category_tag}
+            WHERE batch_size = ? AND sm_count = ?
+        ''', (self.batch_size, self.sm_count))
+        row = self.cursor.fetchone()
+        if row is not None:
+            print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {self.batch_size}, SM Count: {self.sm_count} already profiled.")
+            return True
+        return False
+
+    def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
+        """
+        Store the profiling results in the database.
+        This method should insert the profiling data into the appropriate tables.
+        """
+        raise NotImplementedError("This method should be implemented in the subclass.")
+
+    def init_impl_configs(self):
+        self.impl_configs_map = {}
+        for _, impl in self.impl_map.items():
+            category_tag = impl.category_tag
+            self.impl_configs_map[category_tag] = [
+                (None, None)
+            ]
+
+    def init_profile(self, profile_dir, append_mode):
+        if not os.path.exists(profile_dir):
+            os.makedirs(profile_dir)
+        
+        self.conn = sqlite3.connect(os.path.join(profile_dir, f"{self.name}.db"))
+        self.cursor = self.conn.cursor()
+        if not append_mode:
+            for _, impl in self.impl_map.items():
+                self.cursor.execute(f'''
+                    DROP TABLE IF EXISTS "{impl.category_tag}";
+                ''')
+
+        self.init_profile_database()
+        self.init_impl_configs()
+
+        self.conn.commit()
+
+    def profile_update(self):
+        pass
+
+    def profile_run(self):
+        pass
+
+    def profile(self):
+        with prof_marker(f"batchsize:{self.batch_size}"):
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+
+            g = torch.cuda.CUDAGraph()
+            # test_output_list = []
+            for _, impl in self.impl_map.items():
+                self.impl = impl(self, self.stream, self.device)
+                category_tag = impl.category_tag
+                is_profiled = self.check_profiled(category_tag)
+                if is_profiled:
+                    # If already profiled, we can skip profiling
+                    continue
+                # loop in the impl configs
+                for impl_tag, para_map in self.impl_configs_map[category_tag]:
+                    self.impl.config(impl_tag, para_map)
+                    self.profile_update()
+                    g.reset()
+                    # warm up for 10 cycles.
+                    for _ in range(10):
+                        self.profile_run()
+
+                    # profile for 100 cycles.
+                    rounds = 100
+                    with torch.cuda.graph(g, stream=self.stream):
+                        for round in range(rounds):
+                            self.profile_run()
+
+                    start.record(self.stream)
+                    with torch.cuda.stream(self.stream):
+                        g.replay()
+                    end.record(self.stream)
+                    torch.cuda.synchronize()
+                    elapsed_ms = start.elapsed_time(end)
+                    average_elapsed_ms = elapsed_ms / rounds
+                    # Store to database
+                    self.store_profile_database(category_tag, impl_tag, average_elapsed_ms)
+                    # test_output_list.append(self.outputs["output"].tensor)
+            self.conn.commit()
+            # self.checkConsistencyBetweenImpl(test_output_list)
+
+    def print_profile(self):
+        if not hasattr(self, 'cursor'):
+            print(f"Profiling has not been run yet for operation {self.name}. Please call profile() first.")
+            return
+        # assert hasattr(self, 'cursor'), "Profiling has not been run yet. Please call profile() first."
+        # print the profiling results
+        print(f"Profiling results for operation {self.name}:")
+        for _, impl in self.impl_map.items():
+            category_tag = impl.category_tag
+            # if category_tag not in self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table';").fetchall():
+            if not self.cursor.execute(f'''
+                SELECT name FROM sqlite_master WHERE type='table' AND name="{category_tag}";
+            ''').fetchone():
+                print(f"No profiling results found for category: {category_tag}")
+                continue
+            self.cursor.execute(f'''
+                SELECT * FROM {category_tag}
+            ''')
+            cols = [col_desc[0] for col_desc in self.cursor.description]
+            rows = self.cursor.fetchall()
+            print(f"Profiling results for {category_tag}:")
+            print(" | ".join(cols))            # header line
+            for row in rows:
+                print(" | ".join(str(val) for val in row))
+        # self.conn.close()
             
-    def config_tag(self, tag, device_id, parameter_map = {}):
+    def config_tag(self, tag, parameter_map = {}):
         if self.isNanoSplit:
-            for nano_op in self.nano_ops:
-                nano_op.config_tag(tag, device_id, parameter_map)
+            assert len(tag) == len(self.nano_ops), f"Operation {self.name} has {len(self.nano_ops)} nano ops, but {len(tag)} tags were provided."
+            for i, nano_op in enumerate(self.nano_ops):
+                nano_op.config_tag(tag[i], parameter_map)
             return self
         else:
             self.tag = tag
-            self.device_id = device_id
             self.parameter_map = parameter_map
-            parts = tag.split(":", 1)
+            parts = self.tag.split(":", 1)
             category_tag = ""
             impl_tag = ""
             if len(parts) == 1:
@@ -118,8 +229,8 @@ class Operations:
             else:
                 category_tag = parts[0]
                 impl_tag = parts[1]
-            # self.impl  = self.impl_map[category_tag](self.inputs, self.outputs, self.weights, device_id)
-            self.impl  = self.impl_map[category_tag](self, self.stream, device_id)
+            # self.impl  = self.impl_map[category_tag](self.inputs, self.outputs, self.weights, device)
+            self.impl  = self.impl_map[category_tag](self, self.stream, self.device)
             self.config_impl(impl_tag, parameter_map)
             # print("name: ", self.name, "category_tag: ", category_tag, "impl_tag: ", impl_tag, "impl: ", self.impl)
             return self
@@ -138,135 +249,92 @@ class Operations:
                 else:
                     tag_list.append(category_tag)
         return tag_list
-    
-    def set_stream(self, stream):
-        self.stream = stream
+
+
+    def set_category(self, category: str) -> None:
+        if self.isNanoSplit:
+            for i, nano_op in enumerate(self.nano_ops):
+                nano_op.set_category(category)
+        else:
+            self.category = category
+
+    def set_stream(self, stream: tuple[torch.cuda.Stream, int | None] | list[tuple[torch.cuda.Stream, int | None]]) -> None:
+        if self.isNanoSplit:
+            assert isinstance(stream, list), "Stream must be a list of streams"
+            for i, nano_op in enumerate(self.nano_ops):
+                nano_op.set_stream(stream[i])
+        else:
+            print(f"Setting stream for {self.name} (isNanoSplit: {self.isNanoSplit}) to {stream}")
+            assert not isinstance(stream, list), "Stream must be a single stream"
+            self.stream = stream[0]
+            self.sm_count = stream[1]
+
 
     def append_dependency(self, extra_dep):
-        for idx, child in enumerate(self.children):
-            child.append_dependency((extra_dep[0].children[idx], extra_dep[1], extra_dep[2]))
-
-    def __str__(self):
-        return self.name   
-    
-    def expand_gpu(self, num_devices):
-        for device_id in range(num_devices):
-            op_device = self.op_device(self, device_id)
-            self.children.append(op_device)
-        
-        return self.children
-    
-    def expand_all_gpu_and_layers(self, num_devices, num_layers):
-        self.device_list = list(range(num_devices))
-        if self.first_layer_only:
-            self.layer_list = [0]
-        elif self.last_layer_only:
-            self.layer_list = [num_layers - 1]
-        else:
-            self.layer_list = list(range(num_layers))
-        self.op_layers_per_device = []
-        for device_id in range(num_devices):
-            op_device = self.op_device(self, device_id)
-
-            self.op_layers_per_device.append(op_device.expand_layer(self.layer_list))
-            self.children.append(op_device)
-        
-        return self.children, self.op_layers_per_device
-    
-class Operation_Device:
-    def __init__(self, parent, device_id):
-        self.name = parent.name
-        self.parent = parent
-        self.device_id = device_id
-        self.weights = parent.weights
-        self.externals = self.parent.externals
-        self.extra_dep = []
-        self.children = []
-        self.batch_size = None
-        self.inputs = {}
-        for key, base_wrapper in parent.inputs.items():
-            dev_wrapper = IOWrapper_Device(
-                owner=self,
-                name=base_wrapper.name,
-                device_id=device_id,
-                dtype=base_wrapper.dtype,
-                base_wrapper=base_wrapper
-            ).is_input()
-            base_wrapper.append_child(dev_wrapper)
-            self.inputs[key] = dev_wrapper
-
-        self.outputs = {}
-        for key, base_wrapper in parent.outputs.items():
-            dev_wrapper = IOWrapper_Device(
-                owner=self,
-                name=base_wrapper.name,
-                device_id=device_id,
-                dtype=base_wrapper.dtype,
-                base_wrapper=base_wrapper
-            ).is_output()
-            base_wrapper.append_child(dev_wrapper)
-            self.outputs[key] = dev_wrapper
-    
-    def append_dependency(self, dep):
-        if dep not in self.extra_dep:
-            self.extra_dep.append(dep)
-
-    @property
-    def impl(self):
-        return self.parent.impl
-
-    @property
-    def isVirtual(self):
-        return self.parent.isVirtual
-    
-    @property
-    def first_layer_only(self):
-        return self.parent.first_layer_only
-    
-    @property
-    def last_layer_only(self):
-        return self.parent.last_layer_only
+        if extra_dep not in self.extra_dep:
+            self.extra_dep.append(extra_dep)
 
     def expand_layer(self, layer_list):
-        for i in layer_list:
-            op_layer = self.op_layer(i, self)
-            self.children.append(op_layer)
+        if self.first_layer_only:
+            self.layer_list = layer_list[:1]
+        elif self.last_layer_only:
+            self.layer_list = layer_list[-1:]
+        else:
+            self.layer_list = layer_list
+
+        for layer_idx in self.layer_list:
+            self.children.append(self.op_layer(layer_idx, self))
         
         return self.children
-
+    
     def setBatchSize(self, batch_size):
         self.batch_size = batch_size
         for _, input_wrapper in self.inputs.items():
             input_wrapper.batch_size = batch_size
         for _, output_wrapper in self.outputs.items():
             output_wrapper.batch_size = batch_size
-        
 
+    def __str__(self):
+        return self.name
+    
 class Operation_Layer:
-    def __init__(self, layer, op_device):
+    def __init__(self, layer, base_op):
         self.layer = layer
-        self.name = f"{op_device.name}_{layer}"
-        self.inputs = op_device.inputs
-        self.outputs = op_device.outputs
-        self.weights = op_device.weights
-        self.externals = op_device.externals
-        self.parent = op_device
-        self.device_id = op_device.device_id
-        self.prev_op_layer = []
-        self.cuda_event = None
+        self.name = f"{base_op.name}_{layer}"
+        self.inputs = base_op.inputs
+        self.outputs = base_op.outputs
+        self.weights = base_op.weights
+        self.externals = base_op.externals
+        self.parent = base_op
+        self.device = base_op.device
+        self.prev_op_layer: list[Operation_Layer] = []
+        self.cuda_event = torch.cuda.Event(enable_timing=True) 
         self.is_depended_on = False
 
+        # for auto search
+        self.duration_map = {}
+        self.start_time: gp.Var
+        self.end_time: gp.Var
+    
     @property
     def impl(self):
         return self.parent.impl
 
     @property
+    def category(self):
+        return self.parent.category
+
+    @property
     def stream(self):
-        return self.parent.parent.stream
+        return self.parent.stream
 
     @property
     def batch_size(self):
         return self.parent.batch_size
+
+    @property
+    def original_name(self):
+        return self.parent.original_name
 
     @property
     def prerequisites(self):
@@ -277,9 +345,9 @@ class Operation_Layer:
         depend_on_prev = []
         depend_on_next = []
         for _, input_wrapper in self.parent.inputs.items():
-            prev.extend(input_wrapper.prev)
-            depend_on_prev.extend(input_wrapper.prev_depend_on_prev_layer)
-            depend_on_next.extend(input_wrapper.prev_depend_on_next_layer)
+            prev.extend(input_wrapper.actual_prev)
+            depend_on_prev.extend(input_wrapper.actual_prev_depend_on_prev_layer)
+            depend_on_next.extend(input_wrapper.actual_prev_depend_on_next_layer)
         while len(prev) > 0:
             assert len(prev) == len(depend_on_prev) == len(depend_on_next), f"Operation '{self.name}' has different number of prev and depend_on_prev connections!\n"
             dep_wrapper = prev.pop()
@@ -309,12 +377,6 @@ class Operation_Layer:
                         depend_on_next.append(next_layer or dep_wrapper.prev_depend_on_next_layer[idx])
                 elif dep_wrapper.is_output_wrapper:
                     for idx, input_wrapper in enumerate(dep_wrapper.owner.inputs.values()):
-                        # if "Rope" in self.name: 
-                        #     print("input_wrapper.name: ", input_wrapper.name)
-                        #     print("input_wrapper.tensor_offset: ", input_wrapper.tensor_offset)
-                        #     print("input_wrapper.batch_size: ", input_wrapper.batch_size)
-                        #     print("dep_wrapper.tensor_offset: ", dep_wrapper.tensor_offset)
-                        #     print("dep_wrapper.batch_size: ", dep_wrapper.batch_size)
                         if input_wrapper.is_intersect(dep_wrapper):
                             # if "Rope" in self.name: 
                             #     print("added")
@@ -322,12 +384,13 @@ class Operation_Layer:
                             depend_on_prev.append(prev_layer)
                             depend_on_next.append(next_layer)
         # print("prerequisites: ", self.name, "dep: ", [dep[0].name for dep in dep])
+        # unique dep
+        dep = list(set(dep))
         return dep
     
     def reset_op_cuda_status(self):
         self.prev_op_layer = []
         self.is_depended_on = False
-        self.cuda_event = None
 
     def append_prev_op_layer(self, op_layer):
         self.prev_op_layer.append(op_layer)
@@ -338,15 +401,67 @@ class Operation_Layer:
 
     def record_cuda_event(self):
         if self.is_depended_on:
-            if self.cuda_event is None:
-                self.cuda_event = torch.cuda.Event(enable_timing=True)
             self.cuda_event.record(self.stream)
             # print("record_cuda_event: ", self.name, "cuda_event: ", self.cuda_event)
     
     def wait_cuda_event(self):
         events = []
         for op_layer in self.prev_op_layer:
-            if op_layer.cuda_event is not None and self.stream != op_layer.stream:
+            if self.stream != op_layer.stream:
                 events.append(op_layer.cuda_event)
+                # print("wait_cuda_event: ", self.name, "prev_op_layer: ", op_layer.name, "cuda_event: ", op_layer.cuda_event)
         for event in events:
             self.stream.wait_event(event)
+
+    # for auto search
+    def initVariables(self, model: gp.Model, full_sm_count: int):
+        self.start_time = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_start")
+        self.end_time = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_end")
+        # print(f"init_Variables: {self.name}, start_time: {self.start_time}, end_time: {self.end_time}")
+        model.addConstr(self.end_time == self.start_time + self.duration_map[(self.batch_size, full_sm_count)], name=f"{self.name}_end_time")
+
+    def initVariablesStageTwo(self, model: gp.Model, sm_counts: list[int]):
+        self.start_time = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_start")
+        self.end_time = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_end")
+        self.p_vars: dict[int, gp.Var] = {}  # Variables for p choices
+        self.durations: dict[int, float] = {}  # Duration in units for each p
+        self.p_choice = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_p_choice")
+
+
+        for sm_count in sm_counts:
+            self.p_vars[sm_count] = model.addVar(vtype=GRB.BINARY, name=f"{self.name}_p_{sm_count}")
+            if sm_count == 76:
+                self.p_vars[sm_count].Start = 1  # Force p_56 to be chosen
+            else:
+                self.p_vars[sm_count].Start = 0
+            duration = self.duration_map[(self.batch_size, sm_count)]
+            self.durations[sm_count] = duration
+
+    def addInternalConstraintsStageTwo(self, model: gp.Model):
+        model.addConstr(
+            gp.quicksum(self.p_vars.values()) == 1,
+            name=f"{self.name}_p_choice_sum"
+        )
+
+        model.addConstr(
+            self.end_time == self.start_time + gp.quicksum(
+                self.p_vars[sm_count] * self.durations[sm_count] for sm_count in self.p_vars
+            ),
+            name=f"{self.name}_end_time"
+        )
+        
+        model.addConstr(
+            self.p_choice == gp.quicksum(
+                sm_count * self.p_vars[sm_count] for sm_count in self.p_vars
+            ),
+            name=f"{self.name}_p_choice_value"
+        )
+
+    def __str__(self) -> str:
+        # Color codes for terminal output
+        COLOR_YELLOW = "\033[33m"
+        COLOR_GREEN = "\033[32m"
+        COLOR_BLUE = "\033[34m"
+        COLOR_RESET = "\033[0m"
+        s = f"{COLOR_BLUE}{self.name}{COLOR_RESET} start: {self.start_time.X:.3f} end: {self.end_time.X:.3f} batch_size: {round(self.batch_size)}"
+        return s
