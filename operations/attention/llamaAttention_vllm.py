@@ -99,6 +99,10 @@ class DecPagedAttnBatchedImpl(OperationImpl):
             max_logits = torch.empty_like(exp_sums)
             block_tables = self.op_base.block_tables
 
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                logging.debug("--------------------------------")
+                logging.debug(f"output.shape: {output.shape}\nexp_sums.shape: {exp_sums.shape}\nmax_logits.shape: {max_logits.shape}\ntmp_output.shape: {tmp_output.shape}\nq.shape: {q.shape}\nk_cache.shape: {k_cache.shape}\nv_cache.shape: {v_cache.shape}\nnum_kv_heads: {self.num_kv_heads}\nscale: {self.scale}\nblock_tables: {block_tables}\nseq_lens: {kv_seqlens}\nblock_size: {KVCache.get_block_size()}\nmax_seq_len: {max_seq_len}\nalibi_slopes: {None}\nkv_cache_dtype: auto\nk_scale: {self.k_scale}\nv_scale: {self.v_scale}\nfp8_out_scale: {None}\npartition_size: {_PARTITION_SIZE_ROCM}")
+                logging.debug("--------------------------------")
             paged_attention_rocm(
                 out=output,
                 exp_sum=exp_sums,

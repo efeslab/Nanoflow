@@ -10,8 +10,11 @@ from utils.prof_marker import prof_marker
 from utils.frontend import requestManager
 from transformers import AutoTokenizer
 
+import logging
+logging.basicConfig(level=logging.DEBUG)
+
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 # from models.llama3_NoKVCacheTorch import Pipeline
 # from models.llama3_KVCacheTorch import Pipeline
@@ -55,10 +58,10 @@ prefill_input_ids = [tokenizer.encode(prefill_context)[:prefill_length] for _ in
 
 weight_map_wzr = "/storage/ziren/framework-test/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
 # weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
-weight_map_amd_kan = "/work1/kasikci/kanzhu/models/llama3-8b"
+weight_map_amd_kan = "/app/models/llama3-8b"
 # weight_map_yi = "/root/llama3-8b"
 
-pipeline = Pipeline(max_seq_len=150)
+pipeline = Pipeline(max_batch_size=batch_size * 2, max_seq_len=prefill_length + decode_length)
 pipeline.init(weight_map_wzr, cached=True)
 
 def main():

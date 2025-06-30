@@ -27,7 +27,7 @@ from core.executor import Executor
 
 
 class Pipeline:
-    def __init__(self, max_seq_len: int = 2048):
+    def __init__(self, max_batch_size: int = 512, max_seq_len: int = 1280):
         # Set parameters as instance variables.
         self.pipeline_name = "Llama3-8B"
         self.num_kv_heads = 8
@@ -37,7 +37,8 @@ class Pipeline:
         self.vocab_size = 128256
         self.hidden_dim = 4096
         self.intermediate_dim = 14 * 1024
-        self.batch_size = None
+        self.max_batch_size = max_batch_size
+        self.batch_size = 0
         self.num_layers = 32
         self.num_devices = torch.cuda.device_count()
         self.page_size = 64
@@ -69,7 +70,8 @@ class Pipeline:
             num_layers=self.num_layers,
             num_heads=self.num_kv_heads,
             head_dim=self.head_dim,
-            max_seqlen=self.max_seq_len
+            max_seqlen=self.max_seq_len,
+            max_batch_size=self.max_batch_size,
         )
 
     def init_operations(self):
@@ -358,18 +360,19 @@ class Pipeline:
         self.getLogits.config_tag("torch", device_id)  # type: ignore
 
 
-    def config_streams(self):
-        self.global_input.set_stream(self.streams["GEMM"])  # type: ignore
-        self.gen_embedding.set_stream(self.streams["GEMM"])  # type: ignore
-        self.layerNormAttn.set_stream(self.streams["GEMM"])  # type: ignore
-        self.activation.set_stream(self.streams["GEMM"])  # type: ignore
-        self.kqv.set_stream(self.streams["GEMM"])  # type: ignore
-        self.ropeAppend.set_stream(self.streams["GEMM"])  # type: ignore
-        self.decAttn.set_stream(self.streams["GEMV"])  # type: ignore
-        self.pfAttn.set_stream(self.streams["GEMV"])  # type: ignore
-        self.layerNormFFN.set_stream(self.streams["GEMM"])  # type: ignore
-        self.o.set_stream(self.streams["GEMM"])  # type: ignore
-        self.ug.set_stream(self.streams["GEMM"])  # type: ignore
+    def config_streams(self) -> None:
+        r"""Configure the streams for each operation."""
+        self.global_input.set_stream(self.streams["GEMM"])
+        self.gen_embedding.set_stream(self.streams["GEMM"])
+        self.layerNormAttn.set_stream(self.streams["GEMM"])
+        self.activation.set_stream(self.streams["GEMM"])
+        self.kqv.set_stream(self.streams["GEMM"])
+        self.ropeAppend.set_stream(self.streams["GEMM"])
+        self.decAttn.set_stream(self.streams["GEMV"])
+        self.pfAttn.set_stream(self.streams["GEMV"])
+        self.layerNormFFN.set_stream(self.streams["GEMM"])
+        self.o.set_stream(self.streams["GEMM"])
+        self.ug.set_stream(self.streams["GEMM"])
         self.d.set_stream(self.streams["GEMM"])  # type: ignore
         self.modelLayerNorm.set_stream(self.streams["GEMM"])  # type: ignore
         self.sample.set_stream(self.streams["GEMM"])  # type: ignore

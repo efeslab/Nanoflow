@@ -341,7 +341,8 @@ class KVCachevLLM:
         num_layers,
         num_heads,
         head_dim,
-        max_seqlen: int = 8,
+        max_seqlen: int,
+        max_batch_size: int,
         block_size: int = 32,
         device_id: int = 0,
         dtype: torch.dtype = torch.float16,
@@ -368,23 +369,44 @@ class KVCachevLLM:
         """
         assert VLLM_CACHE, "vLLM KV Cache requires vLLM custom ops to be installed."
         self.name = "vLLM KV Cache"
-        self.k_cache: list[torch.Tensor] | None = None # Lazy initialized
-        self.v_cache: list[torch.Tensor] | None = None
-        self.batch_size: int | None = None
-        self.indices: torch.Tensor | None = None
         self.device_id = device_id
         self.dtype = dtype
         self.num_layers = num_layers
         self.num_heads = num_heads // tp_size
         self.head_dim = head_dim
         self.block_size = block_size
+        self.max_batch_size = max_batch_size
         self.max_blocks_per_request = (max_seqlen + block_size - 1) // block_size
         self.max_seqlen = self.max_blocks_per_request * self.block_size
-        self.tp_size = tp_size
-        self.input_req_idx: torch.Tensor | None = None
+        x = 16 // torch.tensor([], dtype=self.dtype).element_size()
+        self.k_cache = [
+            torch.zeros(
+                max_batch_size * self.max_blocks_per_request,
+                self.num_heads,
+                self.head_dim // x,
+                self.block_size,
+                x,
+                dtype=torch.float16,
+                device=f"cuda:{self.device_id}",
+            ) for _ in range(self.num_layers)
+        ]
+        self.v_cache = [
+            torch.zeros(
+                max_batch_size * self.max_blocks_per_request,
+                self.num_heads,
+                self.head_dim,
+                self.block_size,
+                dtype=torch.float16,
+                device=f"cuda:{self.device_id}",
+            ) for _ in range(self.num_layers)
+        ]
+        self.block_table = torch.stack([
+            torch.arange(0, self.max_blocks_per_request) + i * self.max_blocks_per_request
+            for i in range(max_batch_size)
+        ], dim=0).to(device=f"cuda:{self.device_id}", dtype=torch.int32)
+        self.indices = torch.zeros((max_batch_size,), dtype=torch.int32, device="cpu")
         self.last_key: torch.Tensor | None = None
         self.last_value: torch.Tensor | None = None
-        self.block_table: torch.Tensor | None = None
         self.unscaled = torch.tensor([1], dtype=torch.int32)
 
 
@@ -424,24 +446,8 @@ class KVCachevLLM:
         and should not be called multiple times for a single batch.
         """
         logging.info(f"KVCache updated on device {self.device_id} with batch {qo_indices}")
-        batch_size = len(input_req_idx)
-        self.input_req_idx = torch.tensor(input_req_idx, dtype=torch.int32, device=f"cuda:{self.device_id}")
-        if self.batch_size == batch_size:
-            qo_seqlens = torch.tensor(qo_indices).diff().to(self.indices.device)
-            self.indices += qo_seqlens
-            return
-        old_k_cache, old_v_cache, old_indices = (
-            self.k_cache,
-            self.v_cache,
-            self.indices,
-        )
-        self.batch_size = batch_size
-        self.indices = torch.zeros((self.batch_size,), dtype=torch.int32, device=f"cuda:{self.device_id}")
-        self.block_table = torch.stack([
-            torch.arange(0, self.max_blocks_per_request) + i * self.max_blocks_per_request
-            for i in range(self.batch_size)
-        ], dim=0).to(device=self.indices.device, dtype=torch.int32)
-        x = 16 // torch.tensor([], dtype=self.dtype).element_size()
+        for idx, seqlen in zip(input_req_idx, torch.tensor(qo_indices).diff().tolist()):
+            self.indices[idx] += seqlen
         self.last_key = torch.zeros(
             qo_indices[-1],
             self.num_heads,
@@ -456,34 +462,6 @@ class KVCachevLLM:
             dtype=torch.float16,
             device=f"cuda:{self.device_id}",
         )
-        self.k_cache = [
-            torch.zeros(
-                batch_size * self.max_blocks_per_request,
-                self.num_heads,
-                self.head_dim // x,
-                self.block_size,
-                x,
-                dtype=torch.float16,
-                device=f"cuda:{self.device_id}",
-            ) for _ in range(self.num_layers)
-        ]
-        self.v_cache = [
-            torch.zeros(
-                batch_size * self.max_blocks_per_request,
-                self.num_heads,
-                self.head_dim,
-                self.block_size,
-                dtype=torch.float16,
-                device=f"cuda:{self.device_id}",
-            ) for _ in range(self.num_layers)
-        ]
-        if old_k_cache is not None and old_v_cache is not None and old_indices is not None:
-            self.indices[: old_indices.shape[0]] = old_indices
-            for i in range(self.num_layers):
-                self.k_cache[i][: old_k_cache[i].shape[0]] = old_k_cache[i]
-                self.v_cache[i][: old_v_cache[i].shape[0]] = old_v_cache[i]
-        qo_seqlens = torch.tensor(qo_indices).diff().to(self.indices.device)
-        self.indices += qo_seqlens
 
 
     def store_last_kv(
@@ -574,8 +552,6 @@ class KVCachevLLM:
             The mapping from the input tokens to the cache slots.
             Shape: [batch_size,]
         """
-        if self.k_cache is None or self.v_cache is None or self.batch_size is None:
-            raise ValueError("Cache not initialized. Call update() first.")
         if layer == 0:
             assert self.indices is not None, "Cache not initialized. Call update() first."
         reshape_and_cache(

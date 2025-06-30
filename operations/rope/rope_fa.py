@@ -379,6 +379,16 @@ class RopeAppendBatched(Operations):
                     self.rev_input_indptr, self.per_token_offset
                 )
 
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                logging.debug(f"self.seqlens: {self.seqlens}")
+                logging.debug(f"self.indices: {self.indices}")
+                logging.debug(f"self.qo_indices: {self.qo_indices}")
+                logging.debug(f"self.start_req_idx: {self.start_req_idx}")
+                logging.debug(f"self.end_req_idx: {self.end_req_idx}")
+                logging.debug(f"self.per_token_offset: {self.per_token_offset}")
+                logging.debug(f"self.rev_input_indptr: {self.rev_input_indptr}")
+                logging.debug(f"self.slot_mapping: {self.slot_mapping}")
+
     def copy_nano(self, index: int):
         new_op = RopeAppendBatched(
             f"{self.name}{index}",
