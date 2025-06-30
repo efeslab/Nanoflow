@@ -404,7 +404,7 @@ class KVCachevLLM:
             torch.arange(0, self.max_blocks_per_request) + i * self.max_blocks_per_request
             for i in range(max_batch_size)
         ], dim=0).to(device=f"cuda:{self.device_id}", dtype=torch.int32)
-        self.indices = torch.zeros((max_batch_size,), dtype=torch.int32, device="cpu")
+        self.indices = torch.zeros((max_batch_size,), dtype=torch.int32, device=f"cuda:{self.device_id}")
         self.last_key: torch.Tensor | None = None
         self.last_value: torch.Tensor | None = None
         self.unscaled = torch.tensor([1], dtype=torch.int32)
