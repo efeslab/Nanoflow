@@ -3,6 +3,7 @@ import os, sys
 
 from operations.attention.llamaAttention_vllm import DecPagedAttn
 from operations.rope.rope_fa import RopeAppendBatched as RopeAppend
+from utils.cu_mask import create_streams_with_cumask
 from utils.prof_marker import prof_marker
 
 sys.path.append("../")
@@ -54,8 +55,7 @@ class Pipeline:
         self.config_streams()
 
     def init_streams(self):
-        GEMM_STREAM = torch.cuda.Stream()
-        GEMV_STREAM = torch.cuda.Stream()
+        GEMM_STREAM, GEMV_STREAM = create_streams_with_cumask([256, 48], 0)
         NETWORK_STREAM = torch.cuda.Stream()
         OTHER_STREAM = torch.cuda.Stream()
         self.streams = {
