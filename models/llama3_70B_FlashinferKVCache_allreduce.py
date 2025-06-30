@@ -53,7 +53,8 @@ class Pipeline():
         # create torch.distributed group
         assert self.num_cuda_devices % self.tp_size == 0, f"num_cuda_devices {self.num_cuda_devices} should be divisible by tp_size {self.tp_size}"
 
-    def set_device(self, device):
+    def set_device(self, rank, device):
+        self.rank = rank
         self.device = device
 
     def init(self, weight_path, cached=False):
@@ -63,6 +64,8 @@ class Pipeline():
         self.init_dependency()
         self.init_set_shape()
         self.init_set_weight(weight_path, cached)
+        self.config_network(self.rank)
+        self.update_network_ops()
 
     def init_streams(self):
         GEMM_STREAM = torch.cuda.Stream()
@@ -270,7 +273,7 @@ class Pipeline():
         self.gen_embedding.config_tag("cuda")
         self.layerNormAttn.config_tag("cuda")
         self.activation.config_tag("cuda")
-        self.kqv.config_tag(gemm_tag)
+        self.kqv.config_tag([gemm_tag, gemm_tag])
         self.ropeAppend.config_tag("cuda")
         self.decAttn.config_tag("batched_cuda")
         self.pfAttn.config_tag("batched_cuda")
@@ -298,7 +301,7 @@ class Pipeline():
         self.gen_embedding.set_stream(self.streams["GEMM"])
         self.layerNormAttn.set_stream(self.streams["GEMM"])
         self.activation.set_stream(self.streams["GEMM"])
-        self.kqv.set_stream(self.streams["GEMM"])
+        self.kqv.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
         self.ropeAppend.set_stream(self.streams["GEMM"])
         self.decAttn.set_stream(self.streams["GEMV"])
         self.pfAttn.set_stream(self.streams["GEMV"])
@@ -317,8 +320,35 @@ class Pipeline():
         self.allReduce_o.update(self.tp_group)
         self.allReduce_d.update(self.tp_group)
 
-    def nanobatch_split(self, total_batchsize, decode_batch_size):
-        pass
+    def nanobatch_split(self, total_batch_size, decode_batch_size):
+        op_nanobatch_info_map = {
+            # "LayerNormAttn": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
+            "KQV": (2, (decode_batch_size, total_batch_size - decode_batch_size)),
+            # "RopeAppend": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
+            # "O": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
+            # "LayerNormFFN": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
+            # "UG": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
+            # "Activation": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
+            # "D": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
+        }
+        # extra_links = {
+        #     # TODO: add extra links for virtual ops
+        #     # "KQV0": ("KQV1", False, False),
+        #     # "RopeAppend0": ("RopeAppend1", False, False),
+        #     "RopeAppend0": ("O1", False, False),
+        #     "RopeAppend1": ("O0", False, True),
+        # }
+        extra_links = {}
+
+        new_operation_list, addtional_virtual_ops = split_nanobatch(self.operation_list, op_nanobatch_info_map, extra_links)
+        self.op_for_buffer_allocation = []
+        self.new_operation_list = new_operation_list
+        self.op_layers = []
+        for op in new_operation_list + self.virtual_operation_list + addtional_virtual_ops:
+            print("op.name", op.name)
+            self.op_for_buffer_allocation.append(op)
+        for operation in new_operation_list:
+            self.op_layers.extend(operation.children)
 
     def update(self, new_input_infos, decode_batch_size=0):
         self.input_req_idx = []
@@ -339,6 +369,7 @@ class Pipeline():
                 # print("decode_batch_size: ", decode_batch_size)
                 self.clear_batch_size()
                 self.config_batch_size()
+                self.nanobatch_split(self.batch_size, decode_batch_size)
                 self.update_allocate_buffers()
                 # print("finish update_allocate_buffers")
                 self.config_streams()
@@ -381,10 +412,6 @@ class Pipeline():
         bufferAllocator.allocate_buffer(self.device)
         print(f"Total allocated: {bufferAllocator.total_allocated / 1024 / 1024} MB in {self.device}")
 
-    def profile(self):
-        for operation in self.operation_list:
-            operation.profile()
-
     def run(self, file_name="out-tp-test", filefolder_name="llama3-kv-out-tp-test"):
 
         temp_out = torch.zeros(self.batch_size, dtype=torch.int32, device='cuda')
@@ -408,3 +435,20 @@ class Pipeline():
 
     def terminate(self):
         dist.destroy_process_group()
+
+    # profile related functions
+    def init_profile_data(self, append_mode=False):
+        profile_dir = f"../profile_data/{self.pipeline_name}"
+        for operation in self.operation_list:
+                operation.init_profile(profile_dir, append_mode)
+    
+    def profile_run(self):
+        for operation in self.operation_list:
+            if operation.batch_size > 0:
+                with prof_marker(f"{operation.name}"):
+                    print("Operation name:", operation.name)
+                    operation.profile()
+
+    def profile_print(self):
+        for operation in self.operation_list:
+            operation.print_profile()

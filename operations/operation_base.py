@@ -121,7 +121,7 @@ class Operations():
                 (None, None)
             ]
 
-    def init_profile(self, profile_dir, append_mode, only_decode):
+    def init_profile(self, profile_dir, append_mode):
         if not os.path.exists(profile_dir):
             os.makedirs(profile_dir)
         
@@ -144,7 +144,7 @@ class Operations():
     def profile_run(self):
         pass
 
-    def profile(self, only_decode):
+    def profile(self):
         with prof_marker(f"batchsize:{self.batch_size}"):
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
@@ -274,9 +274,6 @@ class Operations():
         if extra_dep not in self.extra_dep:
             self.extra_dep.append(extra_dep)
 
-    def __str__(self):
-        return self.name
-
     def expand_layer(self, layer_list):
         if self.first_layer_only:
             self.layer_list = layer_list[:1]
@@ -296,6 +293,9 @@ class Operations():
             input_wrapper.batch_size = batch_size
         for _, output_wrapper in self.outputs.items():
             output_wrapper.batch_size = batch_size
+
+    def __str__(self):
+        return self.name
     
 class Operation_Layer:
     def __init__(self, layer, base_op):

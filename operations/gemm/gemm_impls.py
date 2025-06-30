@@ -3,7 +3,6 @@ import triton
 import platform_config
 import bind_green_ctx
 from operations.impl_base import OperationImpl
-from pybind_triton_kernels.triton_gemm.src.kernels import gemm_kernel_persistent
 
 class GEMMTorchImpl(OperationImpl):
     category_tag = "torch"
@@ -23,50 +22,6 @@ class GEMMTorchImpl(OperationImpl):
                 torch.addmm(C, A, B, beta=self.beta, alpha=self.alpha, out=D)
             else:
                 torch.matmul(A, B, out=D)
-
-class GEMMTritonImpl(OperationImpl):
-    category_tag = "triton"
-    impl_tag_profile = "triton"
-    def config(self, impl_tag, parameter_map):
-        self.M = self.batch_size
-        self.N = self.op_base.tp_N
-        self.K = self.op_base.tp_K
-        self.alpha = self.op_base.alpha
-        self.beta = self.op_base.beta
-
-    def run(self, A, B, C, D):
-        with torch.cuda.stream(self.stream):
-            stride_am, stride_ak = A.stride()
-            stride_bk, stride_bn = B.stride()
-            stride_cm, stride_cn = C.stride()
-
-            NUM_SMS = torch.cuda.get_device_properties(self.device).multi_processor_count
-
-            grid = lambda META: (
-                min(
-                    NUM_SMS,
-                    triton.cdiv(self.M, META["BLOCK_SIZE_M"]) * triton.cdiv(self.N, META["BLOCK_SIZE_N"]),
-                ),
-            )
-
-            gemm_kernel_persistent[grid](
-                A,
-                B,
-                C,
-                self.M,
-                self.N,
-                self.K,
-                A.stride(0),
-                A.stride(1),
-                B.stride(0),
-                B.stride(1),
-                C.stride(0),
-                C.stride(1),
-                alpha=self.alpha,
-                beta=self.beta,
-                NUM_SMS=NUM_SMS,
-            )
-            D.copy_(C)
 
 
 if platform_config.PLATFORM_CUDA:

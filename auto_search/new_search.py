@@ -1,10 +1,7 @@
-
-# from plotPipe import drawPipeline, createGraph, createLogicalDependencyGraph, createLogicalDependencyGraphOfNanoOps, createLogicalDependencyGraphOfLayeredNanoOps\
-#     ,calcStartEndLayered,getCycleTime,drawPipelineLayered,createGraphOfLayeredNanoOps
 import sys
 sys.path.append('../')
 sys.path.append('../pybind/build/')
-from models.llama3_FlashinferKVCache import Pipeline
+from models.llama3_AutoSearch import Pipeline
 from core.executor import Executor
 
 import itertools
@@ -35,15 +32,10 @@ print("batch_size_range:", batch_size_range)
 
 # create operations
 pipeline = Pipeline()
-pipeline.init_streams()
-pipeline.init_external_data(for_test=True)
-pipeline.init_operations()
-pipeline.init_dependency()
-pipeline.init_set_shape()
+pipeline.init()
 
 # set offsets and batch_sizes
 pipeline.batch_size = global_batch_size
-pipeline.clear_batch_size()
 pipeline.config_batch_size(decode_batch_size)
 pipeline.nanobatch_split(global_batch_size, decode_batch_size)
 pipeline.update_allocate_buffers()
@@ -51,7 +43,6 @@ pipeline.update_allocate_buffers()
 # set streams
 pipeline.config_category()
 pipeline.config_streams()
-
 
 # get layered operation
 from operations.operation_base import Operation_Layer

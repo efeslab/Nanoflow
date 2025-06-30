@@ -1,23 +1,19 @@
 import torch
-import os
 
-from operations.operation_base import Operations
 from operations.activation.silu import Activation
 from operations.embedding.embedding import GenEmbedding
 from operations.globalOp.globalOp import GlobalInput, GlobalOutput
 from operations.gemm.gemm_N_parallel import GEMM_N_Parallel
 from operations.norm.rmsnorm import LayerNorm
 from operations.sampling.max_sampling import Sampling
-from operations.rope.rope_flashinfer import RopeAppendFlashinfer
-from operations.attention.llamaAttention_flashinfer import DecAttnFlashinfer, PFAttnFlashinfer
+from operations.rope.rope_torch import RopeAppendTorch
+from operations.attention.llamaAttention_torch import DecAttnTorch, PFAttnTorch
 from operations.virtualOp.virtual_ops import Copy, Redist
-from kvcache.kv import KVCacheNone, DistKVPool, BatchedDistKVCache
-from core.weightManager import WeightManager
 from core.bufferAllocate import BufferAllocator
 from core.executor import Executor
 from core.nanobatchSplit import split_nanobatch
-from utils.prof_marker import prof_marker
 from utils.green_context import create_greenctx
+
 
 class Pipeline():
     def __init__(self):
@@ -31,76 +27,26 @@ class Pipeline():
         self.hidden_dim = 4096
         self.intermediate_dim = 14 * 1024
         self.batch_size = None
+        self.decode_batch_size = None
         self.num_layers = 32
         self.layer_list = [i for i in range(self.num_layers)]
-        self.page_size = 16
+        self.page_size = 64
         self.device = "cuda:0"
 
-    def set_device(self, device):
-        self.device = device
-
-    def init(self, weight_path, cached=False):
+    def init(self):
         self.init_streams()
-        self.init_external_data()
         self.init_operations()
         self.init_dependency()
         self.init_set_shape()
-        self.init_set_weight(weight_path, cached)
 
     def init_streams(self):
         gemm_stream_with_pf, pf_stream, gemm_stream_with_pf_sm, pf_stream_sm = create_greenctx(0.85, 0.15, 0)
         gemm_stream_with_dc, dc_stream, gemm_stream_with_dc_sm, dc_stream_sm = create_greenctx(0.7, 0.3, 0)
 
-        # Create green context streams for GEMV streams
-        GEMV_stream_01, GEMV_stream_09, GEMV_stream_01_sm, GEMV_stream_09_sm = create_greenctx(0.1, 0.9, 0)
-        GEMV_stream_02, GEMV_stream_08, GEMV_stream_02_sm, GEMV_stream_08_sm = create_greenctx(0.2, 0.8, 0)
-        GEMV_stream_03, GEMV_stream_07, GEMV_stream_03_sm, GEMV_stream_07_sm = create_greenctx(0.3, 0.7, 0)
-        GEMV_stream_04, GEMV_stream_06, GEMV_stream_04_sm, GEMV_stream_06_sm = create_greenctx(0.4, 0.6, 0)
-        GEMV_stream_05_0, GEMV_stream_05_1, GEMV_stream_05_0_sm, GEMV_stream_05_1_sm = create_greenctx(0.5, 0.5, 0)
-        GEMV_stream_10 = torch.cuda.Stream()
-        full_sm = GEMV_stream_01_sm + GEMV_stream_09_sm
-
-        # Create green context streams for GEMM streams
-        GEMM_stream_01, GEMM_stream_09, GEMM_stream_01_sm, GEMM_stream_09_sm = create_greenctx(0.1, 0.9, 0)
-        GEMM_stream_02, GEMM_stream_08, GEMM_stream_02_sm, GEMM_stream_08_sm = create_greenctx(0.2, 0.8, 0)
-        GEMM_stream_03, GEMM_stream_07, GEMM_stream_03_sm, GEMM_stream_07_sm = create_greenctx(0.3, 0.7, 0)
-        GEMM_stream_04, GEMM_stream_06, GEMM_stream_04_sm, GEMM_stream_06_sm = create_greenctx(0.4, 0.6, 0)
-        GEMM_stream_05_0, GEMM_stream_05_1, GEMM_stream_05_0_sm, GEMM_stream_05_1_sm = create_greenctx(0.5, 0.5, 0)
-        GEMM_stream_10 = torch.cuda.Stream()
-
-
         self.streams = {
             "GEMM_Test": (torch.cuda.Stream(), gemm_stream_with_pf_sm + pf_stream_sm),
             "PF_ATTN": (pf_stream, pf_stream_sm),
             "DC_ATTN": (dc_stream, dc_stream_sm),
-            "GEMM_WITH_PF": (gemm_stream_with_pf, gemm_stream_with_pf_sm),
-            "GEMM_WITH_DC": (gemm_stream_with_dc, gemm_stream_with_dc_sm),
-            "GEMV": {
-                GEMV_stream_01_sm: (GEMV_stream_01, GEMV_stream_01_sm),
-                GEMV_stream_02_sm: (GEMV_stream_02, GEMV_stream_02_sm),
-                GEMV_stream_03_sm: (GEMV_stream_03, GEMV_stream_03_sm),
-                GEMV_stream_04_sm: (GEMV_stream_04, GEMV_stream_04_sm),
-                GEMV_stream_05_0_sm: (GEMV_stream_05_0, GEMV_stream_05_0_sm),
-                GEMV_stream_05_1_sm: (GEMV_stream_05_1, GEMV_stream_05_1_sm),
-                GEMV_stream_06_sm: (GEMV_stream_06, GEMV_stream_06_sm),
-                GEMV_stream_07_sm: (GEMV_stream_07, GEMV_stream_07_sm),
-                GEMV_stream_08_sm: (GEMV_stream_08, GEMV_stream_08_sm),
-                GEMV_stream_09_sm: (GEMV_stream_09, GEMV_stream_09_sm),
-                full_sm: (GEMV_stream_10, full_sm)
-            },
-            "GEMM": {
-                GEMM_stream_01_sm: (GEMM_stream_01, GEMM_stream_01_sm),
-                GEMM_stream_02_sm: (GEMM_stream_02, GEMM_stream_02_sm),
-                GEMM_stream_03_sm: (GEMM_stream_03, GEMM_stream_03_sm),
-                GEMM_stream_04_sm: (GEMM_stream_04, GEMM_stream_04_sm),
-                GEMM_stream_05_0_sm: (GEMM_stream_05_0, GEMM_stream_05_0_sm),
-                GEMM_stream_05_1_sm: (GEMM_stream_05_1, GEMM_stream_05_1_sm),
-                GEMM_stream_06_sm: (GEMM_stream_06, GEMM_stream_06_sm),
-                GEMM_stream_07_sm: (GEMM_stream_07, GEMM_stream_07_sm),
-                GEMM_stream_08_sm: (GEMM_stream_08, GEMM_stream_08_sm),
-                GEMM_stream_09_sm: (GEMM_stream_09, GEMM_stream_09_sm),
-                full_sm: (GEMM_stream_10, full_sm)
-            }
         }
 
         # Create green context streams for testing
@@ -110,38 +56,9 @@ class Pipeline():
         test_stream_04, test_stream_06, test_stream_04_sm, test_stream_06_sm = create_greenctx(0.4, 0.6, 0)
         test_stream_05, _, test_stream_05_sm, _ = create_greenctx(0.5, 0.5, 0)
 
-        print("test_stream_01_sm:", test_stream_01_sm, "test_stream_09_sm:", test_stream_09_sm)
-        test_9, test_1, test_9_sm, test_1_sm = create_greenctx(0.9, 0.1, 0)
-        print("test_9_sm:", test_9_sm, "test_1_sm:", test_1_sm)
-
-        self.profile_streams = {
-            "TEST_1": (test_stream_01, test_stream_01_sm),
-            "TEST_2": (test_stream_02, test_stream_02_sm),
-            "TEST_3": (test_stream_03, test_stream_03_sm),
-            "TEST_4": (test_stream_04, test_stream_04_sm),
-            "TEST_5": (test_stream_05, test_stream_05_sm),
-            "TEST_6": (test_stream_06, test_stream_06_sm),
-            "TEST_7": (test_stream_07, test_stream_07_sm),
-            "TEST_8": (test_stream_08, test_stream_08_sm),
-            "TEST_9": (test_stream_09, test_stream_09_sm),
-            "TEST_10": (torch.cuda.Stream(), gemm_stream_with_pf_sm + pf_stream_sm)
-        }
         self.sm_counts = [test_stream_01_sm, test_stream_02_sm, test_stream_03_sm, test_stream_04_sm, test_stream_05_sm,
                     test_stream_06_sm, test_stream_07_sm, test_stream_08_sm, test_stream_09_sm,
                     gemm_stream_with_pf_sm + pf_stream_sm]
-
-
-
-    def init_external_data(self, for_test=False):
-        if for_test:
-            self.kv_cache = KVCacheNone()
-            return
-        self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048* 28, self.page_size, 1, self.device)
-        self.kv_cache = BatchedDistKVCache(self.kv_pool)
-    
-    def reset_kv_cache(self):
-        self.kv_pool.reset()
-        self.kv_cache.reset()
 
     def init_operations(self):
         self.global_input    = GlobalInput("GlobalInput", self.device).first_only()
@@ -160,17 +77,14 @@ class Pipeline():
         ])
         self.kqv_layers = self.kqv.expand_layer(self.layer_list)
 
-        self.ropeAppend      = RopeAppendFlashinfer("RopeAppend", self.device)
-        self.ropeAppend.externals["KVCache"] = self.kv_cache
+        self.ropeAppend      = RopeAppendTorch("RopeAppend", self.device)
         self.ropeAppend_layers = self.ropeAppend.expand_layer(self.layer_list)
 
 
-        self.decAttn         = DecAttnFlashinfer("DecAttn", self.device)
-        self.decAttn.externals["KVCache"] = self.kv_cache
+        self.decAttn         = DecAttnTorch("DecAttn", self.device)
         self.decAttn_layers = self.decAttn.expand_layer(self.layer_list)
 
-        self.pfAttn          = PFAttnFlashinfer("PFAttn", self.device)
-        self.pfAttn.externals["KVCache"] = self.kv_cache
+        self.pfAttn          = PFAttnTorch("PFAttn", self.device)
         self.pfAttn_layers = self.pfAttn.expand_layer(self.layer_list)
 
         self.o               = GEMM_N_Parallel("O", self.device, bias=True).setWeightName("model.layers.{layer}.self_attn.o_proj.weight")
@@ -273,7 +187,6 @@ class Pipeline():
         for operation in self.operation_list + self.virtual_operation_list:
             operation.checkConnection()
     
-    
     def init_executor(self):
         # assert 0 <= device_id < self.num_cuda_devices, "device_id should be in range [0, num_devices)"
         self.executor = Executor(self.op_layers, self.layer_list)
@@ -296,76 +209,46 @@ class Pipeline():
         self.getLogits.setShape(self.vocab_size, self.hidden_dim).setParameter(1.0, 0.0)
         self.sample.setShape(self.vocab_size)
         self.global_output.setShape()
-    
-    def init_cached_weight(self, weight_path):
-        self.kv_cache = KVCacheNone()
-        self.init_operations()
-        self.init_set_shape()
-        self.init_set_weight(weight_path, False)
-
-    def init_set_weight(self, weight_path, cached):
-        weight_manager = WeightManager(self.pipeline_name, weight_path, cached, self.device)
-        weight_manager.set_weight(self.operation_list, self.device)
-
-    def clear_batch_size(self):
-        # init the batchsize to None
-        for op in self.op_for_buffer_allocation:
-            op.setBatchSize(None)
 
     def config_batch_size(self, decode_batchsize):
         self.global_input.setBatchSize(self.batch_size)
         self.decAttn.setBatchSize(decode_batchsize)
 
-    def config_algorithm(self):
-        gemm_tag = "torch"
-        self.gen_embedding.config_tag("cuda")
-        self.decAttn.config_tag("batched_cuda")
-        self.pfAttn.config_tag("batched_cuda")
-
-        # self.layerNormAttn.config_tag("cuda")        
-        # self.activation.config_tag("cuda")
-        # self.kqv.config_tag(gemm_tag)
-        # self.ropeAppend.config_tag("cuda")
-        # self.layerNormFFN.config_tag("cuda")
-        # self.o.config_tag(gemm_tag)
-        # self.ug.config_tag(gemm_tag)
-        # self.d.config_tag(gemm_tag)
-
-        self.layerNormAttn.config_tag(["cuda", "cuda"])
-        self.activation.config_tag(["cuda", "cuda"])
-        self.kqv.config_tag([gemm_tag, gemm_tag])
-        self.ropeAppend.config_tag(["cuda", "cuda"])
-        self.layerNormFFN.config_tag(["cuda", "cuda"])
-        self.o.config_tag([gemm_tag, gemm_tag])
-        self.ug.config_tag([gemm_tag, gemm_tag])
-        self.d.config_tag([gemm_tag, gemm_tag])
-
-        self.modelLayerNorm.config_tag("cuda")
-        self.sample.config_tag("cuda")
-        self.getLogits.config_tag(gemm_tag)
+    def config_category(self):
+        self.global_input.set_category("GEMM")
+        self.gen_embedding.set_category("GEMM")
+        self.layerNormAttn.set_category("GEMM")
+        self.kqv.set_category("GEMM")
+        self.ropeAppend.set_category("GEMM")
+        self.decAttn.set_category("GEMV")
+        self.pfAttn.set_category("GEMV")
+        self.layerNormFFN.set_category("GEMM")
+        self.o.set_category("GEMM")
+        self.ug.set_category("GEMM")
+        self.activation.set_category("GEMM")
+        self.d.set_category("GEMM")
+        self.modelLayerNorm.set_category("GEMM")
+        self.sample.set_category("GEMM")
+        self.getLogits.set_category("GEMM")
 
     def config_streams(self):
-        # manually set streams for running.
+        # Set stream for auto-search case
         self.global_input.set_stream(self.streams["GEMM_Test"])
         self.gen_embedding.set_stream(self.streams["GEMM_Test"])
-        self.layerNormAttn.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
-        self.kqv.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
-        self.ropeAppend.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
+        self.layerNormAttn.set_stream([self.streams["GEMM_Test"], self.streams["GEMM_Test"]])
+        self.kqv.set_stream([self.streams["GEMM_Test"], self.streams["GEMM_Test"]])
+        self.ropeAppend.set_stream([self.streams["GEMM_Test"], self.streams["GEMM_Test"]])
         self.decAttn.set_stream(self.streams["DC_ATTN"])
-        self.pfAttn.set_stream(self.streams["PF_ATTN"])
-        self.layerNormFFN.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
-        self.o.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
-        self.ug.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
-        self.activation.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
-        self.d.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
+        self.pfAttn.set_stream(self.streams["DC_ATTN"])
+        self.layerNormFFN.set_stream([self.streams["GEMM_Test"], self.streams["GEMM_Test"]])
+        self.o.set_stream([self.streams["GEMM_Test"], self.streams["GEMM_Test"]])
+        self.ug.set_stream([self.streams["GEMM_Test"], self.streams["GEMM_Test"]])
+        self.activation.set_stream([self.streams["GEMM_Test"], self.streams["GEMM_Test"]])
+        self.d.set_stream([self.streams["GEMM_Test"], self.streams["GEMM_Test"]])
         self.modelLayerNorm.set_stream(self.streams["GEMM_Test"])
         self.sample.set_stream(self.streams["GEMM_Test"])
         self.getLogits.set_stream(self.streams["GEMM_Test"])
         self.global_output.set_stream(self.streams["GEMM_Test"])
-    
-    def profile_config_streams(self, stream_tuple):
-        for operation in self.operation_list:
-            operation.set_stream(stream_tuple)
 
     def nanobatch_split(self, total_batchsize, decode_batchsize):
         op_nanobatch_info_map = {
@@ -378,10 +261,7 @@ class Pipeline():
             "Activation": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
             "D": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
         }
-        extra_links = {
-            "RopeAppend0": ("O1", False, False),
-            "RopeAppend1": ("O0", False, True),
-        }
+        extra_links = {}
 
         new_operation_list, addtional_virtual_ops = split_nanobatch(self.operation_list, op_nanobatch_info_map, extra_links)
         self.op_for_buffer_allocation = []
@@ -392,52 +272,6 @@ class Pipeline():
             self.op_for_buffer_allocation.append(op)
         for operation in new_operation_list:
             self.op_layers.extend(operation.children)
-    
-    def update(self, new_input_infos, decode_batch_size=0, is_profile=False, stream_name:str="GEMM_Test"):
-        self.input_req_idx = []
-        self.input_ids = []
-        with prof_marker("update_step_0"):
-            for item in new_input_infos:
-                # print("item", item)
-                self.input_req_idx.append(item[0])
-                self.input_ids.append(item[1])
-        with prof_marker("update_step_1"):
-            # concatenate input_ids into a single tensor
-            flattened = [item for sublist in self.input_ids for item in sublist]
-        with prof_marker("update_step_2"):
-            if len(flattened) != self.batch_size or decode_batch_size != self.decode_batch_size:
-                self.batch_size = len(flattened)
-                self.decode_batch_size = decode_batch_size
-                # print(f"batch_size: {self.batch_size}")
-                # print("decode_batchsize: ", decode_batchsize)
-                self.clear_batch_size()
-                self.config_batch_size(decode_batch_size)
-                self.nanobatch_split(self.batch_size, decode_batch_size)
-                self.update_allocate_buffers()
-                # print("finish update_allocate_buffers")
-                if is_profile:
-                    self.profile_config_streams(self.profile_streams[stream_name])
-                else:
-                    self.config_streams()
-                self.config_algorithm()
-                self.init_executor()
-        with prof_marker("update_step_3"):
-            input_tensor = torch.tensor(flattened, dtype=torch.int32, device=self.device)
-            # get cumulative sum of the number of tokens in each input
-        with prof_marker("update_step_4"):
-            request_length = torch.tensor([len(x) for x in self.input_ids], dtype=torch.int32, device='cpu')
-        with prof_marker("update_step_5"):
-            self.cumsum_input = torch.cat([torch.tensor([0], dtype=torch.int32, device='cpu'), torch.cumsum(request_length, dim=0, dtype=torch.int32)]).tolist()
-        with prof_marker("update_step_6"):
-            self.kv_cache.update(self.cumsum_input, self.input_req_idx, decode_batch_size)
-        with prof_marker("update_step_7"):
-            self.global_input.outputs["tokens"].tensor.copy_(input_tensor)
-        with prof_marker("update_step_8"):
-            self.ropeAppend.update(self.cumsum_input, decode_batch_size)
-        with prof_marker("update_step_9"):
-            self.decAttn.update(self.cumsum_input)
-        with prof_marker("update_step_10"):
-            self.pfAttn.update(self.cumsum_input)
         
     def update_allocate_buffers(self):
         # Build list of buffers(op_device)
@@ -455,41 +289,3 @@ class Pipeline():
         
         bufferAllocator.allocate_buffer(self.device)
         print(f"Total allocated: {bufferAllocator.total_allocated / 1024 / 1024} MB in {self.device}")
-
-    def run(self, file_name="./test_data/llama3-8B-flashinfer", filefolder_name="./test_data/llama3-8B-flashinfer_folder"):
-
-        temp_out = torch.zeros(self.batch_size, dtype=torch.int32, device='cuda')
-
-        os.makedirs(f"./{filefolder_name}", exist_ok=True)
-
-        self.executor.execute({}, temp_out)
-        # self.executor.print_debug(temp_out, file_name, filefolder_name=filefolder_name)
-
-        with prof_marker("after_execute_before_return"):
-            temp_out = temp_out.cpu()
-        with prof_marker("after_execute_step_1"):
-            new_tokens = [ [temp_out[idx-1].item()] for idx in self.cumsum_input[1:]]
-        with prof_marker("after_execute_step_2"):
-            output = []
-        with prof_marker("after_execute_step_3"):
-            for req_idx, new_token in zip(self.input_req_idx, new_tokens):
-                # print(f"req_idx: {req_idx}, new_token: {new_token}")
-                output.append((req_idx, new_token))
-        return output
-    
-    # profile related functions
-    def init_profile_data(self, append_mode=False):
-        profile_dir = f"../profile_data/{self.pipeline_name}"
-        for operation in self.operation_list:
-                operation.init_profile(profile_dir, append_mode)
-
-    def profile_run(self):
-        for operation in self.operation_list:
-            if operation.batch_size > 0:
-                with prof_marker(f"{operation.name}"):
-                    print("Operation name:", operation.name)
-                    operation.profile()
-
-    def profile_print(self):
-        for operation in self.operation_list:
-            operation.print_profile()

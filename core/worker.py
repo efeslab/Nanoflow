@@ -2,33 +2,26 @@ import time
 import torch
 import os
 
+weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
+
 def worker(start_time, rank, world_size, shared_batch_size, shared_array, barrier, pipeline_list, command, input_ids):
     torch.cuda.set_device(rank)
     device = f"cuda:{rank}"
     pipeline = pipeline_list[rank]
+    pipeline.set_device(rank, device)
 
-    pipeline.set_device(device)
-    pipeline.init_external_data()
-    pipeline.init_operations()
-    pipeline.init_dependency()
-    pipeline.init_set_shape()
-    print("finish init shape")
-    # weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
-    weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
-    pipeline.init_set_weight(weight_map_wzr, cached=True)
+    pipeline.init(weight_map_wzr, cached=True)
 
-    pipeline.init_streams()
-    pipeline.config_network(rank)
-    pipeline.update_network_ops()
-    
     new_tokens = None
     cycle_count = 0
 
     while True:
         # First barrier: wait until the main process writes a new task.
         barrier.wait()
-        match command.value:
-            case 1:
+        # cmd = ''.join(command[:]).strip()
+        cmd = command.value.decode()
+        match cmd:
+            case "Prefill":
                 input0 = input_ids[0:2]
                 pipeline.update(input0, decode_batch_size=0)
                 # new_tokens = pipeline.run(file_name=f"./test_data/70B_test_torch_with_allreduce_{rank}", filefolder_name=f"./test_data/70B_test_torch_with_allreduce_{rank}_folder")
@@ -41,7 +34,7 @@ def worker(start_time, rank, world_size, shared_batch_size, shared_array, barrie
                 new_tokens.extend(input_ids[2:4])
                 pipeline.update(new_tokens, decode_batch_size=2)
 
-            case 2:
+            case "Decode":
                 # new_tokens = pipeline.run(file_name=f"./test_data/70B_test_torch_with_allreduce_{rank}", filefolder_name=f"./test_data/70B_test_torch_with_allreduce_{rank}_folder")
                 new_tokens = pipeline.run(file_name=f"./test_data/70B_test_flashinfer_with_allreduce_{rank}", filefolder_name=f"./test_data/70B_test_flashinfer_with_allreduce_{rank}_folder")
                 assert len(new_tokens) == 4, f"Expected 4 new tokens, got {len(new_tokens)}"
@@ -55,8 +48,25 @@ def worker(start_time, rank, world_size, shared_batch_size, shared_array, barrie
                 if rank == 0:
                     for req_idx, new_token in new_tokens:
                         shared_array[req_idx] = new_token[0]
-                
-            case -1:
+            
+            case "Profile":
+                pipeline.init_profile_data()
+
+                stream_names = [ f"TEST_{i}" for i in range(1, 11) ]
+                for stream_name in stream_names:
+                    print(f"Stream: {stream_name}")
+
+                    pipeline.batch_size = None
+                    # test for prefill
+                    total_batch_sizes = [2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 640, 768, 896, 1024]
+                    # total_batch_sizes = [1024]
+                    for idx, total_batch_size in enumerate(total_batch_sizes):
+                        input = [(decode_batch_size + idx, prefill_context_ids[:total_batch_size])]
+
+                        pipeline.update(input, is_profile=True, stream_name=stream_name)
+                        pipeline.profile_run()
+
+            case "Terminate":
                 # Termination signal received.
                 pipeline.terminate()
                 barrier.wait()

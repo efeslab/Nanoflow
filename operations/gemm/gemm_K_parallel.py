@@ -9,7 +9,7 @@ from core.IOWrapper import IOWrapper
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none, process_weight_layer
 
-from operations.gemm.gemm_impls import GEMMTorchImpl, GEMMTritonImpl, GEMMCudaImpl
+from operations.gemm.gemm_impls import GEMMTorchImpl, GEMMCudaImpl
 
 class GEMM_K_Parallel(Operations):
     def __init__(self, name, device, bias = False, nano_idx=None):
@@ -50,7 +50,6 @@ class GEMM_K_Parallel(Operations):
 
     def init_impl_map(self):
         self.add_impl(GEMMTorchImpl)
-        self.add_impl(GEMMTritonImpl)
         if platform_config.PLATFORM_CUDA:
             self.add_impl(GEMMCudaImpl)
     
@@ -80,61 +79,60 @@ class GEMM_K_Parallel(Operations):
 
         return new_op
 
-    def profile(self):
-        # print("Get into profile", self.name)
-        parameters_map = {
-            "M": 2,
-            "N": self.N,
-            "K": self.K,
-            "alpha": self.alpha,
-            "bias": self.bias,
-            "beta": self.beta
-        }
-
-        # check the similarity of the outputs
-        A = torch.randn((2, self.K), dtype=torch.float16, device='cuda')
-        B = torch.randn((self.K, self.N), dtype=torch.float16, device='cuda')
-        C = torch.randn((2, self.N), dtype=torch.float16, device='cuda')
-        output_list = []
+    def init_profile_database(self):
         for _, impl in self.impl_map.items():
-            # print(impl.impl_tag_profile)
-            impl_instance = impl()
-            out = torch.zeros((2, self.N), dtype=torch.float16, device='cuda')
-            
-            impl_instance.config(impl.impl_tag_profile, parameters_map)
-            impl_instance.run(A, B, C, out)
-            output_list.append(out)
-            # print("finish the implentation", impl_instance.category_tag)
-        
-        self.checkConsistencyBetweenImpl(output_list)
-        # print("Finish checking consistency")
+            self.cursor.execute(f'''
+            CREATE TABLE IF NOT EXISTS "{impl.category_tag}" (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT, 
+                batch_size   INTEGER,
+                sm_count INTEGER,
+                N INTEGER,
+                K INTEGER,
+                alpha REAL,
+                bias BOOLEAN,
+                beta REAL,
+                average_time_ms REAL,
+                GFLOPS REAL,
+                impl_tag TEXT,
+                UNIQUE (batch_size, sm_count, impl_tag)
+            );
+            ''')
+    
+    def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
+        # Calculate the average time
+        print(f"Name: {self.name}, Category: {category_tag}, impl_tag: {impl_tag}, Batch Size: {self.batch_size}, Average Time: {average_elapsed_ms} ms")
+        GFLOPS = (2 * self.batch_size * self.tp_N * self.tp_K) / average_elapsed_ms / 1e6 # in GigaFLOPS
+        self.cursor.execute(f'''
+            INSERT OR IGNORE INTO {category_tag} (batch_size, sm_count, N, K, alpha, bias, beta, average_time_ms, GFLOPS, impl_tag)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (self.batch_size, self.sm_count, self.tp_N, self.tp_K, self.alpha, self.bias, self.beta, average_elapsed_ms, GFLOPS, impl_tag))
 
-        rounds = 100
-        batch_sizes = [2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 640, 768, 896, 1024]
-        for batch_size in batch_sizes:
-            parameters_map["M"] = batch_size
-            D = torch.zeros((batch_size, self.N), dtype=torch.float16, device='cuda')
-            for _, impl in self.impl_map.items():
-                impl_instance = impl()
-                impl_instance.config(impl.impl_tag_profile, parameters_map)
-                category_tag = impl_instance.category_tag
-                total_latency = 0
-                for round in range(rounds):
-                    A = torch.randn((batch_size, self.K), dtype=torch.float16, device='cuda')
-                    B = torch.randn((self.K, self.N), dtype=torch.float16, device='cuda')
-                    C = torch.randn((batch_size, self.N), dtype=torch.float16, device='cuda')
-                    # record the time
-                    start_time = time.time()
-                    impl_instance.run(A, B, C, D)
-                    if round > 0:
-                        total_latency += time.time() - start_time
-                average_time = total_latency / rounds
-                print("name: {}, batch_size: {}, average_time: {}".format(self.name + f"_{category_tag}", batch_size, average_time))
-                self.cursor.execute('''
-                    INSERT INTO performance (keyword, batch_size, average_time)
-                    VALUES (?, ?, ?)
-                    ''', (self.name + f"_{category_tag}", batch_size, average_time))
-        self.conn.commit()
+    def init_impl_configs(self):
+        self.impl_configs_map = {}
+        for _, impl in self.impl_map.items():
+            category_tag = impl.category_tag
+            if category_tag == "cuda":
+                from pybind.src.generate_gemm.genGEMM import GetAllH100GemmCanonicalNames
+                names = GetAllH100GemmCanonicalNames()
+                # print(f"GetAllH100GemmCanonicalNames: {names}")
+                self.impl_configs_map[category_tag] = [
+                    ("SM90_256_128_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", None),
+                    # ("SM90_256_128_64_2_1_1_1_RowMajor_RowMajor_RowMajor_warpspecialized_cooperative_epi_nosmem", None),
+                    # (name, None) for name in names if "RowMajor_RowMajor_RowMajor" in name
+                ]
+            else:
+                self.impl_configs_map[category_tag] = [
+                    (None, None)
+                ]
+
+    def run(self, layer):
+        with prof_marker("GEMM_run"):
+            # with prof_marker("Allocate Sliced C"):
+            C = self.inputs["C"].tensor if self.bias else torch.empty((self.batch_size, self.N), dtype=torch.float16, device=self.device)
+            self.impl.run(self.inputs["A"].tensor, self.weights["B"].weight_map[layer], C, self.outputs["D"].tensor)
+
+    def profile_run(self):
+        self.run(self.layer_list[0])
 
     def processWeight(self, global_weight_map, cached_weight_map, cached, device):
         if not isinstance(self.weight_name, list):
@@ -166,7 +164,4 @@ class GEMM_K_Parallel_Layer(Operation_Layer):
         super().__init__(layer, base_op)
 
     def run(self):
-        with prof_marker("GEMM_run"):
-            # with prof_marker("Allocate Sliced C"):
-            C = self.inputs["C"].tensor if self.parent.bias else torch.empty((self.parent.batch_size, self.parent.N), dtype=torch.float16, device=self.device)
-            self.impl.run(self.inputs["A"].tensor, self.weights["B"].weight_map[self.layer], C, self.outputs["D"].tensor)
+        self.parent.run(self.layer)
