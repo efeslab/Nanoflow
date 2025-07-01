@@ -66,7 +66,7 @@ class LayerNorm(Operations):
 
         return new_op
 
-    def init_profile_database(self):
+    def init_profile_db(self):
         for _, impl in self.impl_map.items():
             self.cursor.execute(f'''
             CREATE TABLE IF NOT EXISTS "{impl.category_tag}" (
@@ -78,7 +78,7 @@ class LayerNorm(Operations):
             );
             ''')
             
-    def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
+    def store_profile_db(self, category_tag, impl_tag, average_elapsed_ms):
         print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {self.batch_size}, Average Time: {average_elapsed_ms} ms")
         self.cursor.execute(f'''
             INSERT OR IGNORE INTO {category_tag} (batch_size, sm_count, hidden_dim, average_time_ms)

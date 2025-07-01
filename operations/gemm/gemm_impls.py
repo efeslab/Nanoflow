@@ -13,11 +13,14 @@ class GEMMTorchImpl(OperationImpl):
         self.beta = 0.0
         if self.bias:
             self.beta = self.op_base.beta
+
+        # if self.op_base.sm_count is not None:
+        #     bind_green_ctx.set_cublas_sm_count_target(self.op_base.sm_count)
     
     def run(self, A, B, C, D):
         with torch.cuda.stream(self.stream):
-            if self.op_base.sm_count is not None:
-                bind_green_ctx.set_cublas_sm_count_target(self.op_base.sm_count)
+            # if self.op_base.sm_count is not None:
+            #     bind_green_ctx.set_cublas_sm_count_target(self.op_base.sm_count)
             if self.bias or self.alpha:
                 torch.addmm(C, A, B, beta=self.beta, alpha=self.alpha, out=D)
             else:

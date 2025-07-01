@@ -19,10 +19,10 @@ class GlobalInput(Operations):
     def setShape(self):
         self.outputs["tokens"].init_shape((0,))
 
-    def init_profile_database(self):
+    def init_profile_db(self):
         pass
 
-    def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
+    def store_profile_db(self, category_tag, impl_tag, average_elapsed_ms):
         pass
 
     def run(self):
@@ -54,10 +54,10 @@ class GlobalOutput(Operations):
         self.inputs["tokens"].init_shape((0,))
         self.outputs["new_token"].init_shape((0,))
 
-    def init_profile_database(self):
+    def init_profile_db(self):
         pass
 
-    def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
+    def store_profile_db(self, category_tag, impl_tag, average_elapsed_ms):
         pass
 
     def run(self):

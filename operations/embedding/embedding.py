@@ -1,7 +1,4 @@
 import torch
-import time
-import os
-import sqlite3
 
 import platform_config
 from operations.operation_base import Operations, Operation_Layer
@@ -56,7 +53,7 @@ class GenEmbedding(Operations):
         self.inputs["token"].init_shape((0,))
         self.outputs["output"].init_shape((0, self.N))
 
-    def init_profile_database(self):
+    def init_profile_db(self):
         for _, impl in self.impl_map.items():
             self.cursor.execute(f'''
             CREATE TABLE IF NOT EXISTS "{impl.category_tag}" (
@@ -69,7 +66,7 @@ class GenEmbedding(Operations):
             );
             ''')
 
-    def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
+    def store_profile_db(self, category_tag, impl_tag, average_elapsed_ms):
         print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {self.batch_size}, Average Time: {average_elapsed_ms} ms")
         self.cursor.execute(f'''
             INSERT OR IGNORE INTO {category_tag} (batch_size, sm_count, vocab_size, hidden_dim, average_time_ms)

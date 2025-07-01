@@ -122,7 +122,12 @@ class RopeAppendFlashinfer(Operations):
 
         return new_op
 
-    def init_profile_database(self):
+    def setup_profile_custom(self):
+        super().setup_profile_custom()
+        self.k_ptr, self.v_ptr = self.externals["KVCache"].get_whole_kv_data(self.layer_list[0])
+        
+
+    def init_profile_db(self):
         for _, impl in self.impl_map.items():
             self.cursor.execute(f'''
             CREATE TABLE IF NOT EXISTS "{impl.category_tag}" (
@@ -135,9 +140,8 @@ class RopeAppendFlashinfer(Operations):
                 average_time_ms REAL
             );
             ''')
-        self.k_ptr, self.v_ptr = self.externals["KVCache"].get_whole_kv_data(self.layer_list[0])
 
-    def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
+    def store_profile_db(self, category_tag, impl_tag, average_elapsed_ms):
         print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {self.batch_size}, Average Time: {average_elapsed_ms} ms")
         self.cursor.execute(f'''
             INSERT OR IGNORE INTO {category_tag} (batch_size, sm_count, head_dim, num_qo_heads, num_kv_heads, average_time_ms)

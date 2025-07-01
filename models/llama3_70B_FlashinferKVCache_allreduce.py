@@ -21,8 +21,7 @@ from core.bufferAllocate import BufferAllocator
 from core.executor import Executor
 from core.nanobatchSplit import split_nanobatch
 from utils.prof_marker import prof_marker
-
-
+from utils.greenctx import create_greenctx
 
 class Pipeline():
     def __init__(self, TP_idx, TP_size, PP_idx=0, PP_size=1, DP_idx=0, DP_size=1):
@@ -79,9 +78,42 @@ class Pipeline():
             "OTHER": (OTHER_STREAM, None)
         }
 
+        gemm_stream_with_pf, pf_stream, gemm_stream_with_pf_sm, pf_stream_sm = create_greenctx(0.85, 0.15, self.rank)
+        # Create green context streams for testing
+        test_stream_01, test_stream_09, test_stream_01_sm, test_stream_09_sm = create_greenctx(0.1, 0.9, self.rank)
+        test_stream_02, test_stream_08, test_stream_02_sm, test_stream_08_sm = create_greenctx(0.2, 0.8, self.rank)
+        test_stream_03, test_stream_07, test_stream_03_sm, test_stream_07_sm = create_greenctx(0.3, 0.7, self.rank)
+        test_stream_04, test_stream_06, test_stream_04_sm, test_stream_06_sm = create_greenctx(0.4, 0.6, self.rank)
+        test_stream_05, _, test_stream_05_sm, _ = create_greenctx(0.5, 0.5, self.rank)
+
+        self.profile_streams = {
+            "TEST_1": (test_stream_01, test_stream_01_sm),
+            "TEST_2": (test_stream_02, test_stream_02_sm),
+            "TEST_3": (test_stream_03, test_stream_03_sm),
+            "TEST_4": (test_stream_04, test_stream_04_sm),
+            "TEST_5": (test_stream_05, test_stream_05_sm),
+            "TEST_6": (test_stream_06, test_stream_06_sm),
+            "TEST_7": (test_stream_07, test_stream_07_sm),
+            "TEST_8": (test_stream_08, test_stream_08_sm),
+            "TEST_9": (test_stream_09, test_stream_09_sm),
+            "TEST_10": (torch.cuda.Stream(), gemm_stream_with_pf_sm + pf_stream_sm)
+        }
+        self.sm_counts = [test_stream_01_sm, test_stream_02_sm, test_stream_03_sm, test_stream_04_sm, test_stream_05_sm,
+                    test_stream_06_sm, test_stream_07_sm, test_stream_08_sm, test_stream_09_sm,
+                    gemm_stream_with_pf_sm + pf_stream_sm]
+
     def init_external_data(self):
         self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048, self.page_size, self.tp_size, self.device)
         self.kv_cache = BatchedDistKVCache(self.kv_pool)
+
+    def reset(self):
+        # reset kv cache and kv pool
+        self.kv_pool.reset()
+        self.kv_cache.reset()
+
+        # reset batch size and decode batch size
+        self.batch_size = None
+        self.decode_batch_size = None
 
     def init_operations(self):
         self.global_input    = GlobalInput("GlobalInput", self.device).first_only()
@@ -161,7 +193,7 @@ class Pipeline():
         self.redist_a = Redist("RedistAggregation", self.device, num_inputs=2, num_outputs=1)
 
         # Save operations in an instance variable
-        self.operation_list = [
+        self.operation_list: list[Operations] = [
             self.global_input, self.gen_embedding, self.layerNormAttn, self.kqv, self.ropeAppend,
             self.decAttn, self.pfAttn, self.o, self.allReduce_o, self.layerNormFFN, self.ug,
             self.activation, self.d, self.allReduce_d,
@@ -273,7 +305,10 @@ class Pipeline():
         self.gen_embedding.config_tag("cuda")
         self.layerNormAttn.config_tag("cuda")
         self.activation.config_tag("cuda")
-        self.kqv.config_tag([gemm_tag, gemm_tag])
+
+        # self.kqv.config_tag([gemm_tag, gemm_tag])
+
+        self.kqv.config_tag(gemm_tag)
         self.ropeAppend.config_tag("cuda")
         self.decAttn.config_tag("batched_cuda")
         self.pfAttn.config_tag("batched_cuda")
@@ -287,10 +322,10 @@ class Pipeline():
         self.sample.config_tag("cuda")
         self.getLogits.config_tag(gemm_tag)
 
-    def config_network(self, device_id=0):
+    def config_network(self, rank=0):
         os.environ["MASTER_ADDR"] = "localhost"
         os.environ["MASTER_PORT"] = "12547"
-        dist.init_process_group(backend="nccl", rank=device_id, world_size=self.num_cuda_devices)
+        dist.init_process_group(backend="nccl", rank=rank, world_size=self.num_cuda_devices)
         tp_group_idx = self.tp_idx // self.tp_size
         print("tp_group_idx: ", tp_group_idx, "tp_size: ", self.tp_size)
         self.tp_group = dist.new_group(ranks=[i for i in range(tp_group_idx * self.tp_size, (tp_group_idx + 1) * self.tp_size)])
@@ -301,7 +336,10 @@ class Pipeline():
         self.gen_embedding.set_stream(self.streams["GEMM"])
         self.layerNormAttn.set_stream(self.streams["GEMM"])
         self.activation.set_stream(self.streams["GEMM"])
-        self.kqv.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+
+        # self.kqv.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+       
+        self.kqv.set_stream(self.streams["GEMM"])
         self.ropeAppend.set_stream(self.streams["GEMM"])
         self.decAttn.set_stream(self.streams["GEMV"])
         self.pfAttn.set_stream(self.streams["GEMV"])
@@ -315,6 +353,10 @@ class Pipeline():
         self.sample.set_stream(self.streams["GEMM"])
         self.getLogits.set_stream(self.streams["GEMM"])
         self.global_output.set_stream(self.streams["GEMM"])
+
+    def profile_config_streams(self, stream_tuple):
+        for operation in self.operation_list:
+            operation.set_stream(stream_tuple)
 
     def update_network_ops(self):
         self.allReduce_o.update(self.tp_group)
@@ -350,7 +392,7 @@ class Pipeline():
         for operation in new_operation_list:
             self.op_layers.extend(operation.children)
 
-    def update(self, new_input_infos, decode_batch_size=0):
+    def update(self, new_input_infos, decode_batch_size=0, is_profile=False, stream_name="TEST_1"):
         self.input_req_idx = []
         self.input_ids = []
         with prof_marker("update_step_0"):
@@ -369,10 +411,14 @@ class Pipeline():
                 # print("decode_batch_size: ", decode_batch_size)
                 self.clear_batch_size()
                 self.config_batch_size()
-                self.nanobatch_split(self.batch_size, decode_batch_size)
+                # self.nanobatch_split(self.batch_size, decode_batch_size)
                 self.update_allocate_buffers()
                 # print("finish update_allocate_buffers")
-                self.config_streams()
+                if is_profile:
+                    print(f"Configuring streams for profiling with stream name: {self.profile_streams[stream_name][0]}")
+                    self.profile_config_streams(self.profile_streams[stream_name])
+                else:
+                    self.config_streams()
                 self.config_algorithm()
                 self.init_executor()
         with prof_marker("update_step_3"):
@@ -438,16 +484,17 @@ class Pipeline():
 
     # profile related functions
     def init_profile_data(self, append_mode=False):
+        is_save_db = True if self.rank == 0 else False
         profile_dir = f"../profile_data/{self.pipeline_name}"
         for operation in self.operation_list:
-                operation.init_profile(profile_dir, append_mode)
-    
+            operation.setup_profile(profile_dir, append_mode, is_save_db=is_save_db)
+
     def profile_run(self):
         for operation in self.operation_list:
             if operation.batch_size > 0:
                 with prof_marker(f"{operation.name}"):
                     print("Operation name:", operation.name)
-                    operation.profile()
+                    operation.profile_all()
 
     def profile_print(self):
         for operation in self.operation_list:

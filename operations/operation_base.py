@@ -21,12 +21,12 @@ class Operations():
         self.impl: OperationImpl
 
         # remain in this class
+        self.original_name = name
         if nano_idx is not None:
             self.name = f"{name}{nano_idx}"
-            self.original_name = name
         else:
             self.name = name
-            self.original_name = name
+        
         self.first_layer_only = False
         self.last_layer_only = False
         self.weight_name = None
@@ -88,14 +88,22 @@ class Operations():
         self.last_layer_only = True
         return self
     
-    def init_profile_database(self):
+    # profile related methods
+    def init_profile_db(self):
         """
         Initialize the database for profiling results.
         This method should create the necessary tables and prepare the database for storing profiling data.
         """
         raise NotImplementedError("This method should be implemented in the subclass.")
 
-    def check_profiled(self, category_tag):
+    def store_profile_db(self, category_tag, impl_tag, average_elapsed_ms):
+        """
+        Store the profiling results in the database.
+        This method should insert the profiling data into the appropriate tables.
+        """
+        raise NotImplementedError("This method should be implemented in the subclass.")
+
+    def is_profiled_in_db(self, category_tag):
         self.cursor.execute(f'''
             SELECT * FROM {category_tag}
             WHERE batch_size = ? AND sm_count = ?
@@ -106,13 +114,6 @@ class Operations():
             return True
         return False
 
-    def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
-        """
-        Store the profiling results in the database.
-        This method should insert the profiling data into the appropriate tables.
-        """
-        raise NotImplementedError("This method should be implemented in the subclass.")
-
     def init_impl_configs(self):
         self.impl_configs_map = {}
         for _, impl in self.impl_map.items():
@@ -120,23 +121,30 @@ class Operations():
             self.impl_configs_map[category_tag] = [
                 (None, None)
             ]
+    
+    def setup_profile_custom(self):
+        self.init_impl_configs()
 
-    def init_profile(self, profile_dir, append_mode):
+    def setup_profile(self, profile_dir, append_mode=False, is_save_db=True):
         if not os.path.exists(profile_dir):
             os.makedirs(profile_dir)
         
         self.conn = sqlite3.connect(os.path.join(profile_dir, f"{self.name}.db"))
         self.cursor = self.conn.cursor()
-        if not append_mode:
-            for _, impl in self.impl_map.items():
-                self.cursor.execute(f'''
-                    DROP TABLE IF EXISTS "{impl.category_tag}";
-                ''')
+        self.is_save_db = is_save_db
 
-        self.init_profile_database()
-        self.init_impl_configs()
+        self.setup_profile_custom()
+        # create tables for each implementation category
+        if self.is_save_db:
+            if not append_mode:
+                for _, impl in self.impl_map.items():
+                    self.cursor.execute(f'''
+                        DROP TABLE IF EXISTS "{impl.category_tag}";
+                    ''')
+            print(f"Setting up profile database for operation {self.name} with append mode: {append_mode}")
+            self.init_profile_db()
+            self.conn.commit()
 
-        self.conn.commit()
 
     def profile_update(self):
         pass
@@ -144,17 +152,16 @@ class Operations():
     def profile_run(self):
         pass
 
-    def profile(self):
+    def profile_all(self):
         with prof_marker(f"batchsize:{self.batch_size}"):
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
 
             g = torch.cuda.CUDAGraph()
-            # test_output_list = []
             for _, impl in self.impl_map.items():
                 self.impl = impl(self, self.stream, self.device)
                 category_tag = impl.category_tag
-                is_profiled = self.check_profiled(category_tag)
+                is_profiled = self.is_profiled_in_db(category_tag)
                 if is_profiled:
                     # If already profiled, we can skip profiling
                     continue
@@ -163,15 +170,21 @@ class Operations():
                     self.impl.config(impl_tag, para_map)
                     self.profile_update()
                     g.reset()
+
                     # warm up for 10 cycles.
                     for _ in range(10):
                         self.profile_run()
 
-                    # profile for 100 cycles.
+                    torch.cuda.synchronize()
+                    # prepare a graph for 100 cycles.
                     rounds = 100
                     with torch.cuda.graph(g, stream=self.stream):
                         for round in range(rounds):
                             self.profile_run()
+                    torch.cuda.synchronize()
+
+                    # sync for network ops.
+                    self.profile_run()
 
                     start.record(self.stream)
                     with torch.cuda.stream(self.stream):
@@ -180,11 +193,10 @@ class Operations():
                     torch.cuda.synchronize()
                     elapsed_ms = start.elapsed_time(end)
                     average_elapsed_ms = elapsed_ms / rounds
-                    # Store to database
-                    self.store_profile_database(category_tag, impl_tag, average_elapsed_ms)
-                    # test_output_list.append(self.outputs["output"].tensor)
+                    # Store to results
+                    if self.is_save_db:
+                        self.store_profile_db(category_tag, impl_tag, average_elapsed_ms)
             self.conn.commit()
-            # self.checkConsistencyBetweenImpl(test_output_list)
 
     def print_profile(self):
         if not hasattr(self, 'cursor'):

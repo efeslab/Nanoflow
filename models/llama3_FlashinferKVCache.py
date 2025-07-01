@@ -17,7 +17,7 @@ from core.bufferAllocate import BufferAllocator
 from core.executor import Executor
 from core.nanobatchSplit import split_nanobatch
 from utils.prof_marker import prof_marker
-from utils.green_context import create_greenctx
+from utils.greenctx import create_greenctx
 
 class Pipeline():
     def __init__(self):
@@ -132,10 +132,7 @@ class Pipeline():
 
 
 
-    def init_external_data(self, for_test=False):
-        if for_test:
-            self.kv_cache = KVCacheNone()
-            return
+    def init_external_data(self):
         self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048* 28, self.page_size, 1, self.device)
         self.kv_cache = BatchedDistKVCache(self.kv_pool)
     
@@ -216,7 +213,7 @@ class Pipeline():
         self.redist_a = Redist("RedistAggregation", self.device, num_inputs=2, num_outputs=1)
 
         # Save operations in an instance variable
-        self.operation_list = [
+        self.operation_list: list[Operations] = [
             self.global_input, self.gen_embedding, self.layerNormAttn, self.kqv, self.ropeAppend,
             self.decAttn, self.pfAttn, self.o, self.layerNormFFN, self.ug, self.activation, self.d,
             self.modelLayerNorm, self.getLogits, self.sample, self.global_output
@@ -322,23 +319,23 @@ class Pipeline():
         self.decAttn.config_tag("batched_cuda")
         self.pfAttn.config_tag("batched_cuda")
 
-        # self.layerNormAttn.config_tag("cuda")        
-        # self.activation.config_tag("cuda")
-        # self.kqv.config_tag(gemm_tag)
-        # self.ropeAppend.config_tag("cuda")
-        # self.layerNormFFN.config_tag("cuda")
-        # self.o.config_tag(gemm_tag)
-        # self.ug.config_tag(gemm_tag)
-        # self.d.config_tag(gemm_tag)
+        self.layerNormAttn.config_tag("cuda")        
+        self.activation.config_tag("cuda")
+        self.kqv.config_tag(gemm_tag)
+        self.ropeAppend.config_tag("cuda")
+        self.layerNormFFN.config_tag("cuda")
+        self.o.config_tag(gemm_tag)
+        self.ug.config_tag(gemm_tag)
+        self.d.config_tag(gemm_tag)
 
-        self.layerNormAttn.config_tag(["cuda", "cuda"])
-        self.activation.config_tag(["cuda", "cuda"])
-        self.kqv.config_tag([gemm_tag, gemm_tag])
-        self.ropeAppend.config_tag(["cuda", "cuda"])
-        self.layerNormFFN.config_tag(["cuda", "cuda"])
-        self.o.config_tag([gemm_tag, gemm_tag])
-        self.ug.config_tag([gemm_tag, gemm_tag])
-        self.d.config_tag([gemm_tag, gemm_tag])
+        # self.layerNormAttn.config_tag(["cuda", "cuda"])
+        # self.activation.config_tag(["cuda", "cuda"])
+        # self.kqv.config_tag([gemm_tag, gemm_tag])
+        # self.ropeAppend.config_tag(["cuda", "cuda"])
+        # self.layerNormFFN.config_tag(["cuda", "cuda"])
+        # self.o.config_tag([gemm_tag, gemm_tag])
+        # self.ug.config_tag([gemm_tag, gemm_tag])
+        # self.d.config_tag([gemm_tag, gemm_tag])
 
         self.modelLayerNorm.config_tag("cuda")
         self.sample.config_tag("cuda")
@@ -412,7 +409,7 @@ class Pipeline():
                 # print("decode_batchsize: ", decode_batchsize)
                 self.clear_batch_size()
                 self.config_batch_size(decode_batch_size)
-                self.nanobatch_split(self.batch_size, decode_batch_size)
+                # self.nanobatch_split(self.batch_size, decode_batch_size)
                 self.update_allocate_buffers()
                 # print("finish update_allocate_buffers")
                 if is_profile:
@@ -481,14 +478,14 @@ class Pipeline():
     def init_profile_data(self, append_mode=False):
         profile_dir = f"../profile_data/{self.pipeline_name}"
         for operation in self.operation_list:
-                operation.init_profile(profile_dir, append_mode)
+            operation.setup_profile(profile_dir, append_mode=append_mode, is_save_db=True)
 
     def profile_run(self):
         for operation in self.operation_list:
             if operation.batch_size > 0:
                 with prof_marker(f"{operation.name}"):
                     print("Operation name:", operation.name)
-                    operation.profile()
+                    operation.profile_all()
 
     def profile_print(self):
         for operation in self.operation_list:
