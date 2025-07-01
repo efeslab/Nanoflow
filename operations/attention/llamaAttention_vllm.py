@@ -1,13 +1,13 @@
 import logging
 import torch
 
-from operations.operation_base import Operations, Operation_Device, Operation_Layer
+from operations.operation_base import Operations, Operation_Layer
 from core.IOWrapper import IOWrapper
 from operations.impl_base import OperationImpl
 from kvcache.kv import KVCachevLLM
 from vllm._custom_ops import paged_attention_rocm
 
-from utils.help_functions import tensor_offset_to_req_idx  # type: ignore[import]
+from utils.util_functions import tensor_offset_to_req_idx
 
 _PARTITION_SIZE_ROCM = 256
 
@@ -31,6 +31,7 @@ class DecPagedAttnBatchedImpl(OperationImpl):
         device_id : int
             The device ID.
         """
+        self.op_base: DecPagedAttn
         super().__init__(op_base, stream, device_id)  # type: ignore
         self.device_id = device_id
         self.num_qo_heads = int(op_base.num_qo_heads)  # type: ignore
@@ -127,15 +128,20 @@ class DecPagedAttnBatchedImpl(OperationImpl):
 
 
 class DecPagedAttn(Operations):
-    def __init__(self, name):
-        super().__init__(name)
-        self.inputs = {"Q": IOWrapper(self, "Q")}
-        self.outputs = {"output": IOWrapper(self, "output")}
-        self.externals = {"KVCache": None}
+    def __init__(self, name, device):
+        super().__init__(name, device)
+        self.inputs = {"Q": IOWrapper(self, "Q", device).is_input()}
+        self.outputs = {"output": IOWrapper(self, "output", device).is_output()}
+        self.externals: dict[str, KVCachevLLM] = {}
         self.impl_map = {}
         self.init_impl_map()
+        self.op_layer = DecPagedAttn_Layer
         self.batched_decode_wrapper = None
-        self.op_device = DecPagedAttn_Device
+        # Initialize metadata
+        self.qo_indicies: torch.Tensor
+        self.kv_seqlens: torch.Tensor 
+        self.max_seqlen: int
+        self.block_tables: torch.Tensor
 
     def init_impl_map(self):
         self.add_impl(DecPagedAttnBatchedImpl)
@@ -144,9 +150,12 @@ class DecPagedAttn(Operations):
         self.num_kv_heads = num_kv_heads // tp_size
         self.num_qo_heads = num_qo_heads // tp_size
         self.head_dim = head_dim
-        self.q_dim = num_qo_heads * head_dim
-        for op_device in self.children:
-            op_device.setShapeForIOWrappers()
+        self.inputs["Q"].init_shape(
+            (0, num_qo_heads * head_dim)
+        )
+        self.outputs["output"].init_shape(
+            (0, num_qo_heads * head_dim)
+        )
 
     def update(self, cumsum_input: list[int], device_id: int):
         self.qo_indicies = torch.tensor(
@@ -164,7 +173,7 @@ class DecPagedAttn(Operations):
         )
         self.qo_seqlens = self.qo_indicies.diff()
         self.kv_seqlens = self.externals["KVCache"].get_indices(self.start_req_idx, self.end_req_idx)
-        self.max_seqlen = self.kv_seqlens.max().item() if self.kv_seqlens.numel() > 0 else 0
+        self.max_seqlen = int(self.kv_seqlens.max().item()) if self.kv_seqlens.numel() > 0 else 0
         self.block_tables = self.externals["KVCache"].get_block_table(self.start_req_idx, self.end_req_idx)
 
 
@@ -172,30 +181,16 @@ class DecPagedAttn(Operations):
         pass
 
 
-class DecPagedAttn_Device(Operation_Device):
-    def __init__(self, parent, device):
-        super().__init__(parent, device)
-        self.op_layer = DecPagedAttn_Layer
-
-    def setShapeForIOWrappers(self):
-        self.inputs["Q"].init_shape(
-            (0, self.parent.num_qo_heads * self.parent.head_dim)
-        )
-        self.outputs["output"].init_shape(
-            (0, self.parent.num_qo_heads * self.parent.head_dim)
-        )
-
-
 class DecPagedAttn_Layer(Operation_Layer):
-    def __init__(self, layer, op_device):
-        super().__init__(layer, op_device=op_device)
+    def __init__(self, layer, base_op):
+        super().__init__(layer, base_op)
 
     def run(self):
         Q = self.inputs["Q"].tensor
         # self.operator_device.parent.impl.run(Q, self.kv_tuple, self.outputs["output"].tensor)
         self.impl.run(
             self.layer,
-            self.parent.parent.qo_indicies,
+            self.parent.qo_indicies,
             Q,
             None,
             self.parent.externals["KVCache"],

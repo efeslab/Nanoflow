@@ -1,13 +1,12 @@
 import logging
 import torch
 
-from operations.rope.help_functions import apply_rope  # type: ignore[import]
-from operations.operation_base import Operations, Operation_Device, Operation_Layer
+from operations.operation_base import Operations, Operation_Layer
 from core.IOWrapper import IOWrapper
 from operations.impl_base import OperationImpl
 from kvcache.kv import KVCacheBatched, KVCachevLLM
 from utils.prof_marker import prof_marker
-from utils.help_functions import tensor_offset_to_req_idx
+from utils.util_functions import tensor_offset_to_req_idx
 
 from .triton.kernels.rope import apply_rotary_emb
 
@@ -18,6 +17,7 @@ class RopeAppendBatchedFAImpl(OperationImpl):
     def __init__(
         self, op_base: "RopeAppendBatched", stream: torch.cuda.Stream, device_id: int
     ):
+        self.op_base: RopeAppendBatched
         super().__init__(op_base, stream, device_id)
         self.rope_type = op_base.rope_type
         self.device_id = device_id
@@ -181,6 +181,7 @@ class RopeAppendBatchedvLLMImpl(OperationImpl):
     def __init__(
         self, op_base: "RopeAppendBatched", stream: torch.cuda.Stream, device_id: int
     ):
+        self.op_base: RopeAppendBatched
         super().__init__(op_base, stream, device_id)
         self.rope_type = op_base.rope_type
         self.device_id = device_id
@@ -284,6 +285,7 @@ class RopeAppendBatched(Operations):
     def __init__(
         self,
         name: str,
+        device,
         rope_type: str = "llama3",
         theta: float = 10000.0,
         factor: float = 8.0,
@@ -301,11 +303,10 @@ class RopeAppendBatched(Operations):
             high_freq_factor (float): Upper bound frequency factor (llama3).
             original_max_position_embeddings (int): The original maximum context length used in pretraining.
         """
-        super().__init__(name)
-        self.inputs = {"kqv": IOWrapper(self, "kqv")}
-        self.outputs = {"q": IOWrapper(self, "q")}
-        self.externals = {"KVCache": None}
-
+        super().__init__(name, device)
+        self.inputs = {"kqv": IOWrapper(self, "kqv", device).is_input()}
+        self.outputs = {"q": IOWrapper(self, "q", device).is_output()}
+        self.externals: dict[str, KVCacheBatched | KVCachevLLM] = {}
         # Save RoPE configuration.
         self.rope_type = rope_type
         self.theta = theta  # typically config.rope_theta
@@ -313,10 +314,17 @@ class RopeAppendBatched(Operations):
         self.low_freq_factor = low_freq_factor
         self.high_freq_factor = high_freq_factor
         self.original_max_position_embeddings = original_max_position_embeddings
-
         self.impl_map = {}
         self.init_impl_map()
-        self.op_device = RopeAppendBatched_Device
+        self.op_layer = RopeAppendBatched_Layer
+        self.start_req_idx: int
+        self.end_req_idx: int
+        self.qo_indices: torch.Tensor
+        self.seqlens: torch.Tensor
+        self.max_seqlen: int
+        self.per_token_offset: torch.Tensor
+        self.rev_input_indptr: torch.Tensor
+        self.indices: torch.Tensor
 
     def init_impl_map(self):
         self.add_impl(RopeAppendBatchedFAImpl)  # type: ignore
@@ -326,7 +334,13 @@ class RopeAppendBatched(Operations):
         self.num_kv_heads = num_kv_heads // tp_size
         self.num_qo_heads = num_qo_heads // tp_size
         self.head_dim = head_dim
-        self.updateChildrenIOShape()
+        self.tp_size = tp_size
+        self.inputs["kqv"].init_shape(
+            (0, (self.num_qo_heads + 2 * self.num_kv_heads) * self.head_dim // self.tp_size)
+        )
+        self.outputs["q"].init_shape(
+            (0, self.num_qo_heads * self.head_dim // self.tp_size)
+        )
 
     def update(self, qo_indices: list[int], decode_batchsize: int, device_id: int):
         if self.isNanoSplit:
@@ -352,7 +366,7 @@ class RopeAppendBatched(Operations):
                 - qo_indices[self.start_req_idx]
             )
             self.seqlens = self.qo_indices.diff()
-            self.max_seqlen = self.seqlens.max().item()
+            self.max_seqlen = int(self.seqlens.max().item())
             self.per_token_offset = torch.zeros(int(self.qo_indices[-1].item()))
             self.rev_input_indptr = torch.zeros(int(self.qo_indices[-1].item()))
             self.indices = self.externals["KVCache"].get_indices(
@@ -392,6 +406,7 @@ class RopeAppendBatched(Operations):
     def copy_nano(self, index: int):
         new_op = RopeAppendBatched(
             f"{self.name}{index}",
+            self.device,
             self.rope_type,
             self.theta,
             self.factor,
@@ -400,9 +415,8 @@ class RopeAppendBatched(Operations):
             self.original_max_position_embeddings,
         )
         new_op.externals = self.externals
-        new_op.expand_all_gpu_and_layers(len(self.device_list), 32)  # type: ignore
+        new_op.expand_layer(self.layer_list)
         new_op.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim)
-        new_op.set_stream(self.stream)  # type: ignore
         self.nano_ops.append(new_op)  # type: ignore
 
         return new_op
@@ -410,27 +424,6 @@ class RopeAppendBatched(Operations):
     def profile(self) -> None:
         raise NotImplementedError(
             "Profile method is not implemented for RopeAppendBatched."
-        )
-
-
-class RopeAppendBatched_Device(Operation_Device):
-    def __init__(self, parent, device):
-        super().__init__(parent, device)
-        self.op_layer = RopeAppendBatched_Layer
-
-    def setShapeForIOWrappers(self):
-        # The input tensor "kqv" is assumed to have a flattened layout:
-        # [batch_size, (num_qo_heads + 2 * num_kv_heads) * head_dim]
-        self.inputs["kqv"].init_shape(
-            (
-                0,
-                (self.parent.num_qo_heads + 2 * self.parent.num_kv_heads)
-                * self.parent.head_dim,
-            )
-        )
-        # The output "q" has shape [batch_size, num_qo_heads * head_dim]
-        self.outputs["q"].init_shape(
-            (0, self.parent.num_qo_heads * self.parent.head_dim)
         )
 
 

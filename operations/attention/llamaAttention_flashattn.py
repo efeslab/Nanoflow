@@ -1,13 +1,13 @@
 import logging
 import torch
 
-from operations.operation_base import Operations, Operation_Device, Operation_Layer
+from operations.operation_base import Operations, Operation_Layer
 from core.IOWrapper import IOWrapper
 from operations.impl_base import OperationImpl
-from kvcache.kv import KVCacheBatched
+from kvcache.kv import KVCacheBatched, KVCachevLLM
 from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 
-from utils.help_functions import tensor_offset_to_req_idx  # type: ignore[import]
+from utils.util_functions import tensor_offset_to_req_idx  # type: ignore[import]
 
 
 class DecAttnFABatchedImpl(OperationImpl):
@@ -30,6 +30,7 @@ class DecAttnFABatchedImpl(OperationImpl):
         device_id : int
             The device ID.
         """
+        self.op_base: DecAttnFA
         super().__init__(op_base, stream, device_id)  # type: ignore
         self.device_id = device_id
         self.num_qo_heads = int(op_base.num_qo_heads)  # type: ignore
@@ -99,15 +100,18 @@ class DecAttnFABatchedImpl(OperationImpl):
 
 
 class DecAttnFA(Operations):
-    def __init__(self, name):
-        super().__init__(name)
-        self.inputs = {"Q": IOWrapper(self, "Q")}
-        self.outputs = {"output": IOWrapper(self, "output")}
-        self.externals = {"KVCache": None}
+    def __init__(self, name, device):
+        super().__init__(name, device)
+        self.inputs = {"Q": IOWrapper(self, "Q", device).is_input()}
+        self.outputs = {"output": IOWrapper(self, "output", device).is_output()}
+        self.externals: dict[str, KVCacheBatched] = {}
         self.impl_map = {}
         self.init_impl_map()
+        self.op_layer = DecAttnFA_Layer
         self.batched_decode_wrapper = None
-        self.op_device = DecAttnFA_Device
+        self.qo_indices: torch.Tensor
+        self.start_req_idx: int
+        self.end_req_idx: int
 
     def init_impl_map(self):
         self.add_impl(DecAttnFABatchedImpl)
@@ -116,9 +120,12 @@ class DecAttnFA(Operations):
         self.num_kv_heads = num_kv_heads // tp_size
         self.num_qo_heads = num_qo_heads // tp_size
         self.head_dim = head_dim
-        self.q_dim = num_qo_heads * head_dim
-        for op_device in self.children:
-            op_device.setShapeForIOWrappers()
+        self.inputs["Q"].init_shape(
+            (0, num_qo_heads * head_dim)
+        )
+        self.outputs["output"].init_shape(
+            (0, num_qo_heads * head_dim)
+        )
 
     def update(self, cumsum_input: list[int], device_id: int):
         self.qo_indices = torch.tensor(
@@ -140,30 +147,16 @@ class DecAttnFA(Operations):
         pass
 
 
-class DecAttnFA_Device(Operation_Device):
-    def __init__(self, parent, device):
-        super().__init__(parent, device)
-        self.op_layer = DecAttnFA_Layer
-
-    def setShapeForIOWrappers(self):
-        self.inputs["Q"].init_shape(
-            (0, self.parent.num_qo_heads * self.parent.head_dim)
-        )
-        self.outputs["output"].init_shape(
-            (0, self.parent.num_qo_heads * self.parent.head_dim)
-        )
-
-
 class DecAttnFA_Layer(Operation_Layer):
-    def __init__(self, layer, op_device):
-        super().__init__(layer, op_device=op_device)
+    def __init__(self, layer, base_op):
+        super().__init__(layer, base_op)
 
     def run(self):
         Q = self.inputs["Q"].tensor
         # self.operator_device.parent.impl.run(Q, self.kv_tuple, self.outputs["output"].tensor)
         self.impl.run(
             self.layer,
-            self.parent.parent.qo_indices,
+            self.parent.qo_indices,
             Q,
             None,
             self.parent.externals["KVCache"],
@@ -189,6 +182,7 @@ class PFAttnFABatchedImpl(OperationImpl):
         device_id : int
             The device ID.
         """
+        self.op_base: PFAttnFA
         super().__init__(op_base, stream, device_id)  # type: ignore
         self.device_id = device_id
         self.num_qo_heads = int(op_base.num_qo_heads)  # type: ignore
@@ -202,7 +196,7 @@ class PFAttnFABatchedImpl(OperationImpl):
         qo_indices: torch.Tensor,
         Q: torch.Tensor,
         kv_tuple: None,
-        KVCache: KVCacheBatched,
+        KVCache: KVCacheBatched | KVCachevLLM,
         output: torch.Tensor,
     ):
         r"""Run the PFAttn operator.
@@ -218,7 +212,7 @@ class PFAttnFABatchedImpl(OperationImpl):
             Shape: [n_total, num_qo_heads * head_dim]
         kv_tuple : tuple[torch.Tensor | None, torch.Tensor | None]
             Unrelated.
-        KVCache : KVCacheBatched
+        KVCache : KVCacheBatched | KVCachevLLM
             The KV cache in batched layout. Note that here we use the last_kv it stores.
             Shape: list of [batch_size, max_seq_len, num_kv_heads, head_dim]
         output : torch.Tensor
@@ -251,18 +245,24 @@ class PFAttnFABatchedImpl(OperationImpl):
 
 
 class PFAttnFA(Operations):
-    def __init__(self, name):
-        super().__init__(name)
+    def __init__(self, name, device):
+        super().__init__(name, device)
         self.inputs = {
-            "Q": IOWrapper(self, "Q"),
+            "Q": IOWrapper(self, "Q", device).is_input(),
         }
-        self.outputs = {"output": IOWrapper(self, "output")}
+        self.outputs = {"output": IOWrapper(self, "output", device).is_output()}
         # Note: for consistency with other operators (like RopeAppend), we expect the external KV cache to be
         # available as "KVCache". If needed, you can change the key name.
-        self.externals = {"KVCache": None}
+        self.externals: dict[str, KVCachevLLM | KVCacheBatched] = {}
         self.impl_map = {}
         self.init_impl_map()
-        self.op_device = PFAttnFA_Device
+        self.op_layer = PFAttnFA_Layer
+        self.qo_indices: torch.Tensor
+        self.max_seqlen_q: int
+        self.max_seqlen_k: int
+        self.io_device: IOWrapper
+        self.start_req_idx: int
+        self.end_req_idx: int
 
     def init_impl_map(self):
         self.add_impl(PFAttnFABatchedImpl)
@@ -271,16 +271,19 @@ class PFAttnFA(Operations):
         self.num_kv_heads = num_kv_heads // tp_size
         self.num_qo_heads = num_qo_heads // tp_size
         self.head_dim = head_dim
-        self.q_dim = num_qo_heads * head_dim
-        for op_device in self.children:
-            op_device.setShapeForIOWrappers()
+        self.inputs["Q"].init_shape(
+            (0, num_qo_heads * head_dim)
+        )
+        self.outputs["output"].init_shape(
+            (0, num_qo_heads * head_dim)
+        )
 
     def update(self, cumsum_input: list[int], device_id: int):
         self.qo_indices = torch.tensor(
             cumsum_input, dtype=torch.int32, device=f"cuda:{device_id}"
         )
         seq_lens = self.qo_indices.diff()
-        self.max_seqlen_q = torch.max(seq_lens).item()
+        self.max_seqlen_q = int(torch.max(seq_lens).item())
         self.max_seqlen_k = self.max_seqlen_q
         self.io_device = self.children[device_id].inputs["Q"]
         self.start_req_idx = tensor_offset_to_req_idx(
@@ -299,30 +302,16 @@ class PFAttnFA(Operations):
         raise NotImplementedError("Profile not implemented for PFAttnFA")
 
 
-class PFAttnFA_Device(Operation_Device):
-    def __init__(self, parent, device):
-        super().__init__(parent, device)
-        self.op_layer = PFAttnFA_Layer
-
-    def setShapeForIOWrappers(self):
-        self.inputs["Q"].init_shape(
-            (0, self.parent.num_qo_heads * self.parent.head_dim)
-        )
-        self.outputs["output"].init_shape(
-            (0, self.parent.num_qo_heads * self.parent.head_dim)
-        )
-
-
 class PFAttnFA_Layer(Operation_Layer):
-    def __init__(self, layer, op_device):
-        super().__init__(layer=layer, op_device=op_device)
+    def __init__(self, layer, base_op):
+        super().__init__(layer, base_op)
 
     def run(self):
         Q = self.inputs["Q"].tensor
         # self.operator_device.parent.impl.run(Q, self.kv_tuple, self.outputs["output"].tensor)
         self.impl.run(
             self.layer,
-            self.parent.parent.qo_indices,
+            self.parent.qo_indices,
             Q,
             None,
             self.parent.externals["KVCache"],

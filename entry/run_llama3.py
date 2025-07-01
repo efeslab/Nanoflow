@@ -19,10 +19,7 @@ from models.llama3_KVCacheFA import Pipeline
 
 arg_parser = argparse.ArgumentParser()
 arg_parser.add_argument("-l", "--load_hf_weight", action="store_true", help="Load weights from huggingface")
-arg_parser = argparse.ArgumentParser()
-arg_parser.add_argument("-l", "--load_hf_weight", action="store_true", help="Load weights from huggingface")
 
-args = arg_parser.parse_args()
 args = arg_parser.parse_args()
 
 tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
@@ -58,7 +55,7 @@ prefill_context_ids = tokenizer.encode(prefill_context * 10) # which length is 1
 
 # weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
 # weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
-weight_map_amd_kan = "/app/models/llama3-8b"
+weight_map_amd_kan = "/app/models/llama-8b"
 if args.load_hf_weight:
     pipeline_dict = {
         "cuda:0" : Pipeline()
@@ -101,7 +98,10 @@ def test_performance():
     decode_inputs.extend([(decode_batch_size, prefill_input_ids[decode_batch_size])])
     pipeline.update(decode_inputs, decode_batch_size)
 
-    for i in range(decode_batch_size, decode_batch_size + 50):
+    with torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CUDA],
+    ) as prof:
+      for i in range(decode_batch_size, decode_batch_size + 5):
         print("Cycle: ", i - decode_batch_size)
         next_prefill_idx = i + 1
         new_tokens = pipeline.run()
@@ -122,7 +122,7 @@ def test_performance():
 
     output_text = tokenizer.batch_decode(list(output_strings.values())[:1], skip_special_tokens=True)
     print(output_text)
-    prof.export_chrome_trace("llama3_8b_mi300_384x1024_overlap_mask_256_48.json")
+    prof.export_chrome_trace("llama3_8b_mi300_384x1024_overlap_mask_256_48_288_16.json")
 
 def test_correctness(use_kv_cache=True):
     special_inputs_0 = [(0, input_ids[0]), (1, input_ids[1])]
@@ -243,7 +243,7 @@ def profile_one_cycle():
 
     # pipeline.profile_print()
 
-test_correctness()
+# test_correctness()
 # test_correctness(use_kv_cache=False)
 test_performance()
 # test_one_cycle()

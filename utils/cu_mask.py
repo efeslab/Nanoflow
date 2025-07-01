@@ -17,7 +17,7 @@ def hip_check(call_result):
         raise RuntimeError(str(err))
     return result
 
-def create_streams_with_cumask(cu_counts: list[int], device_id: int = 0) -> list[torch.cuda.Stream]:
+def create_streams_with_cumask(cu_counts: list[int], device_id: int = 0) -> list[torch.Stream]:
     props = hip.hipDeviceProp_t()
     hip_check(hip.hipGetDeviceProperties(props, device_id))
     total_cus = props.multiProcessorCount

@@ -1,8 +1,12 @@
 import torch
-import triton
 import platform_config
-import bind_green_ctx
 from operations.impl_base import OperationImpl
+
+if platform_config.PLATFORM_CUDA:
+    from bind_green_ctx import set_cublas_sm_count_target
+else:
+    def set_cublas_sm_count_target(sm_count):
+        pass
 
 class GEMMTorchImpl(OperationImpl):
     category_tag = "torch"
@@ -17,7 +21,7 @@ class GEMMTorchImpl(OperationImpl):
     def run(self, A, B, C, D):
         with torch.cuda.stream(self.stream):
             if self.op_base.sm_count is not None:
-                bind_green_ctx.set_cublas_sm_count_target(self.op_base.sm_count)
+                set_cublas_sm_count_target(self.op_base.sm_count)
             if self.bias or self.alpha:
                 torch.addmm(C, A, B, beta=self.beta, alpha=self.alpha, out=D)
             else:
