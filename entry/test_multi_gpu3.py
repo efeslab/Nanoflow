@@ -29,7 +29,7 @@ def test_correctness():
         barrier.wait()
 
         barrier.wait()
-        for i in range(batch_size):
+        for i in range(4):
             output_strings[i].append(shared_array[i])
     
     command.value = b"Terminate"

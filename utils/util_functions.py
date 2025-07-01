@@ -1,6 +1,6 @@
-def prepare_weight(pipeline_dict, weight_map):
-    for device, pipeline in pipeline_dict.items():
-        pipeline.set_device(device)
+def prepare_weight(pipeline_weight_list, weight_map):
+    for rank, device, pipeline in pipeline_weight_list:
+        pipeline.set_device(rank, device)
         pipeline.init_cached_weight(weight_map)
 
 def tensor_offset_to_req_idx(qo_indicies, tensor_offset):
