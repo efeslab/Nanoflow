@@ -41,14 +41,14 @@ class Pipeline():
         self.max_batch_size = max_batch_size
         self.batch_size = 0
         self.num_layers = 32
-        self.device = 0
+        self.device: str
         self.layer_list = [i for i in range(self.num_layers)]
         self.num_devices = torch.cuda.device_count()
         self.page_size = 64
         self.max_seq_len = max_seq_len
         self.kv_cache: KVCachevLLM
 
-    def set_device(self, device):
+    def set_device(self, device: str):
         self.device = device
 
     def init(self, weight_path, cached=False):

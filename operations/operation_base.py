@@ -12,7 +12,7 @@ import gurobipy as gp
 from gurobipy import GRB
 
 class Operations():
-    def __init__(self, name: str, device: str | int, nano_idx=None):
+    def __init__(self, name: str, device: str, nano_idx=None):
         # should be initialized in the device class
         self.inputs: dict[str, IOWrapper] = {}
         self.outputs: dict[str, IOWrapper] = {}

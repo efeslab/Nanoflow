@@ -17,9 +17,9 @@ def hip_check(call_result):
         raise RuntimeError(str(err))
     return result
 
-def create_streams_with_cumask(cu_counts: list[int], device_id: int = 0) -> list[torch.Stream]:
+def create_streams_with_cumask(cu_counts: list[int], device_id: str) -> list[torch.Stream]:
     props = hip.hipDeviceProp_t()
-    hip_check(hip.hipGetDeviceProperties(props, device_id))
+    hip_check(hip.hipGetDeviceProperties(props, int(device_id.split(":")[-1])))
     total_cus = props.multiProcessorCount
     mask_size = (total_cus + 31) // 32
 
