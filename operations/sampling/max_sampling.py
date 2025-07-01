@@ -47,7 +47,7 @@ class Sampling(Operations):
         self.inputs["logits"].init_shape((0, self.vocab_size))
         self.outputs["tokens"].init_shape((0,))
 
-    def init_profile_database(self):
+    def init_profile_db(self):
         for _, impl in self.impl_map.items():
             self.cursor.execute(f'''
             CREATE TABLE IF NOT EXISTS "{impl.category_tag}" (
@@ -59,7 +59,7 @@ class Sampling(Operations):
             );
             ''')
 
-    def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
+    def store_profile_db(self, category_tag, impl_tag, average_elapsed_ms):
         print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {self.batch_size}, Average Time: {average_elapsed_ms} ms")
         self.cursor.execute(f'''
             INSERT OR IGNORE INTO {category_tag} (batch_size, sm_count, vocab_size, average_time_ms)

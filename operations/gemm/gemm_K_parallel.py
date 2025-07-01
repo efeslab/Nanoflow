@@ -80,7 +80,7 @@ class GEMM_K_Parallel(Operations):
 
         return new_op
 
-    def init_profile_database(self):
+    def init_profile_db(self):
         for _, impl in self.impl_map.items():
             self.cursor.execute(f'''
             CREATE TABLE IF NOT EXISTS "{impl.category_tag}" (
@@ -99,7 +99,7 @@ class GEMM_K_Parallel(Operations):
             );
             ''')
     
-    def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
+    def store_profile_db(self, category_tag, impl_tag, average_elapsed_ms):
         # Calculate the average time
         print(f"Name: {self.name}, Category: {category_tag}, impl_tag: {impl_tag}, Batch Size: {self.batch_size}, Average Time: {average_elapsed_ms} ms")
         GFLOPS = (2 * self.batch_size * self.tp_N * self.tp_K) / average_elapsed_ms / 1e6 # in GigaFLOPS

@@ -83,7 +83,7 @@ class GEMM_N_Parallel(Operations):
 
         return new_op
 
-    def init_profile_database(self):
+    def init_profile_db(self):
         for _, impl in self.impl_map.items():
             self.cursor.execute(f'''
             CREATE TABLE IF NOT EXISTS "{impl.category_tag}" (
@@ -102,7 +102,7 @@ class GEMM_N_Parallel(Operations):
             );
             ''')
 
-    def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
+    def store_profile_db(self, category_tag, impl_tag, average_elapsed_ms):
         # Calculate the average time
         print(f"Name: {self.name}, Category: {category_tag}, impl_tag: {impl_tag}, Batch Size: {self.batch_size}, Average Time: {average_elapsed_ms} ms")
         GFLOPS = (2 * self.batch_size * self.N * self.K) / average_elapsed_ms / 1e6 # in GigaFLOPS
@@ -120,9 +120,9 @@ class GEMM_N_Parallel(Operations):
                 names = GetAllH100GemmCanonicalNames()
                 # print(f"GetAllH100GemmCanonicalNames: {names}")
                 self.impl_configs_map[category_tag] = [
-                    # ("SM90_256_128_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", None),
+                    ("SM90_256_128_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", None),
                     # ("SM90_256_128_64_2_1_1_1_RowMajor_RowMajor_RowMajor_warpspecialized_cooperative_epi_nosmem", None),
-                    (name, None) for name in names if "RowMajor_RowMajor_RowMajor" in name
+                    # (name, None) for name in names if "RowMajor_RowMajor_RowMajor" in name
                 ]
             else:
                 self.impl_configs_map[category_tag] = [

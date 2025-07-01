@@ -108,7 +108,12 @@ class DecAttnFlashinfer(Operations):
     def profile_update(self):
         self.impl.plan(self.kv_indptr, self.kv_indices, self.kv_last_page_len, self.page_size)
 
-    def init_profile_database(self):
+    def setup_profile_custom(self):
+        super().setup_profile_custom()
+        self.k_data_ptr, self.v_data_ptr = self.externals["KVCache"].get_whole_kv_data(self.layer_list[0])
+        self.kv_tuple = tuple([self.k_data_ptr, self.v_data_ptr])
+
+    def init_profile_db(self):
         for _, impl in self.impl_map.items():
             self.cursor.execute(f'''
             CREATE TABLE IF NOT EXISTS "{impl.category_tag}" (
@@ -123,8 +128,7 @@ class DecAttnFlashinfer(Operations):
                 UNIQUE(batch_size, seq_len, sm_count)
             );
             ''')
-        self.k_data_ptr, self.v_data_ptr = self.externals["KVCache"].get_whole_kv_data(self.layer_list[0])
-        self.kv_tuple = tuple([self.k_data_ptr, self.v_data_ptr])
+
 
     def check_profiled(self, category_tag):
         self.cursor.execute(f'''
@@ -137,7 +141,7 @@ class DecAttnFlashinfer(Operations):
             return True
         return False
 
-    def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
+    def store_profile_db(self, category_tag, impl_tag, average_elapsed_ms):
         print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {self.batch_size}, Average Time: {average_elapsed_ms} ms")
         seq_len = self.externals["KVCache"].get_seqlen(0) - 1
         print(f"seq_len: {seq_len}")
@@ -289,7 +293,12 @@ class PFAttnFlashinfer(Operations):
         self.impl.plan(self.qo_indicies, self.kv_indptr, self.kv_indices, self.kv_last_page_len, self.page_size,
             causal=self.causal, logits_soft_cap=self.logits_soft_cap, pos_encoding_mode=self.pos_encoding_mode)
 
-    def init_profile_database(self):
+    def setup_profile_custom(self):
+        super().setup_profile_custom()
+        self.k_data_ptr, self.v_data_ptr = self.externals["KVCache"].get_whole_kv_data(self.layer_list[0])
+        self.kv_tuple = tuple([self.k_data_ptr, self.v_data_ptr])
+
+    def init_profile_db(self):
         for _, impl in self.impl_map.items():
             self.cursor.execute(f'''
             CREATE TABLE IF NOT EXISTS "{impl.category_tag}" (
@@ -302,10 +311,9 @@ class PFAttnFlashinfer(Operations):
                 average_time_ms REAL
             );
             ''')
-        self.k_data_ptr, self.v_data_ptr = self.externals["KVCache"].get_whole_kv_data(self.layer_list[0])
-        self.kv_tuple = tuple([self.k_data_ptr, self.v_data_ptr])
+
     
-    def store_profile_database(self, category_tag, impl_tag, average_elapsed_ms):
+    def store_profile_db(self, category_tag, impl_tag, average_elapsed_ms):
         print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {self.batch_size}, Average Time: {average_elapsed_ms} ms")
         self.cursor.execute(f'''
             INSERT OR IGNORE INTO {category_tag} (batch_size, sm_count, head_dim, num_qo_heads, num_kv_heads, average_time_ms)

@@ -54,7 +54,7 @@ def test_profile():
     for rank in range(world_size):
         start_time = time.perf_counter()
         # print(f"Starting process {rank} on GPU {rank}")
-        args = (T0, rank, world_size, shared_batch_size, shared_array, barrier, pipeline_list, command, None)
+        args = (T0, rank, world_size, shared_batch_size, shared_array, barrier, pipeline_list, command, prefill_context_ids)
         p = mp.Process(target=worker, args=args)
 
         p.start()
@@ -77,10 +77,6 @@ def test_profile():
 
     print("All processes have finished.")
 
-    output_text = tokenizer.batch_decode(list(output_strings.values()), skip_special_tokens=True)
-
-    print(output_text)
-
 
 if __name__ == '__main__':
     T0 = time.perf_counter()
@@ -90,7 +86,7 @@ if __name__ == '__main__':
 
     sys.path.append("../")
     sys.path.append('../pybind/build')
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1, 2, 3"
+    # os.environ["CUDA_VISIBLE_DEVICES"] = "1, 2, 3, 4"
     # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
     from core.worker import worker
@@ -114,11 +110,10 @@ if __name__ == '__main__':
     args = arg_parser.parse_args()
 
     # print("initializing the modules and start mode setting, ", time.perf_counter() - T0)
-    # tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-70B-Instruct")
-    input_strings = [ "Hi, who are you?" for _ in range(4)]
-    input_ids = [(idx, tokenizer.encode(s)) for idx, s in enumerate(input_strings)]
-    prefill_context_ids = tokenizer.encode(prefill_context) # which length is 1066.
+    input_string = "Hi, who are you?"
+    input_ids = [(idx, tokenizer.encode(input_string)) for idx in range(4)]  # Simulating 4 requests with the same input string
+    prefill_context_ids = tokenizer.encode(prefill_context)  # which length is 1066.
 
     output_strings = {}
     for idx, ids in input_ids:
@@ -129,7 +124,7 @@ if __name__ == '__main__':
 
     world_size = torch.cuda.device_count()
     print("world size: ", world_size)
-    TP_size = 4
+    TP_size = 8
     PP_size = 1
     DP_size = 1
 
