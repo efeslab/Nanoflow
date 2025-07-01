@@ -9,7 +9,10 @@ from core.IOWrapper import IOWrapper
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none, process_weight_layer
 
-from operations.gemm.gemm_impls import GEMMTorchImpl, GEMMCudaImpl
+from operations.gemm.gemm_impls import GEMMTorchImpl
+
+if platform_config.PLATFORM_CUDA:
+    from operations.gemm.gemm_impls import GEMMCudaImpl
 
 class GEMM_N_Parallel(Operations):
     def __init__(self, name, device, bias = False, nano_idx=None):
@@ -51,6 +54,7 @@ class GEMM_N_Parallel(Operations):
     def init_impl_map(self):
         self.add_impl(GEMMTorchImpl)
         if platform_config.PLATFORM_CUDA:
+            from operations.gemm.gemm_impls import GEMMCudaImpl
             self.add_impl(GEMMCudaImpl)
     
     def setShape(self, N, K, tp_idx=0, tp_size=1):

@@ -56,10 +56,10 @@ weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snap
 # weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
 # weight_map_amd_kan = "/work1/kasikci/kanzhu/models/llama3-8b"
 if args.load_hf_weight:
-    pipeline_dict = {
-        "cuda:0" : Pipeline()
-    }
-    prepare_weight(pipeline_dict, weight_map_wzr)
+    pipeline_weight_list = [
+        (i, f"cuda:{i}", Pipeline()) for i in range(1)
+    ]
+    prepare_weight(pipeline_weight_list, weight_map_wzr)
 
 pipeline = Pipeline()
 pipeline.init(weight_map_wzr, cached=True)

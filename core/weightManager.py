@@ -4,7 +4,15 @@ import os
 import safetensors
 import json
 import time
-import fast_uring
+
+USE_FAST_URING = False
+
+try:
+    import fast_uring
+    USE_FAST_URING = True
+except ImportError:
+    print("fast_uring not found, using numpy instead")
+    import numpy as np
 
 class WeightManager():
     def __init__(self, pipeline_name, weight_path, cached, device):
@@ -37,7 +45,10 @@ class WeightManager():
         file = os.path.join(self.cached_weight_path, f"{self.pipeline_name}_{device}.bin")
         start_load_time = time.time()
         # use torch.load to load the tensor
-        ten = fast_uring.load_fp16(file, threads=32)
+        if USE_FAST_URING:
+            ten = fast_uring.load_fp16(file, threads=32)
+        else:
+            ten = torch.from_numpy(np.fromfile(file, dtype=np.float16))
         t1 = time.time()
         mb_s = ten.numel()*2 / 1e6 / (t1 - start_load_time)
         print(f"Loaded {mb_s:,.1f} MB/s with {ten.numel():,} elements")

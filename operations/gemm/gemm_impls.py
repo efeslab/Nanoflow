@@ -1,8 +1,12 @@
 import torch
-import triton
 import platform_config
-import bind_green_ctx
 from operations.impl_base import OperationImpl
+
+if platform_config.PLATFORM_CUDA:
+    from bind_green_ctx import set_cublas_sm_count_target
+else:
+    def set_cublas_sm_count_target(sm_count):
+        pass
 
 class GEMMTorchImpl(OperationImpl):
     category_tag = "torch"
@@ -19,13 +23,34 @@ class GEMMTorchImpl(OperationImpl):
     
     def run(self, A, B, C, D):
         with torch.cuda.stream(self.stream):
-            # if self.op_base.sm_count is not None:
-            #     bind_green_ctx.set_cublas_sm_count_target(self.op_base.sm_count)
+            if self.op_base.sm_count is not None:
+                set_cublas_sm_count_target(self.op_base.sm_count)
             if self.bias or self.alpha:
                 torch.addmm(C, A, B, beta=self.beta, alpha=self.alpha, out=D)
             else:
                 torch.matmul(A, B, out=D)
 
+
+if platform_config.PLATFORM_AITER:
+    class GEMMAiterImpl(OperationImpl):
+        category_tag = "aiter"
+        def config(self, impl_tag, parameter_map):
+            self.alpha = self.op_base.alpha
+            self.bias = self.op_base.bias
+            self.beta = 0.0
+            if self.bias:
+                self.beta = self.op_base.beta
+        
+        def run(self, B):
+            with torch.cuda.stream(self.stream):
+                D = self.outputs["D"].tensor
+                A = self.inputs["A"].tensor
+                
+                if self.bias:
+                    C = self.inputs["C"].tensor
+                    D.copy_(A.matmul(B) * self.alpha + C * self.beta)
+                else:
+                    D.copy_(A.matmul(B) * self.alpha)
 
 if platform_config.PLATFORM_CUDA:
     import bind_gemm

@@ -10,3 +10,6 @@
 [submodule "3rdparty/mscclpp"]
 	path = 3rdparty/mscclpp
 	url = https://github.com/microsoft/mscclpp.git
+[submodule "3rdparty/aiter"]
+	path = 3rdparty/aiter
+	url = https://github.com/Conless/aiter

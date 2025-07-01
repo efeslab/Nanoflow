@@ -1,26 +1,38 @@
-import platform
+import logging
 import torch
-import math
 import time
 
 import platform_config
 from operations.rope.help_functions import apply_rope
 from operations.operation_base import Operations, Operation_Layer
 from core.IOWrapper import IOWrapper
-from core.weightWrapper import WeightWrapper    
-from core.processWeight import process_weight_none, process_weight_layer
 from operations.impl_base import OperationImpl
 from kvcache.kv import KVCacheNone, KVCacheTorch, DistKVPool, BatchedDistKVCache
 from utils.prof_marker import prof_marker
 from utils.util_functions import tensor_offset_to_req_idx
 
 
+def _apply_rotary_emb_torch(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> torch.Tensor:
+    cos = cos.unsqueeze(-2).to(x.dtype)
+    sin = sin.unsqueeze(-2).to(x.dtype)
+    x1 = x[..., ::2]
+    x2 = x[..., 1::2]
+    o1 = x1 * cos - x2 * sin
+    o2 = x2 * cos + x1 * sin
+    return torch.stack((o1, o2), dim=-1).flatten(-2)
 
 class RopeAppendTorchImpl(OperationImpl):
     category_tag = "torch"
     def __init__(self, op_base, stream, device):
         super().__init__(op_base, stream, device)
         self.rope_type = op_base.rope_type
+        if self.rope_type == "llama3":
+            self.base = 500000.0
+            self.rotary_dim = 128
         self.theta = op_base.theta
         self.original_max_position_embeddings = op_base.original_max_position_embeddings
         self.low_freq_factor = op_base.low_freq_factor

@@ -51,6 +51,7 @@ class GEMM_K_Parallel(Operations):
     def init_impl_map(self):
         self.add_impl(GEMMTorchImpl)
         if platform_config.PLATFORM_CUDA:
+            from operations.gemm.gemm_impls import GEMMCudaImpl
             self.add_impl(GEMMCudaImpl)
     
     def setShape(self, N, K, tp_idx=0, tp_size=1):
