@@ -1,7 +1,7 @@
 from hip import hip, hipblas
 from hip.hip import hipExtStreamCreateWithCUMask
 import torch
-from typing import List
+import logging
 
 def hip_check(call_result):
     err = call_result[0]
@@ -36,7 +36,7 @@ def create_streams_with_cumask(cu_counts: list[int], device_id: int = 0) -> list
             bit = bit_offset + i
             mask[bit // 32] |= (1 << (bit % 32))
 
-        print([bin(b) for b in mask])
+        logging.debug([bin(b) for b in mask])
         s = hip_check(hip.hipExtStreamCreateWithCUMask(mask_size, mask))
         streams.append(torch.cuda.get_stream_from_external(s))
         bit_offset += take
