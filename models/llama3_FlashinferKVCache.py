@@ -1,6 +1,7 @@
 import torch
 import os
 
+from flashinfer.green_ctx import split_device_green_ctx_by_sm_count
 from operations.operation_base import Operations
 from operations.activation.silu import Activation
 from operations.embedding.embedding import GenEmbedding
@@ -17,7 +18,6 @@ from core.bufferAllocate import BufferAllocator
 from core.executor import Executor
 from core.nanobatchSplit import split_nanobatch
 from utils.prof_marker import prof_marker
-from utils.greenctx import create_greenctx
 
 class Pipeline():
     def __init__(self):
@@ -48,88 +48,27 @@ class Pipeline():
         self.init_set_weight(weight_path, cached)
 
     def init_streams(self):
-        gemm_stream_with_pf, pf_stream, gemm_stream_with_pf_sm, pf_stream_sm = create_greenctx(0.85, 0.15, 0)
-        gemm_stream_with_dc, dc_stream, gemm_stream_with_dc_sm, dc_stream_sm = create_greenctx(0.7, 0.3, 0)
-
-        # Create green context streams for GEMV streams
-        GEMV_stream_01, GEMV_stream_09, GEMV_stream_01_sm, GEMV_stream_09_sm = create_greenctx(0.1, 0.9, 0)
-        GEMV_stream_02, GEMV_stream_08, GEMV_stream_02_sm, GEMV_stream_08_sm = create_greenctx(0.2, 0.8, 0)
-        GEMV_stream_03, GEMV_stream_07, GEMV_stream_03_sm, GEMV_stream_07_sm = create_greenctx(0.3, 0.7, 0)
-        GEMV_stream_04, GEMV_stream_06, GEMV_stream_04_sm, GEMV_stream_06_sm = create_greenctx(0.4, 0.6, 0)
-        GEMV_stream_05_0, GEMV_stream_05_1, GEMV_stream_05_0_sm, GEMV_stream_05_1_sm = create_greenctx(0.5, 0.5, 0)
-        GEMV_stream_10 = torch.cuda.Stream()
-        full_sm = GEMV_stream_01_sm + GEMV_stream_09_sm
-
-        # Create green context streams for GEMM streams
-        GEMM_stream_01, GEMM_stream_09, GEMM_stream_01_sm, GEMM_stream_09_sm = create_greenctx(0.1, 0.9, 0)
-        GEMM_stream_02, GEMM_stream_08, GEMM_stream_02_sm, GEMM_stream_08_sm = create_greenctx(0.2, 0.8, 0)
-        GEMM_stream_03, GEMM_stream_07, GEMM_stream_03_sm, GEMM_stream_07_sm = create_greenctx(0.3, 0.7, 0)
-        GEMM_stream_04, GEMM_stream_06, GEMM_stream_04_sm, GEMM_stream_06_sm = create_greenctx(0.4, 0.6, 0)
-        GEMM_stream_05_0, GEMM_stream_05_1, GEMM_stream_05_0_sm, GEMM_stream_05_1_sm = create_greenctx(0.5, 0.5, 0)
-        GEMM_stream_10 = torch.cuda.Stream()
-
+        total_sm = 132
+        gemm_stream_with_pf_sm = 112
+        pf_stream_sm = 16
+        gemm_stream_with_dc_sm = 88
+        dc_stream_sm = 40
+        (gemm_stream_with_pf, pf_stream, _), _ = split_device_green_ctx_by_sm_count(
+            torch.device(self.device),
+            [gemm_stream_with_pf_sm, pf_stream_sm]
+        )
+        (gemm_stream_with_dc, dc_stream, _), _ = split_device_green_ctx_by_sm_count(
+            torch.device(self.device),
+            [gemm_stream_with_dc_sm, dc_stream_sm]
+        )
 
         self.streams = {
-            "GEMM_Test": (torch.cuda.Stream(), gemm_stream_with_pf_sm + pf_stream_sm),
+            "GEMM_Test": (torch.cuda.Stream(), total_sm),
             "PF_ATTN": (pf_stream, pf_stream_sm),
             "DC_ATTN": (dc_stream, dc_stream_sm),
             "GEMM_WITH_PF": (gemm_stream_with_pf, gemm_stream_with_pf_sm),
             "GEMM_WITH_DC": (gemm_stream_with_dc, gemm_stream_with_dc_sm),
-            "GEMV": {
-                GEMV_stream_01_sm: (GEMV_stream_01, GEMV_stream_01_sm),
-                GEMV_stream_02_sm: (GEMV_stream_02, GEMV_stream_02_sm),
-                GEMV_stream_03_sm: (GEMV_stream_03, GEMV_stream_03_sm),
-                GEMV_stream_04_sm: (GEMV_stream_04, GEMV_stream_04_sm),
-                GEMV_stream_05_0_sm: (GEMV_stream_05_0, GEMV_stream_05_0_sm),
-                GEMV_stream_05_1_sm: (GEMV_stream_05_1, GEMV_stream_05_1_sm),
-                GEMV_stream_06_sm: (GEMV_stream_06, GEMV_stream_06_sm),
-                GEMV_stream_07_sm: (GEMV_stream_07, GEMV_stream_07_sm),
-                GEMV_stream_08_sm: (GEMV_stream_08, GEMV_stream_08_sm),
-                GEMV_stream_09_sm: (GEMV_stream_09, GEMV_stream_09_sm),
-                full_sm: (GEMV_stream_10, full_sm)
-            },
-            "GEMM": {
-                GEMM_stream_01_sm: (GEMM_stream_01, GEMM_stream_01_sm),
-                GEMM_stream_02_sm: (GEMM_stream_02, GEMM_stream_02_sm),
-                GEMM_stream_03_sm: (GEMM_stream_03, GEMM_stream_03_sm),
-                GEMM_stream_04_sm: (GEMM_stream_04, GEMM_stream_04_sm),
-                GEMM_stream_05_0_sm: (GEMM_stream_05_0, GEMM_stream_05_0_sm),
-                GEMM_stream_05_1_sm: (GEMM_stream_05_1, GEMM_stream_05_1_sm),
-                GEMM_stream_06_sm: (GEMM_stream_06, GEMM_stream_06_sm),
-                GEMM_stream_07_sm: (GEMM_stream_07, GEMM_stream_07_sm),
-                GEMM_stream_08_sm: (GEMM_stream_08, GEMM_stream_08_sm),
-                GEMM_stream_09_sm: (GEMM_stream_09, GEMM_stream_09_sm),
-                full_sm: (GEMM_stream_10, full_sm)
-            }
         }
-
-        # Create green context streams for testing
-        test_stream_01, test_stream_09, test_stream_01_sm, test_stream_09_sm = create_greenctx(0.1, 0.9, 0)
-        test_stream_02, test_stream_08, test_stream_02_sm, test_stream_08_sm = create_greenctx(0.2, 0.8, 0)
-        test_stream_03, test_stream_07, test_stream_03_sm, test_stream_07_sm = create_greenctx(0.3, 0.7, 0)
-        test_stream_04, test_stream_06, test_stream_04_sm, test_stream_06_sm = create_greenctx(0.4, 0.6, 0)
-        test_stream_05, _, test_stream_05_sm, _ = create_greenctx(0.5, 0.5, 0)
-
-        print("test_stream_01_sm:", test_stream_01_sm, "test_stream_09_sm:", test_stream_09_sm)
-        test_9, test_1, test_9_sm, test_1_sm = create_greenctx(0.9, 0.1, 0)
-        print("test_9_sm:", test_9_sm, "test_1_sm:", test_1_sm)
-
-        self.profile_streams = {
-            "TEST_1": (test_stream_01, test_stream_01_sm),
-            "TEST_2": (test_stream_02, test_stream_02_sm),
-            "TEST_3": (test_stream_03, test_stream_03_sm),
-            "TEST_4": (test_stream_04, test_stream_04_sm),
-            "TEST_5": (test_stream_05, test_stream_05_sm),
-            "TEST_6": (test_stream_06, test_stream_06_sm),
-            "TEST_7": (test_stream_07, test_stream_07_sm),
-            "TEST_8": (test_stream_08, test_stream_08_sm),
-            "TEST_9": (test_stream_09, test_stream_09_sm),
-            "TEST_10": (torch.cuda.Stream(), gemm_stream_with_pf_sm + pf_stream_sm)
-        }
-        self.sm_counts = [test_stream_01_sm, test_stream_02_sm, test_stream_03_sm, test_stream_04_sm, test_stream_05_sm,
-                    test_stream_06_sm, test_stream_07_sm, test_stream_08_sm, test_stream_09_sm,
-                    gemm_stream_with_pf_sm + pf_stream_sm]
-
 
 
     def init_external_data(self):
