@@ -51,15 +51,16 @@ def worker(start_time, rank, world_size, shared_batch_size, shared_array, barrie
             case "Profile":
                 pipeline.init_profile_data()
 
-                stream_names = [ f"TEST_{i}" for i in range(10, 11) ]
+                stream_names = [ f"TEST_{i}" for i in range(1, 11) ]
                 # stream_names = [ "TEST_1" ]  # For testing purposes, we only use one stream.
                 for stream_name in stream_names:
                     pipeline.reset()
                     print(f"Stream: {stream_name}")
 
                     # test for prefill
+                    total_batch_sizes = [128, 256, 384, 512, 640, 768, 896, 1024]
                     # total_batch_sizes = [128, 256, 384, 512, 640, 768, 896, 1024, 1152, 1280, 1408, 1536, 1664, 1792, 1920, 2048]
-                    total_batch_sizes = [2048]
+                    # total_batch_sizes = [2048]
                     for idx, total_batch_size in enumerate(total_batch_sizes):
                         input = [(idx, input_ids[:total_batch_size])]
 
@@ -67,8 +68,9 @@ def worker(start_time, rank, world_size, shared_batch_size, shared_array, barrie
                         pipeline.profile_run()
                 
                     # test for decode
+                    total_batch_sizes = [128, 256, 384]
                     # total_batch_sizes = [128, 256, 384, 512, 640, 768, 896, 1024, 1152, 1280]
-                    total_batch_sizes = [1280]
+                    # total_batch_sizes = [768]
                     # prepare the decode inputs for a special input_length
                     input_length = 1024
                     output_length = 512

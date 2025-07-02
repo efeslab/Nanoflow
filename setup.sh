@@ -2,7 +2,6 @@ git submodule init
 git submodule update --recursive
 
 conda install -c gurobi gurobi
-conda install -c conda-forge cmake=3.29
 
 pip install torch==2.7.0 torchvision==0.22.0+cu128 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cu128
 pip install nvtx
@@ -16,6 +15,14 @@ if [[ ! -f "$NSIGHT" ]]; then
   wget https://developer.download.nvidia.com/devtools/nsight-systems/$NSIGHT
   dpkg -i ./$NSIGHT
 fi
+
+# install cmake 3.29.0
+CMAKE_INSTALLER="cmake-3.29.0-rc2-linux-x86_64.sh"
+if [[ ! -f "$CMAKE_INSTALLER" ]]; then
+  wget https://github.com/Kitware/CMake/releases/download/v3.29.0-rc2/$CMAKE_INSTALLER
+  chmod +x ./$CMAKE_INSTALLER
+fi
+./$CMAKE_INSTALLER --prefix=/usr/local --exclude-subdir
 
 cd Nanoflow-python
 

@@ -39,7 +39,7 @@ class Pipeline():
         self.num_layers = 80
         self.layer_list = [i for i in range(self.num_layers)]
         self.num_cuda_devices = torch.cuda.device_count()
-        self.page_size = 64
+        self.page_size = 16
 
         self.tp_idx = TP_idx
         self.tp_size = TP_size
@@ -51,6 +51,10 @@ class Pipeline():
         assert self.pp_size * self.dp_size * self.tp_size == self.num_cuda_devices, f"num_cuda_devices {self.num_cuda_devices} should be equal to pp_size * dp_size * tp_size {self.pp_size * self.dp_size * self.tp_size}"
         # create torch.distributed group
         assert self.num_cuda_devices % self.tp_size == 0, f"num_cuda_devices {self.num_cuda_devices} should be divisible by tp_size {self.tp_size}"
+
+        # profile related variables
+        self.profile_dir = f"../profile_data/{self.pipeline_name}"
+
 
     def set_device(self, rank, device):
         self.rank = rank
@@ -71,12 +75,7 @@ class Pipeline():
         GEMV_STREAM = torch.cuda.Stream()
         NETWORK_STREAM = torch.cuda.Stream()
         OTHER_STREAM = torch.cuda.Stream()
-        self.streams = {
-            "GEMM": (GEMM_STREAM, None),
-            "GEMV": (GEMV_STREAM, None),
-            "NETWORK": (NETWORK_STREAM, None),
-            "OTHER": (OTHER_STREAM, None)
-        }
+
 
         gemm_stream_with_pf, pf_stream, gemm_stream_with_pf_sm, pf_stream_sm = create_greenctx(0.85, 0.15, self.rank)
         # Create green context streams for testing
@@ -102,8 +101,16 @@ class Pipeline():
                     test_stream_06_sm, test_stream_07_sm, test_stream_08_sm, test_stream_09_sm,
                     gemm_stream_with_pf_sm + pf_stream_sm]
 
+        self.streams = {
+            "GEMM": (GEMM_STREAM, None),
+            "GEMV": (GEMV_STREAM, None),
+            "NETWORK": (NETWORK_STREAM, None),
+            "OTHER": (OTHER_STREAM, None),
+            "TEST_5": (test_stream_05, test_stream_05_sm),
+        }
+
     def init_external_data(self):
-        self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048, self.page_size, self.tp_size, self.device)
+        self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048* 32, self.page_size, self.tp_size, self.device)
         self.kv_cache = BatchedDistKVCache(self.kv_pool)
 
     def reset(self):
@@ -345,10 +352,10 @@ class Pipeline():
         self.pfAttn.set_stream(self.streams["GEMV"])
         self.layerNormFFN.set_stream(self.streams["GEMM"])
         self.o.set_stream(self.streams["GEMM"])
-        self.allReduce_o.set_stream(self.streams["NETWORK"])
+        self.allReduce_o.set_stream(self.streams["TEST_5"])
         self.ug.set_stream(self.streams["GEMM"])
         self.d.set_stream(self.streams["GEMM"])
-        self.allReduce_d.set_stream(self.streams["NETWORK"])
+        self.allReduce_d.set_stream(self.streams["TEST_5"])
         self.modelLayerNorm.set_stream(self.streams["GEMM"])
         self.sample.set_stream(self.streams["GEMM"])
         self.getLogits.set_stream(self.streams["GEMM"])
@@ -485,9 +492,9 @@ class Pipeline():
     # profile related functions
     def init_profile_data(self, append_mode=False):
         is_save_db = True if self.rank == 0 else False
-        profile_dir = f"../profile_data/{self.pipeline_name}"
+        print("Initializing profile data for pipeline:", self.pipeline_name, "Append mode:", append_mode, "Save DB:", is_save_db)
         for operation in self.operation_list:
-            operation.setup_profile(profile_dir, append_mode, is_save_db=is_save_db)
+            operation.setup_profile(self.profile_dir, append_mode, is_save_db=is_save_db)
 
     def profile_run(self):
         for operation in self.operation_list:

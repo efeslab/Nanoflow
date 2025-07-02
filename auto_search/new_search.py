@@ -1,40 +1,27 @@
 import sys
-sys.path.append('../')
-sys.path.append('../pybind/build/')
-from models.llama3_AutoSearch import Pipeline
-from core.executor import Executor
-
 import itertools
-from typing import Dict
 from collections import defaultdict
 
-profile_data_path = '../profile_data/Llama3-8B/'
+from models.llama3_AutoSearch import Pipeline
+from core.executor import Executor
+from profileAnalysis import getGemvTimeAndSMCount, getByBatchsizeAndSMCount
 
-hdim=4096
-idim=14336
-kqv_n = int(hdim * 1.5)
+sys.path.append('../')
+sys.path.append('../pybind/build/')
+
 
 global_batch_size = 1024
 decode_batch_size = 384
-prefill_batch_size = 640
 seq_len = 1024
-
-# read profile
-from profileAnalysis import getGemvTimeAndSMCount, getByBatchsizeAndSMCount
-
-# getGemmProfile(profile_data_path, "O", 1024, ("RowMajor", "RowMajor", "RowMajor"))
-getByBatchsizeAndSMCount(profile_data_path, "O", 1024)
-getGemvTimeAndSMCount(profile_data_path, 384, 1024)
-
 
 batch_size_range = list(range(128, global_batch_size+1, 128))
 print("batch_size_range:", batch_size_range)
 
 # create operations
 pipeline = Pipeline()
-pipeline.init()
+profile_dir = pipeline.profile_dir
 
-# set offsets and batch_sizes
+pipeline.init()
 pipeline.batch_size = global_batch_size
 pipeline.config_batch_size(decode_batch_size)
 pipeline.nanobatch_split(global_batch_size, decode_batch_size)
@@ -75,7 +62,7 @@ for layer_op in all_layered_ops:
         print("batch_size:", batch_size)
         for sm_count in profile_sm_counts:
             print("sm_count:", sm_count)
-            duration = getGemvTimeAndSMCount(profile_data_path, batch_size, seq_len, sm_count)
+            duration = getGemvTimeAndSMCount(profile_dir, batch_size, seq_len, sm_count)
             layer_op.duration_map[(batch_size, sm_count)] = duration
             print("duration_map:", layer_op.duration_map)
     else:
@@ -83,7 +70,7 @@ for layer_op in all_layered_ops:
         print("batch_size:", batch_size)
         for sm_count in profile_sm_counts:
             print("sm_count:", sm_count)
-            duration = getByBatchsizeAndSMCount(profile_data_path, layer_op.original_name, batch_size, sm_count)
+            duration = getByBatchsizeAndSMCount(profile_dir, layer_op.original_name, batch_size, sm_count)
             layer_op.duration_map[(batch_size, sm_count)] = duration
             print("duration_map:", layer_op.duration_map)
 
@@ -256,7 +243,7 @@ for layer_op in second_stage_nano_ops:
         # print("batch_size:", batch_size)
         for sm_count in profile_sm_counts:
             # print("sm_count:", sm_count)
-            duration = getGemvTimeAndSMCount(profile_data_path, batch_size, seq_len, sm_count)
+            duration = getGemvTimeAndSMCount(profile_dir, batch_size, seq_len, sm_count)
             layer_op.duration_map[(batch_size, sm_count)] = duration
             # print("duration_map:", layer_op.duration_map)
     else:
@@ -264,7 +251,7 @@ for layer_op in second_stage_nano_ops:
         # print("batch_size:", batch_size)
         for sm_count in profile_sm_counts:
             # print("sm_count:", sm_count)
-            duration = getByBatchsizeAndSMCount(profile_data_path, layer_op.original_name, batch_size, sm_count)
+            duration = getByBatchsizeAndSMCount(profile_dir, layer_op.original_name, batch_size, sm_count)
             layer_op.duration_map[(batch_size, sm_count)] = duration
             # print("duration_map:", layer_op.duration_map)
 
