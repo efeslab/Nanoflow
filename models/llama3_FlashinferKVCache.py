@@ -36,8 +36,8 @@ class Pipeline():
         self.page_size = 16
         self.device = "cuda:0"
 
-    def set_device(self, device):
-        self.device = device
+        self.profile_dir = f"../profile_data/{self.pipeline_name}"
+
 
     def init(self, weight_path, cached=False):
         self.init_streams()
@@ -48,6 +48,11 @@ class Pipeline():
         self.init_set_weight(weight_path, cached)
 
     def init_streams(self):
+        self.sm_counts = [
+            i for i in range(8, 128, 8) # Assuming SM counts are in increments of 8
+        ]
+        num_sm_counts = len(self.sm_counts)
+        # [8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120]
         total_sm = 132
         gemm_stream_with_pf_sm = 112
         pf_stream_sm = 16
@@ -70,14 +75,34 @@ class Pipeline():
             "GEMM_WITH_DC": (gemm_stream_with_dc, gemm_stream_with_dc_sm),
         }
 
+        # Create green context streams for testing
+        self.profile_streams: dict[str, tuple[torch._C.Stream, int]] = {}
+        for i in range((num_sm_counts + 1) // 2):
+            sm_count_1 = self.sm_counts[i]
+            sm_count_2 = self.sm_counts[num_sm_counts - 1 - i]
+            print(f"Creating green context streams for SM counts: {sm_count_1}, {sm_count_2}")
+
+            (stream_1, stream_2, _), _ = split_device_green_ctx_by_sm_count(
+                torch.device(self.device),
+                [sm_count_1, sm_count_2]
+            )
+            self.profile_streams[f"TEST_{i}"] = (stream_1, sm_count_1)
+            self.profile_streams[f"TEST_{num_sm_counts - 1 - i}"] = (stream_2, sm_count_2)
+        self.profile_streams[f"TEST_TOTAL"] = (torch.cuda.Stream(), total_sm)
+
 
     def init_external_data(self):
         self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048* 28, self.page_size, 1, self.device)
         self.kv_cache = BatchedDistKVCache(self.kv_pool)
     
-    def reset_kv_cache(self):
+    def reset(self):
+        # reset kv cache and kv pool
         self.kv_pool.reset()
         self.kv_cache.reset()
+
+        # reset batch size and decode batch size
+        self.batch_size = None
+        self.decode_batch_size = None
 
     def init_operations(self):
         self.global_input    = GlobalInput("GlobalInput", self.device).first_only()
@@ -211,7 +236,6 @@ class Pipeline():
     
     
     def init_executor(self):
-        # assert 0 <= device_id < self.num_cuda_devices, "device_id should be in range [0, num_devices)"
         self.executor = Executor(self.op_layers, self.layer_list)
         self.executor.plan_layer_ordering()
 
@@ -258,23 +282,23 @@ class Pipeline():
         self.decAttn.config_tag("batched_cuda")
         self.pfAttn.config_tag("batched_cuda")
 
-        self.layerNormAttn.config_tag("cuda")        
-        self.activation.config_tag("cuda")
-        self.kqv.config_tag(gemm_tag)
-        self.ropeAppend.config_tag("cuda")
-        self.layerNormFFN.config_tag("cuda")
-        self.o.config_tag(gemm_tag)
-        self.ug.config_tag(gemm_tag)
-        self.d.config_tag(gemm_tag)
+        # self.layerNormAttn.config_tag("cuda")        
+        # self.activation.config_tag("cuda")
+        # self.kqv.config_tag(gemm_tag)
+        # self.ropeAppend.config_tag("cuda")
+        # self.layerNormFFN.config_tag("cuda")
+        # self.o.config_tag(gemm_tag)
+        # self.ug.config_tag(gemm_tag)
+        # self.d.config_tag(gemm_tag)
 
-        # self.layerNormAttn.config_tag(["cuda", "cuda"])
-        # self.activation.config_tag(["cuda", "cuda"])
-        # self.kqv.config_tag([gemm_tag, gemm_tag])
-        # self.ropeAppend.config_tag(["cuda", "cuda"])
-        # self.layerNormFFN.config_tag(["cuda", "cuda"])
-        # self.o.config_tag([gemm_tag, gemm_tag])
-        # self.ug.config_tag([gemm_tag, gemm_tag])
-        # self.d.config_tag([gemm_tag, gemm_tag])
+        self.layerNormAttn.config_tag(["cuda", "cuda"])
+        self.activation.config_tag(["cuda", "cuda"])
+        self.kqv.config_tag([gemm_tag, gemm_tag])
+        self.ropeAppend.config_tag(["cuda", "cuda"])
+        self.layerNormFFN.config_tag(["cuda", "cuda"])
+        self.o.config_tag([gemm_tag, gemm_tag])
+        self.ug.config_tag([gemm_tag, gemm_tag])
+        self.d.config_tag([gemm_tag, gemm_tag])
 
         self.modelLayerNorm.config_tag("cuda")
         self.sample.config_tag("cuda")
@@ -284,6 +308,7 @@ class Pipeline():
         # manually set streams for running.
         self.global_input.set_stream(self.streams["GEMM_Test"])
         self.gen_embedding.set_stream(self.streams["GEMM_Test"])
+
         self.layerNormAttn.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
         self.kqv.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
         self.ropeAppend.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
@@ -294,6 +319,7 @@ class Pipeline():
         self.ug.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
         self.activation.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
         self.d.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
+
         self.modelLayerNorm.set_stream(self.streams["GEMM_Test"])
         self.sample.set_stream(self.streams["GEMM_Test"])
         self.getLogits.set_stream(self.streams["GEMM_Test"])
@@ -329,7 +355,7 @@ class Pipeline():
         for operation in new_operation_list:
             self.op_layers.extend(operation.children)
     
-    def update(self, new_input_infos, decode_batch_size=0, is_profile=False, stream_name:str="GEMM_Test"):
+    def update(self, new_input_infos, decode_batch_size=0, is_profile=False, stream_name:str="TEST_TOTAL"):
         self.input_req_idx = []
         self.input_ids = []
         with prof_marker("update_step_0"):
@@ -348,7 +374,7 @@ class Pipeline():
                 # print("decode_batchsize: ", decode_batchsize)
                 self.clear_batch_size()
                 self.config_batch_size(decode_batch_size)
-                # self.nanobatch_split(self.batch_size, decode_batch_size)
+                self.nanobatch_split(self.batch_size, decode_batch_size)
                 self.update_allocate_buffers()
                 # print("finish update_allocate_buffers")
                 if is_profile:
@@ -415,9 +441,8 @@ class Pipeline():
     
     # profile related functions
     def init_profile_data(self, append_mode=False):
-        profile_dir = f"../profile_data/{self.pipeline_name}"
         for operation in self.operation_list:
-            operation.setup_profile(profile_dir, append_mode=append_mode, is_save_db=True)
+            operation.setup_profile(self.profile_dir, append_mode=append_mode, is_save_db=True)
 
     def profile_run(self):
         for operation in self.operation_list:

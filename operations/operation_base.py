@@ -270,7 +270,7 @@ class Operations():
         else:
             self.category = category
 
-    def set_stream(self, stream: tuple[torch.cuda.Stream, int | None] | list[tuple[torch.cuda.Stream, int | None]]) -> None:
+    def set_stream(self, stream: tuple[torch._C.Stream, int | None] | list[tuple[torch._C.Stream, int | None]]) -> None:
         if self.isNanoSplit:
             assert isinstance(stream, list), "Stream must be a list of streams"
             for i, nano_op in enumerate(self.nano_ops):

@@ -1,13 +1,13 @@
 import sys
+sys.path.append('../')
+sys.path.append('../pybind/build/')
 import itertools
 from collections import defaultdict
 
 from models.llama3_AutoSearch import Pipeline
+from models.llama3_70B_allreduce_AutoSearch import Pipeline as Pipeline_70B_AllReduce
 from core.executor import Executor
 from profileAnalysis import getGemvTimeAndSMCount, getByBatchsizeAndSMCount
-
-sys.path.append('../')
-sys.path.append('../pybind/build/')
 
 
 global_batch_size = 1024
@@ -18,8 +18,12 @@ batch_size_range = list(range(128, global_batch_size+1, 128))
 print("batch_size_range:", batch_size_range)
 
 # create operations
-pipeline = Pipeline()
+# pipeline = Pipeline()
+pipeline = Pipeline_70B_AllReduce(TP_idx=0, TP_size=4)
+
 profile_dir = pipeline.profile_dir
+stage1_figure_path = "70B_stage1_figure.png"
+stage2_figure_path = "70B_stage2_figure.png"
 
 pipeline.init()
 pipeline.batch_size = global_batch_size
@@ -64,7 +68,6 @@ for layer_op in all_layered_ops:
             print("sm_count:", sm_count)
             duration = getGemvTimeAndSMCount(profile_dir, batch_size, seq_len, sm_count)
             layer_op.duration_map[(batch_size, sm_count)] = duration
-            print("duration_map:", layer_op.duration_map)
     else:
         batch_size = layer_op.batch_size
         print("batch_size:", batch_size)
@@ -72,7 +75,6 @@ for layer_op in all_layered_ops:
             print("sm_count:", sm_count)
             duration = getByBatchsizeAndSMCount(profile_dir, layer_op.original_name, batch_size, sm_count)
             layer_op.duration_map[(batch_size, sm_count)] = duration
-            print("duration_map:", layer_op.duration_map)
 
 # create executor
 executor = Executor(all_layered_ops, [i for i in range(layer_num)])
@@ -200,7 +202,7 @@ ax.set_title("Nano Operations Timeline with Batch Sizes")
 ax.grid(True, linestyle="--", alpha=0.6)
 
 plt.tight_layout()
-plt.savefig("nano_operations_timeline.png")
+plt.savefig(stage1_figure_path)
 # plt.show()
 
 # sort category_nano_op_map by start time
@@ -383,7 +385,7 @@ ax.set_title("Nano Operations Timeline with Batch Sizes")
 ax.grid(True, linestyle="--", alpha=0.6)
 
 plt.tight_layout()
-plt.savefig("nano_operations_timeline_second_stage.png")
+plt.savefig(stage2_figure_path)
 
 output_op_infos: dict[str, dict] = {}
 

@@ -9,16 +9,15 @@ from operations.gemm.gemm_N_parallel import GEMM_N_Parallel
 from operations.gemm.gemm_K_parallel import GEMM_K_Parallel
 from operations.norm.rmsnorm import LayerNorm
 from operations.sampling.max_sampling import Sampling
-from operations.rope.rope_flashinfer import RopeAppendFlashinfer
-from operations.attention.llamaAttention_flashinfer import DecAttnFlashinfer, PFAttnFlashinfer
+from operations.rope.rope_torch import RopeAppendTorch
+from operations.attention.llamaAttention_torch import DecAttnTorch, PFAttnTorch
 from operations.virtualOp.virtual_ops import Copy, Redist
 from core.bufferAllocate import BufferAllocator
 from core.executor import Executor
 from core.nanobatchSplit import split_nanobatch
-from utils.greenctx import create_greenctx
 
 class Pipeline():
-    def __init__(self, TP_idx, TP_size, PP_idx=0, PP_size=1, DP_idx=0, DP_size=1):
+    def __init__(self, TP_idx: int, TP_size: int, PP_idx=0, PP_size=1, DP_idx=0, DP_size=1):
         # Set parameters as instance variables.
         self.pipeline_name = f"Llama3-70B-with-2-allreduce-TP{TP_size}-PP{PP_size}-DP{DP_size}"
         self.num_kv_heads = 8
@@ -33,6 +32,7 @@ class Pipeline():
         self.num_layers = 80
         self.layer_list = [i for i in range(self.num_layers)]
         self.page_size = 16
+        self.device = "cuda:0"
 
         self.tp_idx = TP_idx
         self.tp_size = TP_size
@@ -44,49 +44,24 @@ class Pipeline():
         # profile related variables
         self.profile_dir = f"../profile_data/{self.pipeline_name}"
 
-    def init(self, weight_path, cached=False):
+    def init(self):
         self.init_streams()
         self.init_operations()
         self.init_dependency()
         self.init_set_shape()
+        self.update_network_ops()
 
     def init_streams(self):
-        GEMM_STREAM = torch.cuda.Stream()
-        GEMV_STREAM = torch.cuda.Stream()
-        NETWORK_STREAM = torch.cuda.Stream()
-        OTHER_STREAM = torch.cuda.Stream()
-
-
-        gemm_stream_with_pf, pf_stream, gemm_stream_with_pf_sm, pf_stream_sm = create_greenctx(0.85, 0.15, self.rank)
-        # Create green context streams for testing
-        test_stream_01, test_stream_09, test_stream_01_sm, test_stream_09_sm = create_greenctx(0.1, 0.9, self.rank)
-        test_stream_02, test_stream_08, test_stream_02_sm, test_stream_08_sm = create_greenctx(0.2, 0.8, self.rank)
-        test_stream_03, test_stream_07, test_stream_03_sm, test_stream_07_sm = create_greenctx(0.3, 0.7, self.rank)
-        test_stream_04, test_stream_06, test_stream_04_sm, test_stream_06_sm = create_greenctx(0.4, 0.6, self.rank)
-        test_stream_05, _, test_stream_05_sm, _ = create_greenctx(0.5, 0.5, self.rank)
-
-        self.profile_streams = {
-            "TEST_1": (test_stream_01, test_stream_01_sm),
-            "TEST_2": (test_stream_02, test_stream_02_sm),
-            "TEST_3": (test_stream_03, test_stream_03_sm),
-            "TEST_4": (test_stream_04, test_stream_04_sm),
-            "TEST_5": (test_stream_05, test_stream_05_sm),
-            "TEST_6": (test_stream_06, test_stream_06_sm),
-            "TEST_7": (test_stream_07, test_stream_07_sm),
-            "TEST_8": (test_stream_08, test_stream_08_sm),
-            "TEST_9": (test_stream_09, test_stream_09_sm),
-            "TEST_10": (torch.cuda.Stream(), gemm_stream_with_pf_sm + pf_stream_sm)
-        }
-        self.sm_counts = [test_stream_01_sm, test_stream_02_sm, test_stream_03_sm, test_stream_04_sm, test_stream_05_sm,
-                    test_stream_06_sm, test_stream_07_sm, test_stream_08_sm, test_stream_09_sm,
-                    gemm_stream_with_pf_sm + pf_stream_sm]
+        total_sm = 132
+        self.sm_counts = [
+            i for i in range(8, 128, 8) # Assuming SM counts are in increments of 8
+        ] + [total_sm]  # Add the total SM count as the last element
 
         self.streams = {
-            "GEMM": (GEMM_STREAM, None),
-            "GEMV": (GEMV_STREAM, None),
-            "NETWORK": (NETWORK_STREAM, None),
-            "OTHER": (OTHER_STREAM, None),
-            "TEST_5": (test_stream_05, test_stream_05_sm),
+            "GEMM": (torch.cuda.Stream(), None),
+            "ATTN": (torch.cuda.Stream(), None),
+            "NETWORK": (torch.cuda.Stream(), None),
+            "OTHER": (torch.cuda.Stream(), None)
         }
 
     def init_operations(self):
@@ -106,14 +81,14 @@ class Pipeline():
         ])
         self.kqv_layers = self.kqv.expand_layer(self.layer_list)
 
-        self.ropeAppend      = RopeAppendFlashinfer("RopeAppend", self.device)
+        self.ropeAppend      = RopeAppendTorch("RopeAppend", self.device)
         self.ropeAppend_layers = self.ropeAppend.expand_layer(self.layer_list)
 
 
-        self.decAttn         = DecAttnFlashinfer("DecAttn", self.device)
+        self.decAttn         = DecAttnTorch("DecAttn", self.device)
         self.decAttn_layers = self.decAttn.expand_layer(self.layer_list)
 
-        self.pfAttn          = PFAttnFlashinfer("PFAttn", self.device)
+        self.pfAttn          = PFAttnTorch("PFAttn", self.device)
         self.pfAttn_layers = self.pfAttn.expand_layer(self.layer_list)
 
         self.o               = GEMM_K_Parallel("O", self.device, bias=True).setWeightName("model.layers.{layer}.self_attn.o_proj.weight")
@@ -226,7 +201,6 @@ class Pipeline():
         for operation in self.operation_list + self.virtual_operation_list:
             operation.checkConnection()
     
-    
     def init_executor(self):
         self.executor = Executor(self.op_layers, self.layer_list)
         self.executor.plan_layer_ordering()
@@ -251,9 +225,9 @@ class Pipeline():
         self.sample.setShape(self.vocab_size)
         self.global_output.setShape()
 
-    def config_batch_size(self):
+    def config_batch_size(self, decode_batchsize):
         self.global_input.setBatchSize(self.batch_size)
-        self.decAttn.setBatchSize(self.decode_batch_size)
+        self.decAttn.setBatchSize(decode_batchsize)
 
     def config_category(self):
         # Set the category for each operation
@@ -262,15 +236,15 @@ class Pipeline():
         self.layerNormAttn.set_category("GEMM")
         self.kqv.set_category("GEMM")
         self.ropeAppend.set_category("GEMM")
-        self.decAttn.set_category("GEMM")
-        self.pfAttn.set_category("GEMM")
+        self.decAttn.set_category("ATTN")
+        self.pfAttn.set_category("ATTN")
         self.o.set_category("GEMM")
-        self.allReduce_o.set_category("GEMM")
+        self.allReduce_o.set_category("NETWORK")
         self.layerNormFFN.set_category("GEMM")
         self.ug.set_category("GEMM")
         self.activation.set_category("GEMM")
         self.d.set_category("GEMM")
-        self.allReduce_d.set_category("GEMM")
+        self.allReduce_d.set_category("NETWORK")
         self.modelLayerNorm.set_category("GEMM")
         self.getLogits.set_category("GEMM")
         self.sample.set_category("GEMM")
@@ -278,45 +252,42 @@ class Pipeline():
     def config_streams(self):
         self.global_input.set_stream(self.streams["GEMM"])
         self.gen_embedding.set_stream(self.streams["GEMM"])
-        self.layerNormAttn.set_stream(self.streams["GEMM"])
-        self.activation.set_stream(self.streams["GEMM"])
 
-        # self.kqv.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
-       
-        self.kqv.set_stream(self.streams["GEMM"])
-        self.ropeAppend.set_stream(self.streams["GEMM"])
-        self.decAttn.set_stream(self.streams["GEMV"])
-        self.pfAttn.set_stream(self.streams["GEMV"])
-        self.layerNormFFN.set_stream(self.streams["GEMM"])
-        self.o.set_stream(self.streams["GEMM"])
-        self.allReduce_o.set_stream(self.streams["TEST_5"])
-        self.ug.set_stream(self.streams["GEMM"])
-        self.d.set_stream(self.streams["GEMM"])
-        self.allReduce_d.set_stream(self.streams["TEST_5"])
+        self.layerNormAttn.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        self.kqv.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        self.ropeAppend.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        self.decAttn.set_stream(self.streams["ATTN"])
+        self.pfAttn.set_stream(self.streams["ATTN"])
+        self.layerNormFFN.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        self.o.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        self.allReduce_o.set_stream([self.streams["NETWORK"], self.streams["NETWORK"]])
+        self.ug.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        self.activation.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        self.d.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        self.allReduce_d.set_stream([self.streams["NETWORK"], self.streams["NETWORK"]])
+
         self.modelLayerNorm.set_stream(self.streams["GEMM"])
         self.sample.set_stream(self.streams["GEMM"])
         self.getLogits.set_stream(self.streams["GEMM"])
         self.global_output.set_stream(self.streams["GEMM"])
 
+    def update_network_ops(self):
+        self.allReduce_o.update(None)
+        self.allReduce_d.update(None)
 
     def nanobatch_split(self, total_batch_size, decode_batch_size):
         op_nanobatch_info_map = {
-            # "LayerNormAttn": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
+            "LayerNormAttn": (2, (decode_batch_size, total_batch_size - decode_batch_size)),
             "KQV": (2, (decode_batch_size, total_batch_size - decode_batch_size)),
-            # "RopeAppend": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
-            # "O": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
-            # "LayerNormFFN": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
-            # "UG": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
-            # "Activation": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
-            # "D": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
+            "RopeAppend": (2, (decode_batch_size, total_batch_size - decode_batch_size)),
+            "O": (2, (decode_batch_size, total_batch_size - decode_batch_size)),
+            "AllReduceO": (2, (decode_batch_size, total_batch_size - decode_batch_size)),
+            "LayerNormFFN": (2, (decode_batch_size, total_batch_size - decode_batch_size)),
+            "UG": (2, (decode_batch_size, total_batch_size - decode_batch_size)),
+            "Activation": (2, (decode_batch_size, total_batch_size - decode_batch_size)),
+            "D": (2, (decode_batch_size, total_batch_size - decode_batch_size)),
+            "AllReduceD": (2, (decode_batch_size, total_batch_size - decode_batch_size)),
         }
-        # extra_links = {
-        #     # TODO: add extra links for virtual ops
-        #     # "KQV0": ("KQV1", False, False),
-        #     # "RopeAppend0": ("RopeAppend1", False, False),
-        #     "RopeAppend0": ("O1", False, False),
-        #     "RopeAppend1": ("O0", False, True),
-        # }
         extra_links = {}
 
         new_operation_list, addtional_virtual_ops = split_nanobatch(self.operation_list, op_nanobatch_info_map, extra_links)

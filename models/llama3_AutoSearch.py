@@ -12,7 +12,6 @@ from operations.virtualOp.virtual_ops import Copy, Redist
 from core.bufferAllocate import BufferAllocator
 from core.executor import Executor
 from core.nanobatchSplit import split_nanobatch
-from utils.greenctx import create_greenctx
 
 
 class Pipeline():
@@ -41,25 +40,15 @@ class Pipeline():
         self.init_set_shape()
 
     def init_streams(self):
-        gemm_stream_with_pf, pf_stream, gemm_stream_with_pf_sm, pf_stream_sm = create_greenctx(0.85, 0.15, 0)
-        gemm_stream_with_dc, dc_stream, gemm_stream_with_dc_sm, dc_stream_sm = create_greenctx(0.7, 0.3, 0)
+        total_sm = 132
+        self.sm_counts = [
+            i for i in range(8, 128, 8)
+        ] + [total_sm]  # Example SM counts, adjust as needed
 
         self.streams = {
-            "GEMM_Test": (torch.cuda.Stream(), gemm_stream_with_pf_sm + pf_stream_sm),
-            "PF_ATTN": (pf_stream, pf_stream_sm),
-            "DC_ATTN": (dc_stream, dc_stream_sm),
+            "GEMM": (torch.cuda.Stream(), total_sm),
+            "ATTN": (torch.cuda.Stream(), total_sm),
         }
-
-        # Create green context streams for testing
-        test_stream_01, test_stream_09, test_stream_01_sm, test_stream_09_sm = create_greenctx(0.1, 0.9, 0)
-        test_stream_02, test_stream_08, test_stream_02_sm, test_stream_08_sm = create_greenctx(0.2, 0.8, 0)
-        test_stream_03, test_stream_07, test_stream_03_sm, test_stream_07_sm = create_greenctx(0.3, 0.7, 0)
-        test_stream_04, test_stream_06, test_stream_04_sm, test_stream_06_sm = create_greenctx(0.4, 0.6, 0)
-        test_stream_05, _, test_stream_05_sm, _ = create_greenctx(0.5, 0.5, 0)
-
-        self.sm_counts = [test_stream_01_sm, test_stream_02_sm, test_stream_03_sm, test_stream_04_sm, test_stream_05_sm,
-                    test_stream_06_sm, test_stream_07_sm, test_stream_08_sm, test_stream_09_sm,
-                    gemm_stream_with_pf_sm + pf_stream_sm]
 
     def init_operations(self):
         self.global_input    = GlobalInput("GlobalInput", self.device).first_only()
@@ -189,7 +178,6 @@ class Pipeline():
             operation.checkConnection()
     
     def init_executor(self):
-        # assert 0 <= device_id < self.num_cuda_devices, "device_id should be in range [0, num_devices)"
         self.executor = Executor(self.op_layers, self.layer_list)
         self.executor.plan_layer_ordering()
 
@@ -234,22 +222,24 @@ class Pipeline():
 
     def config_streams(self):
         # Set stream for auto-search case
-        self.global_input.set_stream(self.streams["GEMM_Test"])
-        self.gen_embedding.set_stream(self.streams["GEMM_Test"])
-        self.layerNormAttn.set_stream([self.streams["GEMM_Test"], self.streams["GEMM_Test"]])
-        self.kqv.set_stream([self.streams["GEMM_Test"], self.streams["GEMM_Test"]])
-        self.ropeAppend.set_stream([self.streams["GEMM_Test"], self.streams["GEMM_Test"]])
-        self.decAttn.set_stream(self.streams["DC_ATTN"])
-        self.pfAttn.set_stream(self.streams["DC_ATTN"])
-        self.layerNormFFN.set_stream([self.streams["GEMM_Test"], self.streams["GEMM_Test"]])
-        self.o.set_stream([self.streams["GEMM_Test"], self.streams["GEMM_Test"]])
-        self.ug.set_stream([self.streams["GEMM_Test"], self.streams["GEMM_Test"]])
-        self.activation.set_stream([self.streams["GEMM_Test"], self.streams["GEMM_Test"]])
-        self.d.set_stream([self.streams["GEMM_Test"], self.streams["GEMM_Test"]])
-        self.modelLayerNorm.set_stream(self.streams["GEMM_Test"])
-        self.sample.set_stream(self.streams["GEMM_Test"])
-        self.getLogits.set_stream(self.streams["GEMM_Test"])
-        self.global_output.set_stream(self.streams["GEMM_Test"])
+        self.global_input.set_stream(self.streams["GEMM"])
+        self.gen_embedding.set_stream(self.streams["GEMM"])
+
+        self.layerNormAttn.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        self.kqv.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        self.ropeAppend.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        self.decAttn.set_stream(self.streams["ATTN"])
+        self.pfAttn.set_stream(self.streams["ATTN"])
+        self.layerNormFFN.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        self.o.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        self.ug.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        self.activation.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        self.d.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        
+        self.modelLayerNorm.set_stream(self.streams["GEMM"])
+        self.sample.set_stream(self.streams["GEMM"])
+        self.getLogits.set_stream(self.streams["GEMM"])
+        self.global_output.set_stream(self.streams["GEMM"])
 
     def nanobatch_split(self, total_batchsize, decode_batchsize):
         op_nanobatch_info_map = {

@@ -51,7 +51,7 @@ def worker(start_time, rank, world_size, shared_batch_size, shared_array, barrie
             case "Profile":
                 pipeline.init_profile_data()
 
-                stream_names = [ f"TEST_{i}" for i in range(1, 11) ]
+                stream_names = [ f"TEST_{i}" for i in range(len(pipeline.sm_counts)) ] + ["TEST_TOTAL"]
                 # stream_names = [ "TEST_1" ]  # For testing purposes, we only use one stream.
                 for stream_name in stream_names:
                     pipeline.reset()
@@ -70,7 +70,7 @@ def worker(start_time, rank, world_size, shared_batch_size, shared_array, barrie
                     # test for decode
                     total_batch_sizes = [128, 256, 384]
                     # total_batch_sizes = [128, 256, 384, 512, 640, 768, 896, 1024, 1152, 1280]
-                    # total_batch_sizes = [768]
+                    # total_batch_sizes = [384]
                     # prepare the decode inputs for a special input_length
                     input_length = 1024
                     output_length = 512
@@ -82,7 +82,7 @@ def worker(start_time, rank, world_size, shared_batch_size, shared_array, barrie
                         # initialize the reqs for first {total_batch_size} requests
                         for i in range(total_batch_size):
                             input = [(i, prefill_input_ids[i])]
-                            pipeline.update(input)
+                            pipeline.update(input, is_profile=True)
                             new_tokens = pipeline.run()
                             decode_inputs.extend(new_tokens)
                             print("new_tokens: ", new_tokens)

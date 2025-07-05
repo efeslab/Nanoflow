@@ -2,9 +2,9 @@ import torch
 import torch.distributed as dist
 import os
 
+from flashinfer.green_ctx import split_device_green_ctx_by_sm_count
 from operations.operation_base import Operations
 from operations.activation.silu import Activation
-from operations.allgather.allgather import AllGather
 from operations.allreduce.allreduce import AllReduce
 from operations.embedding.embedding import GenEmbedding
 from operations.globalOp.globalOp import GlobalInput, GlobalOutput
@@ -21,7 +21,6 @@ from core.bufferAllocate import BufferAllocator
 from core.executor import Executor
 from core.nanobatchSplit import split_nanobatch
 from utils.prof_marker import prof_marker
-from utils.greenctx import create_greenctx
 
 class Pipeline():
     def __init__(self, TP_idx, TP_size, PP_idx=0, PP_size=1, DP_idx=0, DP_size=1):
@@ -71,42 +70,36 @@ class Pipeline():
         self.update_network_ops()
 
     def init_streams(self):
+        self.sm_counts = [
+            i for i in range(8, 128, 8) # Assuming SM counts are in increments of 8
+        ]
+        num_sm_counts = len(self.sm_counts)
+        total_sm = 132
+
         GEMM_STREAM = torch.cuda.Stream()
         GEMV_STREAM = torch.cuda.Stream()
         NETWORK_STREAM = torch.cuda.Stream()
         OTHER_STREAM = torch.cuda.Stream()
 
-
-        gemm_stream_with_pf, pf_stream, gemm_stream_with_pf_sm, pf_stream_sm = create_greenctx(0.85, 0.15, self.rank)
         # Create green context streams for testing
-        test_stream_01, test_stream_09, test_stream_01_sm, test_stream_09_sm = create_greenctx(0.1, 0.9, self.rank)
-        test_stream_02, test_stream_08, test_stream_02_sm, test_stream_08_sm = create_greenctx(0.2, 0.8, self.rank)
-        test_stream_03, test_stream_07, test_stream_03_sm, test_stream_07_sm = create_greenctx(0.3, 0.7, self.rank)
-        test_stream_04, test_stream_06, test_stream_04_sm, test_stream_06_sm = create_greenctx(0.4, 0.6, self.rank)
-        test_stream_05, _, test_stream_05_sm, _ = create_greenctx(0.5, 0.5, self.rank)
-
-        self.profile_streams = {
-            "TEST_1": (test_stream_01, test_stream_01_sm),
-            "TEST_2": (test_stream_02, test_stream_02_sm),
-            "TEST_3": (test_stream_03, test_stream_03_sm),
-            "TEST_4": (test_stream_04, test_stream_04_sm),
-            "TEST_5": (test_stream_05, test_stream_05_sm),
-            "TEST_6": (test_stream_06, test_stream_06_sm),
-            "TEST_7": (test_stream_07, test_stream_07_sm),
-            "TEST_8": (test_stream_08, test_stream_08_sm),
-            "TEST_9": (test_stream_09, test_stream_09_sm),
-            "TEST_10": (torch.cuda.Stream(), gemm_stream_with_pf_sm + pf_stream_sm)
-        }
-        self.sm_counts = [test_stream_01_sm, test_stream_02_sm, test_stream_03_sm, test_stream_04_sm, test_stream_05_sm,
-                    test_stream_06_sm, test_stream_07_sm, test_stream_08_sm, test_stream_09_sm,
-                    gemm_stream_with_pf_sm + pf_stream_sm]
+        self.profile_streams: dict[str, tuple[torch._C.Stream, int]] = {}
+        for i in range((num_sm_counts + 1) // 2):
+            sm_count_1 = self.sm_counts[i]
+            sm_count_2 = self.sm_counts[num_sm_counts - 1 - i]
+            print(f"Creating green context streams for SM counts: {sm_count_1}, {sm_count_2}")
+            (stream_1, stream_2, _), _ = split_device_green_ctx_by_sm_count(
+                torch.device(self.device),
+                [sm_count_1, sm_count_2]
+            )
+            self.profile_streams[f"TEST_{i}"] = (stream_1, sm_count_1)
+            self.profile_streams[f"TEST_{num_sm_counts - 1 - i}"] = (stream_2, sm_count_2)
+        self.profile_streams[f"TEST_TOTAL"] = (torch.cuda.Stream(), total_sm)
 
         self.streams = {
             "GEMM": (GEMM_STREAM, None),
             "GEMV": (GEMV_STREAM, None),
             "NETWORK": (NETWORK_STREAM, None),
-            "OTHER": (OTHER_STREAM, None),
-            "TEST_5": (test_stream_05, test_stream_05_sm),
+            "OTHER": (OTHER_STREAM, None)
         }
 
     def init_external_data(self):
@@ -264,7 +257,6 @@ class Pipeline():
     
     
     def init_executor(self):
-        # assert 0 <= device_id < self.num_cuda_devices, "device_id should be in range [0, num_devices)"
         self.executor = Executor(self.op_layers, self.layer_list)
         self.executor.plan_layer_ordering()
 
@@ -352,10 +344,10 @@ class Pipeline():
         self.pfAttn.set_stream(self.streams["GEMV"])
         self.layerNormFFN.set_stream(self.streams["GEMM"])
         self.o.set_stream(self.streams["GEMM"])
-        self.allReduce_o.set_stream(self.streams["TEST_5"])
+        self.allReduce_o.set_stream(self.streams["NETWORK"])
         self.ug.set_stream(self.streams["GEMM"])
         self.d.set_stream(self.streams["GEMM"])
-        self.allReduce_d.set_stream(self.streams["TEST_5"])
+        self.allReduce_d.set_stream(self.streams["NETWORK"])
         self.modelLayerNorm.set_stream(self.streams["GEMM"])
         self.sample.set_stream(self.streams["GEMM"])
         self.getLogits.set_stream(self.streams["GEMM"])
@@ -399,7 +391,7 @@ class Pipeline():
         for operation in new_operation_list:
             self.op_layers.extend(operation.children)
 
-    def update(self, new_input_infos, decode_batch_size=0, is_profile=False, stream_name="TEST_1"):
+    def update(self, new_input_infos, decode_batch_size=0, is_profile=False, stream_name="TEST_TOTAL"):
         self.input_req_idx = []
         self.input_ids = []
         with prof_marker("update_step_0"):
@@ -422,7 +414,6 @@ class Pipeline():
                 self.update_allocate_buffers()
                 # print("finish update_allocate_buffers")
                 if is_profile:
-                    print(f"Configuring streams for profiling with stream name: {self.profile_streams[stream_name][0]}")
                     self.profile_config_streams(self.profile_streams[stream_name])
                 else:
                     self.config_streams()
