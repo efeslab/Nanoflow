@@ -84,7 +84,7 @@ def test_performance():
 
     output_strings[decode_batch_size] = prefill_input_ids[decode_batch_size]
     decode_inputs.extend([(decode_batch_size, prefill_input_ids[decode_batch_size])])
-    pipeline.update(decode_inputs, decode_batch_size)
+    pipeline.update(decode_inputs, decode_batch_size, profile_result_path="search_result.json")
 
     for i in range(decode_batch_size, decode_batch_size + 50):
         print("Cycle: ", i - decode_batch_size)
@@ -103,7 +103,7 @@ def test_performance():
         with prof_marker(f"after_execute_step_7"):
             new_tokens.extend([(next_prefill_idx, prefill_input_ids[next_prefill_idx])])
         with prof_marker(f"after_execute_step_8"):
-            pipeline.update(new_tokens, decode_batchsize)
+            pipeline.update(new_tokens, decode_batchsize, profile_result_path="search_result.json")
 
     output_text = tokenizer.batch_decode(list(output_strings.values())[:1], skip_special_tokens=True)
     print(output_text)
