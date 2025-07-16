@@ -1,8 +1,11 @@
+import copy
+import json
+from typing import Any
 import torch
 import os
 
 from flashinfer.green_ctx import split_device_green_ctx_by_sm_count
-from operations.operation_base import Operations
+from operations.operation_base import NanoOpInfo, Operations
 from operations.activation.silu import Activation
 from operations.embedding.embedding import GenEmbedding
 from operations.globalOp.globalOp import GlobalInput, GlobalOutput
@@ -18,6 +21,7 @@ from core.bufferAllocate import BufferAllocator
 from core.executor import Executor
 from core.nanobatchSplit import split_nanobatch
 from utils.prof_marker import prof_marker
+from utils.util_functions import op_name_to_name_idx_layer
 
 class Pipeline():
     def __init__(self):
@@ -35,8 +39,8 @@ class Pipeline():
         self.layer_list = [i for i in range(self.num_layers)]
         self.page_size = 16
         self.device = "cuda:0"
-
         self.profile_dir = f"../profile_data/{self.pipeline_name}"
+        self.profile_result: dict[str, Any] | None = None
 
 
     def init(self, weight_path, cached=False):
@@ -48,35 +52,38 @@ class Pipeline():
         self.init_set_weight(weight_path, cached)
 
     def init_streams(self):
+        if self.profile_result is not None:
+            overlaps = self.profile_result["overlaps"]
+        else:
+            total_sm = 132
+            gemm_stream_with_pf_sm = 112
+            pf_stream_sm = 16
+            gemm_stream_with_dc_sm = 88
+            dc_stream_sm = 40
+            (gemm_stream_with_pf, pf_stream, _), _ = split_device_green_ctx_by_sm_count(
+                torch.device(self.device),
+                [gemm_stream_with_pf_sm, pf_stream_sm]
+            )
+            (gemm_stream_with_dc, dc_stream, _), _ = split_device_green_ctx_by_sm_count(
+                torch.device(self.device),
+                [gemm_stream_with_dc_sm, dc_stream_sm]
+            )
+
+            self.streams = {
+                "GEMM_Test": (torch.cuda.Stream(), total_sm),
+                "PF_ATTN": (pf_stream, pf_stream_sm),
+                "DC_ATTN": (dc_stream, dc_stream_sm),
+                "GEMM_WITH_PF": (gemm_stream_with_pf, gemm_stream_with_pf_sm),
+                "GEMM_WITH_DC": (gemm_stream_with_dc, gemm_stream_with_dc_sm),
+            }
+
+        # Create green context streams for testing
+        self.profile_streams: dict[str, tuple[torch._C.Stream, int]] = {}
         self.sm_counts = [
             i for i in range(8, 128, 8) # Assuming SM counts are in increments of 8
         ]
         num_sm_counts = len(self.sm_counts)
         # [8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120]
-        total_sm = 132
-        gemm_stream_with_pf_sm = 112
-        pf_stream_sm = 16
-        gemm_stream_with_dc_sm = 88
-        dc_stream_sm = 40
-        (gemm_stream_with_pf, pf_stream, _), _ = split_device_green_ctx_by_sm_count(
-            torch.device(self.device),
-            [gemm_stream_with_pf_sm, pf_stream_sm]
-        )
-        (gemm_stream_with_dc, dc_stream, _), _ = split_device_green_ctx_by_sm_count(
-            torch.device(self.device),
-            [gemm_stream_with_dc_sm, dc_stream_sm]
-        )
-
-        self.streams = {
-            "GEMM_Test": (torch.cuda.Stream(), total_sm),
-            "PF_ATTN": (pf_stream, pf_stream_sm),
-            "DC_ATTN": (dc_stream, dc_stream_sm),
-            "GEMM_WITH_PF": (gemm_stream_with_pf, gemm_stream_with_pf_sm),
-            "GEMM_WITH_DC": (gemm_stream_with_dc, gemm_stream_with_dc_sm),
-        }
-
-        # Create green context streams for testing
-        self.profile_streams: dict[str, tuple[torch._C.Stream, int]] = {}
         for i in range((num_sm_counts + 1) // 2):
             sm_count_1 = self.sm_counts[i]
             sm_count_2 = self.sm_counts[num_sm_counts - 1 - i]
@@ -330,34 +337,83 @@ class Pipeline():
             operation.set_stream(stream_tuple)
 
     def nanobatch_split(self, total_batchsize, decode_batchsize):
-        op_nanobatch_info_map = {
-            "LayerNormAttn": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
-            "KQV": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
-            "RopeAppend": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
-            "O": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
-            "LayerNormFFN": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
-            "UG": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
-            "Activation": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
-            "D": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
-        }
-        extra_links = {
-            "RopeAppend0": ("O1", False, False),
-            "RopeAppend1": ("O0", False, True),
-        }
+        op_nanobatch_info_map: dict[str, tuple[NanoOpInfo, ...]] = {}
+        if self.profile_result is not None:
+            operations = self.profile_result["operations"]
+            for (operation_name, operation_info) in operations.items():
+                name, batch_idx, layer_idx = op_name_to_name_idx_layer(operation_name)
+                if batch_idx == -1 or layer_idx != 1:
+                    continue
+                if name not in op_nanobatch_info_map:
+                    op_nanobatch_info_map[name] = ()
+                info = NanoOpInfo(
+                    batch_idx=batch_idx,
+                    batch_size=operation_info["batch_size"],
+                    sm_count=operation_info["p_value"]
+                )
+                op_nanobatch_info_map[name] = tuple(op_nanobatch_info_map[name] + (info, ))
+            
+            op_before_pf = max([
+                op_name_to_name_idx_layer(name) + (info['start_time'],)
+                for name, info in operations.items()
+                if info['start_time'] < operations['PFAttn_1']['start_time'] and op_name_to_name_idx_layer(name)[1] == 0
+            ], key=lambda x: x[-1])
+            op_before_dc = max([
+                op_name_to_name_idx_layer(name) + (info['start_time'],)
+                for name, info in operations.items()
+                if info['start_time'] < operations['DecAttn_1']['start_time'] and op_name_to_name_idx_layer(name)[1] == 1
+            ], key=lambda x: x[-1])
+            # NOTE(yi): double check the dependency on previous/next layer
+            extra_links = {
+                f"{op_before_pf[0]}0": ("PFAttn", op_before_pf[2] == 0, op_before_pf[2] == 2),
+                f"{op_before_dc[0]}1": ("DecAttn", op_before_dc[2] == 0, op_before_dc[2] == 2),
+            }
+        else:
+            info = (
+                NanoOpInfo(
+                    batch_idx=0,
+                    batch_size=decode_batchsize,
+                    sm_count=0
+                ),  
+                NanoOpInfo(
+                    batch_idx=1,
+                    batch_size=total_batchsize - decode_batchsize,
+                    sm_count=132,
+                )
+            )
+            op_nanobatch_info_map = {
+                "LayerNormAttn": copy.deepcopy(info),
+                "KQV": copy.deepcopy(info),
+                "RopeAppend": copy.deepcopy(info),
+                "O": copy.deepcopy(info),
+                "LayerNormFFN": copy.deepcopy(info),
+                "UG": copy.deepcopy(info),
+                "Activation": copy.deepcopy(info),
+                "D": copy.deepcopy(info),
+            }
+            extra_links = {
+                "DecAttn": ("O1", False, False),
+                "PFAttn": ("O0", False, True),
+            }
 
         new_operation_list, addtional_virtual_ops = split_nanobatch(self.operation_list, op_nanobatch_info_map, extra_links)
         self.op_for_buffer_allocation = []
         self.new_operation_list = new_operation_list
         self.op_layers = []
         for op in new_operation_list + self.virtual_operation_list + addtional_virtual_ops:
-            print("op.name", op.name)
+            print("op.name", op.name, op.batch_size)
             self.op_for_buffer_allocation.append(op)
         for operation in new_operation_list:
             self.op_layers.extend(operation.children)
     
-    def update(self, new_input_infos, decode_batch_size=0, is_profile=False, stream_name:str="TEST_TOTAL"):
+    def update(self, new_input_infos, decode_batch_size = 0, is_profile = False, stream_name: str = "TEST_TOTAL", profile_result_path: str | None = None):
         self.input_req_idx = []
         self.input_ids = []
+        if profile_result_path is not None:
+            with open(profile_result_path, "r") as f:
+                self.profile_result = json.load(f)
+        else:
+            self.profile_result = None
         with prof_marker("update_step_0"):
             for item in new_input_infos:
                 # print("item", item)

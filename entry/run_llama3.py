@@ -67,7 +67,7 @@ pipeline.init(weight_map_wzr, cached=True)
 # print(f"Reserved memory: {reserved_memory / 1024 / 1024} MB")
 # pipeline.config()
 def test_performance():
-    input_length = 1024
+    input_length = 640
     prefill_input_ids = [prefill_context_ids[:input_length] for _ in range(1000)]
     output_strings = {}
     # initialize the reqs for first 384 requests
@@ -223,8 +223,8 @@ def profile_one_cycle():
                     
     print("All profiling data has been collected.")
 
-test_correctness()
+# test_correctness()
 # test_correctness(use_kv_cache=False)
-# test_performance()
+test_performance()
 # test_one_cycle()
 # profile_one_cycle()

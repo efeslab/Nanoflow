@@ -2,7 +2,7 @@ from operations.operation_base import NanoOpInfo, Operations
 from operations.virtualOp.virtual_ops import Redist
 
 def split_nanobatch(op_list: list[Operations], op_nano_info_map: dict[str, tuple[NanoOpInfo, ...]], extra_links):
-    nano_op_list = []
+    nano_op_list: list[Operations] = []
     additional_virtual_ops = []
     device = op_list[0].device
     for op in op_list:

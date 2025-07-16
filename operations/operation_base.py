@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 import os
 from typing import Type
 from operations.impl_base import OperationImpl
@@ -306,6 +307,9 @@ class Operations():
         for _, output_wrapper in self.outputs.items():
             output_wrapper.batch_size = batch_size
 
+    def copy_nano(self, index) -> "Operations":
+        raise NotImplementedError("copy_nano is not implemented")
+
     def __str__(self):
         return self.name
     
@@ -468,7 +472,7 @@ class Operation_Layer:
             ),
             name=f"{self.name}_p_choice_value"
         )
-
+    
     def __str__(self) -> str:
         # Color codes for terminal output
         COLOR_YELLOW = "\033[33m"
@@ -477,3 +481,9 @@ class Operation_Layer:
         COLOR_RESET = "\033[0m"
         s = f"{COLOR_BLUE}{self.name}{COLOR_RESET} start: {self.start_time.X:.3f} end: {self.end_time.X:.3f} batch_size: {round(self.batch_size)}"
         return s
+
+@dataclass
+class NanoOpInfo:
+    batch_idx: int
+    batch_size: int
+    sm_count: int
