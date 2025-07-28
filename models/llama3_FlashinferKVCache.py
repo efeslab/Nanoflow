@@ -316,6 +316,17 @@ class Pipeline():
         self.global_input.set_stream(self.streams["GEMM_Test"])
         self.gen_embedding.set_stream(self.streams["GEMM_Test"])
 
+        # self.layerNormAttn.set_stream(self.streams["GEMM_Test"])
+        # self.kqv.set_stream(self.streams["GEMM_Test"])
+        # self.ropeAppend.set_stream(self.streams["GEMM_Test"])
+        # self.decAttn.set_stream(self.streams["GEMM_Test"]) 
+        # self.pfAttn.set_stream(self.streams["GEMM_Test"])
+        # self.layerNormFFN.set_stream(self.streams["GEMM_Test"])
+        # self.o.set_stream(self.streams["GEMM_Test"])
+        # self.ug.set_stream(self.streams["GEMM_Test"])
+        # self.activation.set_stream(self.streams["GEMM_Test"])
+        # self.d.set_stream(self.streams["GEMM_Test"])
+
         self.layerNormAttn.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
         self.kqv.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
         self.ropeAppend.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])

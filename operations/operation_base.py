@@ -314,7 +314,7 @@ class Operations():
         return self.name
     
 class Operation_Layer:
-    def __init__(self, layer, base_op):
+    def __init__(self, layer, base_op: Operations):
         self.layer = layer
         self.name = f"{base_op.name}_{layer}"
         self.inputs = base_op.inputs

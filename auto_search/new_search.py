@@ -18,12 +18,20 @@ batch_size_range = list(range(128, global_batch_size+1, 128))
 print("batch_size_range:", batch_size_range)
 
 # create operations
-# pipeline = Pipeline()
-pipeline = Pipeline_70B_AllReduce(TP_idx=0, TP_size=4)
+
+pipeline = Pipeline()
+stage1_figure_path = "8B_stage1_figure.png"
+stage2_figure_path = "8B_stage2_figure.png"
+dump_file = "8B_search_result.json"
+
+
+# pipeline = Pipeline_70B_AllReduce(TP_idx=0, TP_size=4)
+# stage1_figure_path = "70B_stage1_figure.png"
+# stage2_figure_path = "70B_stage2_figure.png"
+# dump_file = "70B_search_result.json"
 
 profile_dir = pipeline.profile_dir
-stage1_figure_path = "70B_stage1_figure.png"
-stage2_figure_path = "70B_stage2_figure.png"
+
 
 pipeline.init()
 pipeline.batch_size = global_batch_size
@@ -422,7 +430,7 @@ output_data = {
     "operations": output_op_infos,
     "overlaps": output_overlap_map
 }
-with open("search_result.json", "w") as f:
+with open(dump_file, "w") as f:
     json.dump(output_data, f, indent=4)
 
 

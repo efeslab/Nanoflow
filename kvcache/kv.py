@@ -602,7 +602,11 @@ class DistKVPool:
         self.kv_shape = [num_layers, capacity, self.num_kv_heads, page_size, head_dim]
         self.k_data = torch.empty(self.kv_shape, dtype=torch.float16, device=self.worker_device)
         self.v_data = torch.empty(self.kv_shape, dtype=torch.float16, device=self.worker_device)
-            
+
+        # self.kv_shape_cpu = [num_layers, capacity, self.num_kv_heads, page_size, head_dim]
+        # self.k_data_cpu = torch.empty(self.kv_shape_cpu, dtype=torch.float16, device="cpu")
+        # self.v_data_cpu = torch.empty(self.kv_shape_cpu, dtype=torch.float16, device="cpu")
+
     # @property
     def num_free_pages(self) -> int:
         return len(self._free)
