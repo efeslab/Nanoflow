@@ -1,11 +1,11 @@
 import copy
 import json
-from typing import Any
+from typing import Any, Optional
 import torch
 import os
 
 from flashinfer.green_ctx import split_device_green_ctx_by_sm_count
-from operations.operation_base import NanoOpInfo, Operations
+from operations.operation_base import NanoOpInfo, Operations, Operation_Layer
 from operations.activation.silu import Activation
 from operations.embedding.embedding import GenEmbedding
 from operations.globalOp.globalOp import GlobalInput, GlobalOutput
@@ -34,48 +34,57 @@ class Pipeline():
         self.vocab_size = 128256
         self.hidden_dim = 4096
         self.intermediate_dim = 14 * 1024
-        self.batch_size = None
+        self.global_batch_size: Optional[int] = None
         self.num_layers = 32
         self.layer_list = [i for i in range(self.num_layers)]
         self.page_size = 16
         self.device = "cuda:0"
         self.profile_dir = f"../profile_data/{self.pipeline_name}"
         self.profile_result: dict[str, Any] | None = None
+        self.categories = ["COMP", "MEM"]
 
+        self.buffer_fixed: bool = False
+        self.is_auto_search_enabled: bool = False
+        self.is_cuda_graph_enabled: bool = False
+        self.plan_cuda_graph: bool = False
 
     def init(self, weight_path, cached=False):
         self.init_streams()
         self.init_external_data()
         self.init_operations()
+        self.init_category()
         self.init_dependency()
         self.init_set_shape()
         self.init_set_weight(weight_path, cached)
 
     def init_streams(self):
-        if self.profile_result is not None:
-            overlaps = self.profile_result["overlaps"]
-        else:
-            total_sm = 132
-            gemm_stream_with_pf_sm = 112
-            pf_stream_sm = 16
-            gemm_stream_with_dc_sm = 88
-            dc_stream_sm = 40
-            (gemm_stream_with_pf, pf_stream, _), _ = split_device_green_ctx_by_sm_count(
-                torch.device(self.device),
-                [gemm_stream_with_pf_sm, pf_stream_sm]
-            )
-            (gemm_stream_with_dc, dc_stream, _), _ = split_device_green_ctx_by_sm_count(
-                torch.device(self.device),
-                [gemm_stream_with_dc_sm, dc_stream_sm]
-            )
+        self.main_stream = torch.cuda.Stream()
+        self.total_sm = 132
+        self.sm_counts = [
+            i for i in range(8, 128, 8) # Assuming SM counts are in increments of 8
+        ]
+        # [8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120]
+        num_sm_counts = len(self.sm_counts)
+        self.streams_test = {
+            "GEMM_Test": (torch.cuda.Stream(), self.total_sm),
+        }
 
-            self.streams = {
-                "GEMM_Test": (torch.cuda.Stream(), total_sm),
-                "PF_ATTN": (pf_stream, pf_stream_sm),
-                "DC_ATTN": (dc_stream, dc_stream_sm),
-                "GEMM_WITH_PF": (gemm_stream_with_pf, gemm_stream_with_pf_sm),
-                "GEMM_WITH_DC": (gemm_stream_with_dc, gemm_stream_with_dc_sm),
-            }
+        self.streams: dict[str, dict[int, tuple[torch._C.Stream, int]]] = {}
+        for category in self.categories:
+            self.streams[category] = {}
+
+            for i in range((num_sm_counts + 1) // 2):
+                sm_count_1 = self.sm_counts[i]
+                sm_count_2 = self.sm_counts[num_sm_counts - 1 - i]
+                print(f"Creating green context streams for SM counts: {sm_count_1}, {sm_count_2}")
+
+                (stream_1, stream_2, _), _ = split_device_green_ctx_by_sm_count(
+                    torch.device(self.device),
+                    [sm_count_1, sm_count_2]
+                )
+                self.streams[category][sm_count_1] = (stream_1, sm_count_1)
+                self.streams[category][sm_count_2] = (stream_2, sm_count_2)
+            self.streams[category][self.total_sm] = (torch.cuda.Stream(), self.total_sm)
 
         # Create green context streams for testing
         self.profile_streams: dict[str, tuple[torch._C.Stream, int]] = {}
@@ -95,20 +104,20 @@ class Pipeline():
             )
             self.profile_streams[f"TEST_{i}"] = (stream_1, sm_count_1)
             self.profile_streams[f"TEST_{num_sm_counts - 1 - i}"] = (stream_2, sm_count_2)
-        self.profile_streams[f"TEST_TOTAL"] = (torch.cuda.Stream(), total_sm)
+        self.profile_streams[f"TEST_TOTAL"] = (torch.cuda.Stream(), self.total_sm)
 
 
     def init_external_data(self):
-        self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048* 28, self.page_size, 1, self.device)
+        # self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048, self.page_size, 1, self.device)
+        self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048* 26, self.page_size, 1, self.device)
         self.kv_cache = BatchedDistKVCache(self.kv_pool)
     
     def reset(self):
-        # reset kv cache and kv pool
-        self.kv_pool.reset()
+        # reset kv cache
         self.kv_cache.reset()
 
         # reset batch size and decode batch size
-        self.batch_size = None
+        self.global_batch_size = None
         self.decode_batch_size = None
 
     def init_operations(self):
@@ -184,19 +193,20 @@ class Pipeline():
         self.redist_a = Redist("RedistAggregation", self.device, num_inputs=2, num_outputs=1)
 
         # Save operations in an instance variable
-        self.operation_list: list[Operations] = [
+        self.original_model_operations: list[Operations] = [
             self.global_input, self.gen_embedding, self.layerNormAttn, self.kqv, self.ropeAppend,
             self.decAttn, self.pfAttn, self.o, self.layerNormFFN, self.ug, self.activation, self.d,
             self.modelLayerNorm, self.getLogits, self.sample, self.global_output
         ]
-        self.virtual_operation_list = [self.copy_embedding, self.copy_o, self.copy_d, self.redist_p, self.redist_a]
+        self.original_virtual_operations: list[Operations] = [self.copy_embedding, self.copy_o, self.copy_d, self.redist_p, self.redist_a]
 
-        self.op_for_buffer_allocation = []
-        self.op_layers = []
-        for op in self.operation_list + self.virtual_operation_list:
-            self.op_for_buffer_allocation.append(op)
-        for operation in self.operation_list:
-            self.op_layers.extend(operation.children)
+        self.model_operations = self.original_model_operations
+        self.virtual_operations = self.original_virtual_operations
+        self.all_operations = self.model_operations + self.virtual_operations # NOTE(Ziren): for further nanosplit or auto search, which should keep the original operations since we need to change the strategy of optimization in the runtime.
+
+        self.all_layer_operations: list[Operation_Layer] = []
+        for operation in self.model_operations:
+            self.all_layer_operations.extend(operation.children)
 
     def init_dependency(self):
         self.global_input.outputs["tokens"] >> self.gen_embedding.inputs["token"]
@@ -237,13 +247,13 @@ class Pipeline():
         self.getLogits.outputs["D"] >> self.sample.inputs["logits"]
 
         self.sample.outputs["tokens"] >> self.global_output.inputs["tokens"]
-        
-        for operation in self.operation_list + self.virtual_operation_list:
+
+        for operation in self.all_operations:
             operation.checkConnection()
     
     
     def init_executor(self):
-        self.executor = Executor(self.op_layers, self.layer_list)
+        self.executor = Executor(self.all_layer_operations, self.layer_list)
         self.executor.plan_layer_ordering()
 
     def init_set_shape(self):
@@ -272,123 +282,117 @@ class Pipeline():
 
     def init_set_weight(self, weight_path, cached):
         weight_manager = WeightManager(self.pipeline_name, weight_path, cached, self.device)
-        weight_manager.set_weight(self.operation_list, self.device)
+        weight_manager.set_weight(self.model_operations, self.device)
 
     def clear_batch_size(self):
         # init the batchsize to None
-        for op in self.op_for_buffer_allocation:
+        for op in self.all_operations:
             op.setBatchSize(None)
 
     def config_batch_size(self, decode_batchsize):
-        self.global_input.setBatchSize(self.batch_size)
+        self.global_input.setBatchSize(self.global_batch_size)
         self.decAttn.setBatchSize(decode_batchsize)
 
     def config_algorithm(self):
-        gemm_tag = "torch"
-        self.gen_embedding.config_tag("cuda")
-        self.decAttn.config_tag("batched_cuda")
-        self.pfAttn.config_tag("batched_cuda")
+        params = {
+            "use_cuda_graph": self.is_cuda_graph_enabled,
+        }
 
-        # self.layerNormAttn.config_tag("cuda")        
-        # self.activation.config_tag("cuda")
-        # self.kqv.config_tag(gemm_tag)
-        # self.ropeAppend.config_tag("cuda")
-        # self.layerNormFFN.config_tag("cuda")
-        # self.o.config_tag(gemm_tag)
-        # self.ug.config_tag(gemm_tag)
-        # self.d.config_tag(gemm_tag)
+        self.gen_embedding.config_tag("cuda", params)
 
-        self.layerNormAttn.config_tag(["cuda", "cuda"])
-        self.activation.config_tag(["cuda", "cuda"])
-        self.kqv.config_tag([gemm_tag, gemm_tag])
-        self.ropeAppend.config_tag(["cuda", "cuda"])
-        self.layerNormFFN.config_tag(["cuda", "cuda"])
-        self.o.config_tag([gemm_tag, gemm_tag])
-        self.ug.config_tag([gemm_tag, gemm_tag])
-        self.d.config_tag([gemm_tag, gemm_tag])
+        if self.is_auto_search_enabled:
+            for op in self.model_operations:
+                print(f"op.name: {op.name}, op.original_name: {op.original_name}")
+                if op.original_name in self.profile_result["operations"]:
+                    algo_tag = self.profile_result["operations"][op.original_name][op.name]["algo_tag"]
+                    op.config_tag(algo_tag, params)
+        else:
+            self.layerNormAttn.config_tag("cuda", params)
+            self.kqv.config_tag("torch", params)
+            self.ropeAppend.config_tag("cuda", params)
+            self.decAttn.config_tag("batched_cuda", params)
+            self.pfAttn.config_tag("batched_cuda", params)
+            self.layerNormFFN.config_tag("cuda", params)
+            self.o.config_tag("torch", params)
+            self.ug.config_tag("torch", params)
+            self.activation.config_tag("cuda", params)
+            self.d.config_tag("torch", params)
 
-        self.modelLayerNorm.config_tag("cuda")
-        self.sample.config_tag("cuda")
-        self.getLogits.config_tag(gemm_tag)
+        self.getLogits.config_tag("torch", params)
+        self.modelLayerNorm.config_tag("cuda", params)
+        self.sample.config_tag("cuda", params)
+
+    def init_category(self):
+        # set category for loop operations
+        self.layerNormAttn.set_category("COMP")
+        self.kqv.set_category("COMP")
+        self.ropeAppend.set_category("COMP")
+        self.decAttn.set_category("MEM")
+        self.pfAttn.set_category("COMP")
+        self.layerNormFFN.set_category("COMP")
+        self.o.set_category("COMP")
+        self.ug.set_category("COMP")
+        self.activation.set_category("COMP")
+        self.d.set_category("COMP")
 
     def config_streams(self):
         # manually set streams for running.
-        self.global_input.set_stream(self.streams["GEMM_Test"])
-        self.gen_embedding.set_stream(self.streams["GEMM_Test"])
+        self.global_input.set_stream((self.main_stream, self.total_sm))
+        self.gen_embedding.set_stream((self.main_stream, self.total_sm))
 
-        # self.layerNormAttn.set_stream(self.streams["GEMM_Test"])
-        # self.kqv.set_stream(self.streams["GEMM_Test"])
-        # self.ropeAppend.set_stream(self.streams["GEMM_Test"])
-        # self.decAttn.set_stream(self.streams["GEMM_Test"]) 
-        # self.pfAttn.set_stream(self.streams["GEMM_Test"])
-        # self.layerNormFFN.set_stream(self.streams["GEMM_Test"])
-        # self.o.set_stream(self.streams["GEMM_Test"])
-        # self.ug.set_stream(self.streams["GEMM_Test"])
-        # self.activation.set_stream(self.streams["GEMM_Test"])
-        # self.d.set_stream(self.streams["GEMM_Test"])
+        if self.is_auto_search_enabled:
+            for op in self.model_operations:
+                print(f"op.name: {op.name}, op.original_name: {op.original_name}")
+                if op.original_name in self.profile_result["operations"]:
+                    sm_count = self.profile_result["operations"][op.original_name][op.name]["p_value"]
+                    op.set_stream(self.streams[op.category][sm_count])
+        else:
+            self.layerNormAttn.set_stream((self.main_stream, self.total_sm))
+            self.kqv.set_stream((self.main_stream, self.total_sm))
+            self.ropeAppend.set_stream((self.main_stream, self.total_sm))
+            self.decAttn.set_stream((self.main_stream, self.total_sm))
+            self.pfAttn.set_stream((self.main_stream, self.total_sm))
+            self.layerNormFFN.set_stream((self.main_stream, self.total_sm))
+            self.o.set_stream((self.main_stream, self.total_sm))
+            self.ug.set_stream((self.main_stream, self.total_sm))
+            self.activation.set_stream((self.main_stream, self.total_sm))
+            self.d.set_stream((self.main_stream, self.total_sm))
 
-        self.layerNormAttn.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
-        self.kqv.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
-        self.ropeAppend.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
-        self.decAttn.set_stream(self.streams["DC_ATTN"])
-        self.pfAttn.set_stream(self.streams["PF_ATTN"])
-        self.layerNormFFN.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
-        self.o.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
-        self.ug.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
-        self.activation.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
-        self.d.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
+        self.getLogits.set_stream((self.main_stream, self.total_sm))
+        self.modelLayerNorm.set_stream((self.main_stream, self.total_sm))
+        self.sample.set_stream((self.main_stream, self.total_sm))
+        self.global_output.set_stream((self.main_stream, self.total_sm))
 
-        self.modelLayerNorm.set_stream(self.streams["GEMM_Test"])
-        self.sample.set_stream(self.streams["GEMM_Test"])
-        self.getLogits.set_stream(self.streams["GEMM_Test"])
-        self.global_output.set_stream(self.streams["GEMM_Test"])
-    
     def profile_config_streams(self, stream_tuple):
-        for operation in self.operation_list:
+        for operation in self.model_operations:
             operation.set_stream(stream_tuple)
 
-    def nanobatch_split(self, total_batchsize, decode_batchsize):
+    def nanobatch_split(self):
         op_nanobatch_info_map: dict[str, tuple[NanoOpInfo, ...]] = {}
-        if self.profile_result is not None:
+        extra_links: dict[str, list[tuple[str, bool]]] = {}
+        if self.is_auto_search_enabled:
             operations = self.profile_result["operations"]
-            for (operation_name, operation_info) in operations.items():
-                name, batch_idx, layer_idx = op_name_to_name_idx_layer(operation_name)
-                if batch_idx == -1 or layer_idx != 1:
-                    continue
-                if name not in op_nanobatch_info_map:
-                    op_nanobatch_info_map[name] = ()
-                info = NanoOpInfo(
-                    batch_idx=batch_idx,
-                    batch_size=operation_info["batch_size"],
-                    sm_count=operation_info["p_value"]
-                )
-                op_nanobatch_info_map[name] = tuple(op_nanobatch_info_map[name] + (info, ))
-            
-            op_before_pf = max([
-                op_name_to_name_idx_layer(name) + (info['start_time'],)
-                for name, info in operations.items()
-                if info['start_time'] < operations['PFAttn_1']['start_time'] and op_name_to_name_idx_layer(name)[1] == 0
-            ], key=lambda x: x[-1])
-            op_before_dc = max([
-                op_name_to_name_idx_layer(name) + (info['start_time'],)
-                for name, info in operations.items()
-                if info['start_time'] < operations['DecAttn_1']['start_time'] and op_name_to_name_idx_layer(name)[1] == 1
-            ], key=lambda x: x[-1])
-            # NOTE(yi): double check the dependency on previous/next layer
-            extra_links = {
-                f"{op_before_pf[0]}0": ("PFAttn", op_before_pf[2] == 0, op_before_pf[2] == 2),
-                f"{op_before_dc[0]}1": ("DecAttn", op_before_dc[2] == 0, op_before_dc[2] == 2),
-            }
+            for (op_basename, op_info) in operations.items():
+                split_info_list = []
+                for nano_op_name, nano_op_info in op_info.items():
+                    split_info_list.append(NanoOpInfo(
+                        batch_idx=nano_op_info["batch_idx"],
+                        batch_size=nano_op_info["batch_size"],
+                        sm_count=nano_op_info["p_value"]
+                    ))
+                    extra_links[nano_op_name] = nano_op_info["extra_dep"]
+
+                op_nanobatch_info_map[op_basename] = tuple(split_info_list)
         else:
             info = (
                 NanoOpInfo(
                     batch_idx=0,
-                    batch_size=decode_batchsize,
+                    batch_size=self.decode_batch_size,
                     sm_count=0
                 ),  
                 NanoOpInfo(
                     batch_idx=1,
-                    batch_size=total_batchsize - decode_batchsize,
+                    batch_size=self.global_batch_size - self.decode_batch_size,
                     sm_count=132,
                 )
             )
@@ -403,75 +407,25 @@ class Pipeline():
                 "D": copy.deepcopy(info),
             }
             extra_links = {
-                "DecAttn": ("O1", False, False),
-                "PFAttn": ("O0", False, True),
             }
 
-        new_operation_list, addtional_virtual_ops = split_nanobatch(self.operation_list, op_nanobatch_info_map, extra_links)
-        self.op_for_buffer_allocation = []
-        self.new_operation_list = new_operation_list
-        self.op_layers = []
-        for op in new_operation_list + self.virtual_operation_list + addtional_virtual_ops:
+        print("op_nanobatch_info_map", op_nanobatch_info_map)
+        print("extra_links", extra_links)
+
+        model_ops, addtional_virtual_ops = split_nanobatch(self.original_model_operations, op_nanobatch_info_map, extra_links)
+        self.model_operations = model_ops
+        self.all_operations = []
+        self.all_layer_operations = []
+        for op in model_ops + self.virtual_operations + addtional_virtual_ops:
             print("op.name", op.name, op.batch_size)
-            self.op_for_buffer_allocation.append(op)
-        for operation in new_operation_list:
-            self.op_layers.extend(operation.children)
-    
-    def update(self, new_input_infos, decode_batch_size = 0, is_profile = False, stream_name: str = "TEST_TOTAL", profile_result_path: str | None = None):
-        self.input_req_idx = []
-        self.input_ids = []
-        if profile_result_path is not None:
-            with open(profile_result_path, "r") as f:
-                self.profile_result = json.load(f)
-        else:
-            self.profile_result = None
-        with prof_marker("update_step_0"):
-            for item in new_input_infos:
-                # print("item", item)
-                self.input_req_idx.append(item[0])
-                self.input_ids.append(item[1])
-        with prof_marker("update_step_1"):
-            # concatenate input_ids into a single tensor
-            flattened = [item for sublist in self.input_ids for item in sublist]
-        with prof_marker("update_step_2"):
-            if len(flattened) != self.batch_size or decode_batch_size != self.decode_batch_size:
-                self.batch_size = len(flattened)
-                self.decode_batch_size = decode_batch_size
-                # print(f"batch_size: {self.batch_size}")
-                # print("decode_batchsize: ", decode_batchsize)
-                self.clear_batch_size()
-                self.config_batch_size(decode_batch_size)
-                self.nanobatch_split(self.batch_size, decode_batch_size)
-                self.update_allocate_buffers()
-                # print("finish update_allocate_buffers")
-                if is_profile:
-                    self.profile_config_streams(self.profile_streams[stream_name])
-                else:
-                    self.config_streams()
-                self.config_algorithm()
-                self.init_executor()
-        with prof_marker("update_step_3"):
-            input_tensor = torch.tensor(flattened, dtype=torch.int32, device=self.device)
-            # get cumulative sum of the number of tokens in each input
-        with prof_marker("update_step_4"):
-            request_length = torch.tensor([len(x) for x in self.input_ids], dtype=torch.int32, device='cpu')
-        with prof_marker("update_step_5"):
-            self.cumsum_input = torch.cat([torch.tensor([0], dtype=torch.int32, device='cpu'), torch.cumsum(request_length, dim=0, dtype=torch.int32)]).tolist()
-        with prof_marker("update_step_6"):
-            self.kv_cache.update(self.cumsum_input, self.input_req_idx, decode_batch_size)
-        with prof_marker("update_step_7"):
-            self.global_input.outputs["tokens"].tensor.copy_(input_tensor)
-        with prof_marker("update_step_8"):
-            self.ropeAppend.update(self.cumsum_input, decode_batch_size)
-        with prof_marker("update_step_9"):
-            self.decAttn.update(self.cumsum_input)
-        with prof_marker("update_step_10"):
-            self.pfAttn.update(self.cumsum_input)
-        
+            self.all_operations.append(op)
+        for operation in model_ops:
+            self.all_layer_operations.extend(operation.children)
+
     def update_allocate_buffers(self):
         # Build list of buffers(op_device)
         buffers_list = []
-        for operation in self.op_for_buffer_allocation:
+        for operation in self.all_operations:
             for _, wrapper in operation.inputs.items():
                 buffers_list.append(wrapper)
             for _, wrapper in operation.outputs.items():
@@ -485,13 +439,89 @@ class Pipeline():
         bufferAllocator.allocate_buffer(self.device)
         print(f"Total allocated: {bufferAllocator.total_allocated / 1024 / 1024} MB in {self.device}")
 
+    def update(self, new_input_infos, decode_batch_size = 0, is_profile = False, stream_name: str = "TEST_TOTAL", profile_result_path: Optional[str] = None, use_cuda_graph: bool = False, use_nano_split: bool = False):
+        # preprocess new_input_infos
+        with prof_marker("update_step_0"):
+            self.input_req_idx = []
+            self.input_ids = []
+            for item in new_input_infos:
+                # print("item", item)
+                self.input_req_idx.append(item[0])
+                self.input_ids.append(item[1])
+        with prof_marker("update_step_1"):
+            # concatenate input_ids into a single tensor
+            flattened = [item for sublist in self.input_ids for item in sublist]
+            global_batch_size = len(flattened)
+        with prof_marker("update_step_3"):
+            input_tensor = torch.tensor(flattened, dtype=torch.int32, device=self.device)
+
+        # some assertions and configuration settings
+        if global_batch_size != self.global_batch_size or decode_batch_size != self.decode_batch_size:
+            self.buffer_fixed = False
+        else:
+            self.buffer_fixed = True
+
+        self.plan_cuda_graph = False
+        if use_cuda_graph and self.is_cuda_graph_enabled:
+            assert decode_batch_size == self.decode_batch_size and global_batch_size == self.global_batch_size, "decode_batch_size and global_batch_size must be the same when use_cuda_graph is True"
+        elif use_cuda_graph and not self.is_cuda_graph_enabled:
+            self.plan_cuda_graph = True
+        else:
+            self.is_cuda_graph_enabled = False
+        self.is_cuda_graph_enabled = use_cuda_graph
+
+        if profile_result_path is not None:
+            self.is_auto_search_enabled = True
+            with open(profile_result_path, "r") as f:
+                self.profile_result = json.load(f)
+        else:
+            self.is_auto_search_enabled = False
+            self.profile_result = None
+
+        # update if batch size or decode batch size has changed
+        if not self.buffer_fixed:
+            with prof_marker("update_step_2"):
+                self.global_batch_size = global_batch_size
+                self.decode_batch_size = decode_batch_size
+                # print(f"batch_size: {self.batch_size}")
+                # print("decode_batchsize: ", decode_batchsize)
+                self.clear_batch_size()
+                self.config_batch_size(decode_batch_size)
+                if use_nano_split:
+                    self.nanobatch_split()
+                self.update_allocate_buffers()
+                # print("finish update_allocate_buffers")
+                if is_profile:
+                    self.profile_config_streams(self.profile_streams[stream_name])
+                else:
+                    self.config_streams()
+                self.config_algorithm()
+                self.init_executor()
+
+            with prof_marker("update_step_4"):
+                request_length = torch.tensor([len(x) for x in self.input_ids], dtype=torch.int32, device='cpu')
+            with prof_marker("update_step_5"):
+                self.cumsum_input = torch.cat([torch.tensor([0], dtype=torch.int32, device='cpu'), torch.cumsum(request_length, dim=0, dtype=torch.int32)]).tolist()
+
+        # update in any cases
+        with prof_marker("update_step_6"):
+            self.kv_cache.update(self.cumsum_input, self.input_req_idx, decode_batch_size, use_cuda_graph= (not self.plan_cuda_graph) and self.is_cuda_graph_enabled)
+        with prof_marker("update_step_7"):
+            self.global_input.outputs["tokens"].tensor.copy_(input_tensor)
+        with prof_marker("update_step_8"):
+            self.ropeAppend.update(self.cumsum_input, decode_batch_size)
+        with prof_marker("update_step_9"):
+            self.decAttn.update(self.cumsum_input)
+        with prof_marker("update_step_10"):
+            self.pfAttn.update(self.cumsum_input)
+
     def run(self, file_name="./test_data/llama3-8B-flashinfer", filefolder_name="./test_data/llama3-8B-flashinfer_folder"):
 
-        temp_out = torch.zeros(self.batch_size, dtype=torch.int32, device='cuda')
+        temp_out = torch.zeros(self.global_batch_size, dtype=torch.int32, device='cuda')
 
-        os.makedirs(f"./{filefolder_name}", exist_ok=True)
+        # os.makedirs(f"./{filefolder_name}", exist_ok=True)
 
-        self.executor.execute({}, temp_out)
+        self.executor.execute(temp_out, self.main_stream, plan_cuda_graph=self.plan_cuda_graph, is_cuda_graph_enabled= self.is_cuda_graph_enabled)
         # self.executor.print_debug(temp_out, file_name, filefolder_name=filefolder_name)
 
         with prof_marker("after_execute_before_return"):
@@ -508,16 +538,16 @@ class Pipeline():
     
     # profile related functions
     def init_profile_data(self, append_mode=False):
-        for operation in self.operation_list:
+        for operation in self.model_operations:
             operation.setup_profile(self.profile_dir, append_mode=append_mode, is_save_db=True)
 
     def profile_run(self):
-        for operation in self.operation_list:
+        for operation in self.model_operations:
             if operation.batch_size > 0:
                 with prof_marker(f"{operation.name}"):
                     print("Operation name:", operation.name)
                     operation.profile_all()
 
     def profile_print(self):
-        for operation in self.operation_list:
+        for operation in self.model_operations:
             operation.print_profile()

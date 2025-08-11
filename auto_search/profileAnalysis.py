@@ -17,7 +17,7 @@ def getGemvTimeAndSMCount(profile_data_path, batch_size, seq_len, sm_count=132):
     cur.close()
     conn.close()
 
-    return duration
+    return ("batched_cuda", duration)
 
 def getByBatchsizeAndSMCount(profile_data_path, name, batch_size, sm_count=132):
     conn = sqlite3.connect(f'{profile_data_path}/{name}.db')
@@ -56,10 +56,13 @@ def getByBatchsizeAndSMCount(profile_data_path, name, batch_size, sm_count=132):
     if best_row:
         print("Fastest run found in table:", best_table)
         print("Row:", tuple(best_row), "Duration:", best_duration)
+        if 'impl_tag' in best_row.keys():
+            algo_tag = f"{best_table}:{best_row['impl_tag']}"
+        else:
+            algo_tag = best_table
     else:
         raise ValueError("No matching entry found for batch size", batch_size, "and sm_count", sm_count)
-
     cur.close()
     conn.close()
-    
-    return best_duration
+
+    return (algo_tag, best_duration)

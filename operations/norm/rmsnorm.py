@@ -84,6 +84,7 @@ class LayerNorm(Operations):
     
     def copy_nano(self, index):
         new_op = LayerNorm(self.name, self.device, nano_idx=index)
+        new_op.set_category(self.category)
         new_op.weights = self.weights
         new_op.expand_layer(self.layer_list)
         new_op.setShape(self.hidden_dim)

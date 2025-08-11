@@ -30,8 +30,8 @@ class KVCacheNone:
 
     def get(self, layer, idx):
         return self.cache.get((layer, idx), None)
-    
-    def update(self, cumsum_input, input_req_idx, decode_batchsize):
+
+    def update(self, cumsum_input, input_req_idx, decode_batchsize, use_cuda_graph=False):
         self.input_req_idx = input_req_idx
         return None
 
@@ -591,6 +591,7 @@ class DistKVPool:
             
         # Metadata is identical for all GPUs
         self._free = set(range(capacity))
+        self._max_num_pages = capacity
         
         self.num_layers = num_layers
         self.num_kv_heads = num_kv_heads // tp_size
@@ -642,7 +643,7 @@ class DistKVCache:
         return self._seqlen
     
     @property
-    def indicies(self) -> list[int]:
+    def indices(self) -> list[int]:
         return self._indices
     
     @property
@@ -674,7 +675,7 @@ class BatchedDistKVCache():
         self.device = pool.worker_device
         self.cache = {}
         self.kv_indptr = torch.tensor([0], dtype=torch.int32, device=self.device)
-        self.kv_indices = torch.tensor([], dtype=torch.int32, device=self.device)
+        self.kv_indices = torch.empty(self._pool._max_num_pages, dtype=torch.int32, device=self.device) # reserve a large enough space for all indices
         self.kv_last_page_len = torch.tensor([], dtype=torch.int32, device=self.device)
         self.rev_input_indptr = torch.tensor([], dtype=torch.int32, device=self.device)
         self.per_token_offset = torch.tensor([], dtype=torch.int32, device=self.device)
@@ -683,9 +684,10 @@ class BatchedDistKVCache():
         return self._pool
 
     def reset(self):
+        self._pool.reset()
         self.cache = {}
         self.kv_indptr = torch.tensor([0], dtype=torch.int32, device=self.device)
-        self.kv_indices = torch.tensor([], dtype=torch.int32, device=self.device)
+        self.kv_indices = torch.empty(self._pool._max_num_pages, dtype=torch.int32, device=self.device) # reserve a large enough space for all indices
         self.kv_last_page_len = torch.tensor([], dtype=torch.int32, device=self.device)
         self.rev_input_indptr = torch.tensor([], dtype=torch.int32, device=self.device)
         self.per_token_offset = torch.tensor([], dtype=torch.int32, device=self.device)
@@ -708,13 +710,13 @@ class BatchedDistKVCache():
         kvcache = self.cache[idx]
         ki = torch.cat(
             [
-                # self._pool.kv_data[kvcache.indicies[:-1], 0]
-                self._pool.k_data[layer, kvcache.indicies[:-1]]
+                # self._pool.kv_data[kvcache.indices[:-1], 0]
+                self._pool.k_data[layer, kvcache.indices[:-1]]
                 .permute(0, 2, 1, 3)
                 .reshape(-1, self._pool.num_kv_heads, self._pool.head_dim),
                 (
-                    # self._pool.kv_data[kvcache.indicies[-1], 0, :, :kvcache.last_page_offset, :]
-                    self._pool.k_data[layer,kvcache.indicies[-1], :, :kvcache.last_page_offset, :]
+                    # self._pool.kv_data[kvcache.indices[-1], 0, :, :kvcache.last_page_offset, :]
+                    self._pool.k_data[layer,kvcache.indices[-1], :, :kvcache.last_page_offset, :]
                     .permute(1, 0, 2)
                     .reshape(-1, self._pool.num_kv_heads, self._pool.head_dim)
                 )
@@ -723,13 +725,13 @@ class BatchedDistKVCache():
         )
         vi = torch.cat(
             [
-                # self._pool.kv_data[kvcache.indicies[:-1], 1]
-                self._pool.v_data[layer,kvcache.indicies[:-1]]
+                # self._pool.kv_data[kvcache.indices[:-1], 1]
+                self._pool.v_data[layer,kvcache.indices[:-1]]
                 .permute(0, 2, 1, 3)
                 .reshape(-1, self._pool.num_kv_heads, self._pool.head_dim),
                 (
-                    # self._pool.kv_data[kvcache.indicies[-1], 1, :, :kvcache.last_page_offset, :]
-                    self._pool.v_data[layer, kvcache.indicies[-1], :, :kvcache.last_page_offset, :]
+                    # self._pool.kv_data[kvcache.indices[-1], 1, :, :kvcache.last_page_offset, :]
+                    self._pool.v_data[layer, kvcache.indices[-1], :, :kvcache.last_page_offset, :]
                     .permute(1, 0, 2)
                     .reshape(-1, self._pool.num_kv_heads, self._pool.head_dim)
                 )
@@ -747,7 +749,7 @@ class BatchedDistKVCache():
     def get_seqlen(self, idx: int):
         return self.cache[idx].seqlen
         
-    def update(self, cumsum_input, input_req_idx, decode_batchsize):
+    def update(self, cumsum_input, input_req_idx, decode_batchsize, use_cuda_graph=False):
         total_tokens = cumsum_input[-1]
         rev_input_indptr_tensor = torch.empty(total_tokens, dtype=torch.int32)
         per_token_offset_tensor = torch.empty(total_tokens, dtype=torch.int32)
@@ -771,15 +773,17 @@ class BatchedDistKVCache():
             rev_input_indptr_tensor[start:end] = temp_idx
             # extend the per_token_offset with a list from last_offest to last_offest + (end - start)
             per_token_offset_tensor[start:end] = torch.arange(seq_len - count, seq_len, dtype=torch.int32)
-
-        self.rev_input_indptr = rev_input_indptr_tensor.to(self.device)
-        self.per_token_offset = per_token_offset_tensor.to(self.device)
+        if use_cuda_graph:
+            self.rev_input_indptr.copy_(rev_input_indptr_tensor)
+            self.per_token_offset.copy_(per_token_offset_tensor)
+        else:
+            self.rev_input_indptr = rev_input_indptr_tensor.to(self.device)
+            self.per_token_offset = per_token_offset_tensor.to(self.device)
 
         num_reqs = len(input_req_idx)
-        kv_counts = [len(self.cache[req_idx].indicies) for req_idx in input_req_idx]
-        total_kv_tokens = sum(kv_counts)
+        num_indices = sum([len(self.cache[req_idx].indices) for req_idx in input_req_idx])
         kv_indptr_tensor = torch.empty(num_reqs + 1, dtype=torch.int32)
-        kv_indices_tensor = torch.empty(total_kv_tokens, dtype=torch.int32)
+        kv_indices_tensor = torch.empty(num_indices, dtype=torch.int32)
         kv_last_page_len_tensor = torch.empty(num_reqs, dtype=torch.int32)
 
         cur_offset = 0
@@ -788,16 +792,23 @@ class BatchedDistKVCache():
             if global_req_idx not in self.cache:
                 raise ValueError(f"Request {global_req_idx} not found in cache")
             kv = self.cache[global_req_idx]
-            count = len(kv.indicies)
-            
-            kv_indices_tensor[cur_offset : cur_offset + count] = torch.tensor(kv.indicies, dtype=torch.int32)
+            count = len(kv.indices)
+
+            kv_indices_tensor[cur_offset : cur_offset + count] = torch.tensor(kv.indices, dtype=torch.int32)
             kv_indptr_tensor[i + 1] = cur_offset + count
             kv_last_page_len_tensor[i] = kv.last_page_offset
             cur_offset += count
-        
-        self.kv_indptr = kv_indptr_tensor.to(self.device)
-        self.kv_indices = kv_indices_tensor.to(self.device)
-        self.kv_last_page_len = kv_last_page_len_tensor.to(self.device)
+        if num_indices > self._pool._max_num_pages:
+            raise ValueError(f"Too many indices {num_indices} for the pool size {self._pool._max_num_pages}")
+        if use_cuda_graph:
+            self.kv_indptr.copy_(kv_indptr_tensor)
+            print(f"shape of kv_indices: {self.kv_indices[:num_indices].shape}, kv_indices_tensor: {kv_indices_tensor.shape}")
+            self.kv_indices[:num_indices].copy_(kv_indices_tensor)
+            self.kv_last_page_len.copy_(kv_last_page_len_tensor)
+        else:
+            self.kv_indptr = kv_indptr_tensor.to(self.device)
+            self.kv_indices[:num_indices].copy_(kv_indices_tensor)
+            self.kv_last_page_len = kv_last_page_len_tensor.to(self.device)
 
     @property
     def page_size(self):

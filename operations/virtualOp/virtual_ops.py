@@ -79,7 +79,6 @@ class Redist(Operations):
         for output_wrapper in self.outputs.values():
             output_wrapper.prev = []
             output_wrapper.prev_depend_on_prev_layer = []
-            output_wrapper.prev_depend_on_next_layer = []
 
     def relink_inputs_and_outputs(self):
         for input_wrapper in self.inputs.values():
@@ -92,5 +91,4 @@ class Redist(Operations):
                 input_wrapper.nano_dist_next.append(output_wrapper)
                 output_wrapper.nano_dist_prev.append(input_wrapper)
                 output_wrapper.nano_dist_prev_depend_on_prev_layer.append(False)
-                output_wrapper.nano_dist_prev_depend_on_next_layer.append(False)
 

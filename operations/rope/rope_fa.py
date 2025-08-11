@@ -414,6 +414,7 @@ class RopeAppendBatched(Operations):
             self.high_freq_factor,
             self.original_max_position_embeddings,
         )
+        new_op.set_category(self.category)
         new_op.externals = self.externals
         new_op.expand_layer(self.layer_list)
         new_op.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim)

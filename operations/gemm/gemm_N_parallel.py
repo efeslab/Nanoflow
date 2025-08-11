@@ -75,6 +75,7 @@ class GEMM_N_Parallel(Operations):
     
     def copy_nano(self, index):
         new_op = GEMM_N_Parallel(self.name, self.device, self.bias, nano_idx=index)
+        new_op.set_category(self.category)
         new_op.weights = self.weights
         new_op.expand_layer(self.layer_list)
         new_op.setShape(self.N, self.K, self.tp_idx, self.tp_size).setParameter(self.alpha, self.beta)
@@ -120,9 +121,9 @@ class GEMM_N_Parallel(Operations):
                 names = GetAllH100GemmCanonicalNames()
                 # print(f"GetAllH100GemmCanonicalNames: {names}")
                 self.impl_configs_map[category_tag] = [
-                    # ("SM90_256_128_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", None),
+                    ("SM90_256_128_64_2_1_1_1_RowMajor_RowMajor_RowMajor_auto", None),
                     # ("SM90_256_128_64_2_1_1_1_RowMajor_RowMajor_RowMajor_warpspecialized_cooperative_epi_nosmem", None),
-                    (name, None) for name in names if "RowMajor_RowMajor_RowMajor" in name
+                    # (name, None) for name in names if "RowMajor_RowMajor_RowMajor" in name
                 ]
             else:
                 self.impl_configs_map[category_tag] = [
@@ -131,10 +132,11 @@ class GEMM_N_Parallel(Operations):
 
     def run(self, layer):
         with prof_marker("GEMM_run"):
-            stride = self.N // self.tp_size
-            offset = self.tp_idx * stride
+            with prof_marker(f"GEMM_run_prepare"):
+                stride = self.N // self.tp_size
+                offset = self.tp_idx * stride
 
-            C = self.inputs["C"].tensor[:, offset: offset + stride] if self.bias else torch.empty((self.batch_size, stride), dtype=torch.float16, device=self.device)
+                C = self.inputs["C"].tensor[:, offset: offset + stride] if self.bias else torch.empty((self.batch_size, stride), dtype=torch.float16, device=self.device)
             self.impl.run(self.inputs["A"].tensor, self.weights["B"].weight_map[layer], C, self.outputs["D"].tensor)
 
     def profile_run(self):
@@ -170,9 +172,4 @@ class GEMM_N_Parallel_Layer(Operation_Layer):
         super().__init__(layer, base_op)
 
     def run(self):
-        with prof_marker("GEMM_run"):
-            stride = self.parent.N // self.parent.tp_size
-            offset = self.parent.tp_idx * stride
-
-            C = self.inputs["C"].tensor[:, offset: offset + stride] if self.parent.bias else torch.empty((self.parent.batch_size, stride), dtype=torch.float16, device=self.device)
-            self.impl.run(self.inputs["A"].tensor, self.weights["B"].weight_map[self.layer], C, self.outputs["D"].tensor)
+        self.parent.run(self.layer)

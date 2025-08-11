@@ -66,6 +66,7 @@ class Activation(Operations):
     
     def copy_nano(self, index):
         new_op = Activation(self.name, self.device, nano_idx=index)
+        new_op.set_category(self.category)
         new_op.expand_layer(self.layer_list)
         new_op.setShape(self.N, self.tp_idx, self.tp_size)
 

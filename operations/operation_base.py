@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import os
-from typing import Type
+from typing import Type, Optional
 from operations.impl_base import OperationImpl
 import torch
 import sqlite3
@@ -36,14 +36,13 @@ class Operations():
         self.children = []
         self.isNanoSplit = False
         self.nano_ops = []
-        self.nano_op_batchsizes = []
         self.isVirtual = False
         self.stream: torch.cuda.Stream
         self.sm_count: int | None = None
         self.batch_size = None
 
         self.device = device
-        self.extra_dep = []
+        self.extra_dep: list[tuple[Operations, bool]] = []
 
         self.impl_map: dict[str, Type[OperationImpl]] = {}
         self.op_layer: Type[Operation_Layer]
@@ -264,12 +263,8 @@ class Operations():
         return tag_list
 
 
-    def set_category(self, category: str) -> None:
-        if self.isNanoSplit:
-            for i, nano_op in enumerate(self.nano_ops):
-                nano_op.set_category(category)
-        else:
-            self.category = category
+    def set_category(self, category: Optional[str]) -> None:
+        self.category = category
 
     def set_stream(self, stream: tuple[torch._C.Stream, int | None] | list[tuple[torch._C.Stream, int | None]]) -> None:
         if self.isNanoSplit:
@@ -283,7 +278,7 @@ class Operations():
             self.sm_count = stream[1]
 
 
-    def append_dependency(self, extra_dep):
+    def append_dependency(self, extra_dep: tuple["Operations", bool]): # add extra dependency before the operation
         if extra_dep not in self.extra_dep:
             self.extra_dep.append(extra_dep)
 
@@ -329,6 +324,7 @@ class Operation_Layer:
 
         # for auto search
         self.duration_map = {}
+        self.algo_tag_map = {}
         self.start_time: gp.Var
         self.end_time: gp.Var
     
@@ -354,21 +350,18 @@ class Operation_Layer:
 
     @property
     def prerequisites(self):
-        dep = []
+        dep: list[tuple[Operations, bool]] = []
         dep.extend(self.parent.extra_dep)
         # print("init dep: ", self.name, "dep: ", [dep[0].name for dep in dep])
-        prev = []
-        depend_on_prev = []
-        depend_on_next = []
+        prev: list[IOWrapper] = []
+        depend_on_prev: list[bool] = []
         for _, input_wrapper in self.parent.inputs.items():
             prev.extend(input_wrapper.actual_prev)
             depend_on_prev.extend(input_wrapper.actual_prev_depend_on_prev_layer)
-            depend_on_next.extend(input_wrapper.actual_prev_depend_on_next_layer)
         while len(prev) > 0:
-            assert len(prev) == len(depend_on_prev) == len(depend_on_next), f"Operation '{self.name}' has different number of prev and depend_on_prev connections!\n"
+            assert len(prev) == len(depend_on_prev), f"Operation '{self.name}' has different number of prev and depend_on_prev connections!\n"
             dep_wrapper = prev.pop()
             prev_layer = depend_on_prev.pop()
-            next_layer = depend_on_next.pop()
             # if "Rope" in self.name:  
             #     print("dep_wrapper.owner.name: ", dep_wrapper.owner.name)
             #     print("dep_wrapper.name: ", dep_wrapper.name)
@@ -379,18 +372,16 @@ class Operation_Layer:
                         flag = True
                         break
                     # print("dep_wrapper.name: ", dep_wrapper.name)
-                dep.append((dep_wrapper.owner, prev_layer, next_layer)) if flag else None
+                dep.append((dep_wrapper.owner, prev_layer)) if flag else None
             elif dep_wrapper.owner.isCopy:
                 for idx, wrapper in enumerate(dep_wrapper.prev):
                     prev.append(wrapper)
                     depend_on_prev.append(prev_layer or dep_wrapper.prev_depend_on_prev_layer[idx])
-                    depend_on_next.append(next_layer or dep_wrapper.prev_depend_on_next_layer[idx])
             elif dep_wrapper.owner.isRedist:
                 if dep_wrapper.is_input_wrapper:
                     for idx, wrapper in enumerate(dep_wrapper.prev):
                         prev.append(wrapper)
                         depend_on_prev.append(prev_layer or dep_wrapper.prev_depend_on_prev_layer[idx])
-                        depend_on_next.append(next_layer or dep_wrapper.prev_depend_on_next_layer[idx])
                 elif dep_wrapper.is_output_wrapper:
                     for idx, input_wrapper in enumerate(dep_wrapper.owner.inputs.values()):
                         if input_wrapper.is_intersect(dep_wrapper):
@@ -398,7 +389,6 @@ class Operation_Layer:
                             #     print("added")
                             prev.append(input_wrapper)
                             depend_on_prev.append(prev_layer)
-                            depend_on_next.append(next_layer)
         # print("prerequisites: ", self.name, "dep: ", [dep[0].name for dep in dep])
         # unique dep
         dep = list(set(dep))
@@ -436,13 +426,19 @@ class Operation_Layer:
         # print(f"init_Variables: {self.name}, start_time: {self.start_time}, end_time: {self.end_time}")
         model.addConstr(self.end_time == self.start_time + self.duration_map[(self.batch_size, full_sm_count)], name=f"{self.name}_end_time")
 
-    def initVariablesStageTwo(self, model: gp.Model, sm_counts: list[int]):
+    def initVariablesStageTwo(self, model: gp.Model, sm_counts: list[int], categories: set[str | None]):
         self.start_time = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_start")
         self.end_time = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_end")
         self.p_vars: dict[int, gp.Var] = {}  # Variables for p choices
         self.durations: dict[int, float] = {}  # Duration in units for each p
         self.p_choice = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_p_choice")
+        self.is_extra_linked_before_op = {}
+        self.is_extra_linked_after_op = {}
 
+        for category in categories:
+            if self.category != category:
+                self.is_extra_linked_before_op[category] = False
+                self.is_extra_linked_after_op[category] = False
 
         for sm_count in sm_counts:
             self.p_vars[sm_count] = model.addVar(vtype=GRB.BINARY, name=f"{self.name}_p_{sm_count}")

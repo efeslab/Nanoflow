@@ -9,11 +9,9 @@ class IOWrapper:
         self.prev = []
         self.next = []
         self.prev_depend_on_prev_layer = []
-        self.prev_depend_on_next_layer = []
         self.nano_dist_prev = []
         self.nano_dist_next = []
         self.nano_dist_prev_depend_on_prev_layer = []
-        self.nano_dist_prev_depend_on_next_layer = []
 
         self.ptr = 0
         self.transform = None
@@ -29,26 +27,22 @@ class IOWrapper:
     def fullName(self):
         owner_name = self.owner.name if hasattr(self.owner, "name") else str(self.owner)
         return f"{owner_name}_{self.name}"
-    
-    def chain(self, next_wrapper, depend_on_prev, depend_on_next):
+
+    def chain(self, next_wrapper: "IOWrapper", depend_on_prev: bool):
         self.next.append(next_wrapper) if next_wrapper not in self.next else None # self.next prepared for memory allocation
         next_wrapper.prev.append(self) # self.prev prepared for executor graph
         next_wrapper.prev_depend_on_prev_layer.append(depend_on_prev)
-        next_wrapper.prev_depend_on_next_layer.append(depend_on_next)
         # check dtype must be the same
         if self.dtype != next_wrapper.dtype:
             raise Exception(f"Error: {self.fullName} and {next_wrapper.fullName} has different dtype")
 
     def __rshift__(self, next_wrapper):
         depend_on_prev = False
-        depend_on_next = False
         if isinstance(next_wrapper, tuple):
             if len(next_wrapper) == 2:
                 next_wrapper, depend_on_prev = next_wrapper
-            elif len(next_wrapper) == 3:
-                next_wrapper, depend_on_prev, depend_on_next = next_wrapper
         # print("IOWrapper __rshift__", depend_on_prev)
-        self.chain(next_wrapper, depend_on_prev, depend_on_next)
+        self.chain(next_wrapper, depend_on_prev)
     
     def toStr(self):
         # name, prev = [], next = []
@@ -108,7 +102,3 @@ class IOWrapper:
     @property
     def actual_prev_depend_on_prev_layer(self):
         return self.prev_depend_on_prev_layer + self.nano_dist_prev_depend_on_prev_layer
-
-    @property
-    def actual_prev_depend_on_next_layer(self):
-        return self.prev_depend_on_next_layer + self.nano_dist_prev_depend_on_next_layer

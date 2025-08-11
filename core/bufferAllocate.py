@@ -1,8 +1,6 @@
 import torch
 import matplotlib.pyplot as plt
 import networkx as nx
-import os
-os.environ['GRB_LICENSE_FILE'] = '/root/gurobi/license/gurobi.lic'
 import gurobipy as gp
 from gurobipy import GRB
 from operations.virtualOp.virtual_ops import Redist

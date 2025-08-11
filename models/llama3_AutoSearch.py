@@ -1,5 +1,7 @@
+import copy
 import torch
 
+from operations.operation_base import NanoOpInfo
 from operations.activation.silu import Activation
 from operations.embedding.embedding import GenEmbedding
 from operations.globalOp.globalOp import GlobalInput, GlobalOutput
@@ -36,6 +38,7 @@ class Pipeline():
     def init(self):
         self.init_streams()
         self.init_operations()
+        self.init_category()
         self.init_dependency()
         self.init_set_shape()
 
@@ -46,8 +49,8 @@ class Pipeline():
         ] + [total_sm]  # Example SM counts, adjust as needed
 
         self.streams = {
-            "GEMM": (torch.cuda.Stream(), total_sm),
-            "ATTN": (torch.cuda.Stream(), total_sm),
+            "COMP": (torch.cuda.Stream(), total_sm),
+            "MEM": (torch.cuda.Stream(), total_sm),
         }
 
     def init_operations(self):
@@ -203,54 +206,61 @@ class Pipeline():
         self.global_input.setBatchSize(self.batch_size)
         self.decAttn.setBatchSize(decode_batchsize)
 
-    def config_category(self):
-        self.global_input.set_category("GEMM")
-        self.gen_embedding.set_category("GEMM")
-        self.layerNormAttn.set_category("GEMM")
-        self.kqv.set_category("GEMM")
-        self.ropeAppend.set_category("GEMM")
-        self.decAttn.set_category("GEMV")
-        self.pfAttn.set_category("GEMV")
-        self.layerNormFFN.set_category("GEMM")
-        self.o.set_category("GEMM")
-        self.ug.set_category("GEMM")
-        self.activation.set_category("GEMM")
-        self.d.set_category("GEMM")
-        self.modelLayerNorm.set_category("GEMM")
-        self.sample.set_category("GEMM")
-        self.getLogits.set_category("GEMM")
+    def init_category(self):
+        self.layerNormAttn.set_category("COMP")
+        self.kqv.set_category("COMP")
+        self.ropeAppend.set_category("COMP")
+        self.decAttn.set_category("MEM")
+        self.pfAttn.set_category("COMP")
+        self.layerNormFFN.set_category("COMP")
+        self.o.set_category("COMP")
+        self.ug.set_category("COMP")
+        self.activation.set_category("COMP")
+        self.d.set_category("COMP")
 
     def config_streams(self):
         # Set stream for auto-search case
-        self.global_input.set_stream(self.streams["GEMM"])
-        self.gen_embedding.set_stream(self.streams["GEMM"])
+        self.global_input.set_stream(self.streams["COMP"])
+        self.gen_embedding.set_stream(self.streams["COMP"])
 
-        self.layerNormAttn.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
-        self.kqv.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
-        self.ropeAppend.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
-        self.decAttn.set_stream(self.streams["ATTN"])
-        self.pfAttn.set_stream(self.streams["ATTN"])
-        self.layerNormFFN.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
-        self.o.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
-        self.ug.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
-        self.activation.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
-        self.d.set_stream([self.streams["GEMM"], self.streams["GEMM"]])
+        self.layerNormAttn.set_stream([self.streams["COMP"], self.streams["COMP"]])
+        self.kqv.set_stream([self.streams["COMP"], self.streams["COMP"]])
+        self.ropeAppend.set_stream([self.streams["COMP"], self.streams["COMP"]])
+        self.decAttn.set_stream(self.streams["MEM"])
+        self.pfAttn.set_stream(self.streams["COMP"])
+        self.layerNormFFN.set_stream([self.streams["COMP"], self.streams["COMP"]])
+        self.o.set_stream([self.streams["COMP"], self.streams["COMP"]])
+        self.ug.set_stream([self.streams["COMP"], self.streams["COMP"]])
+        self.activation.set_stream([self.streams["COMP"], self.streams["COMP"]])
+        self.d.set_stream([self.streams["COMP"], self.streams["COMP"]])
         
-        self.modelLayerNorm.set_stream(self.streams["GEMM"])
-        self.sample.set_stream(self.streams["GEMM"])
-        self.getLogits.set_stream(self.streams["GEMM"])
-        self.global_output.set_stream(self.streams["GEMM"])
+        self.modelLayerNorm.set_stream(self.streams["COMP"])
+        self.sample.set_stream(self.streams["COMP"])
+        self.getLogits.set_stream(self.streams["COMP"])
+        self.global_output.set_stream(self.streams["COMP"])
 
     def nanobatch_split(self, total_batchsize, decode_batchsize):
+        info = (
+            NanoOpInfo(
+                batch_idx=0,
+                batch_size=decode_batchsize,
+                sm_count=0
+            ),  
+            NanoOpInfo(
+                batch_idx=1,
+                batch_size=total_batchsize - decode_batchsize,
+                sm_count=132,
+            )
+        )
         op_nanobatch_info_map = {
-            "LayerNormAttn": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
-            "KQV": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
-            "RopeAppend": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
-            "O": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
-            "LayerNormFFN": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
-            "UG": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
-            "Activation": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
-            "D": (2, (decode_batchsize, total_batchsize - decode_batchsize)),
+            "LayerNormAttn": copy.deepcopy(info),
+            "KQV": copy.deepcopy(info),
+            "RopeAppend": copy.deepcopy(info),
+            "O": copy.deepcopy(info),
+            "LayerNormFFN": copy.deepcopy(info),
+            "UG": copy.deepcopy(info),
+            "Activation": copy.deepcopy(info),
+            "D": copy.deepcopy(info),
         }
         extra_links = {}
 

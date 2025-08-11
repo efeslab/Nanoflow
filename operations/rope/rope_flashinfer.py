@@ -20,7 +20,9 @@ if platform_config.PLATFORM_CUDA:
         def __init__(self, op_base, stream, device):
             super().__init__(op_base, stream, device)
             self.num_qo_heads = op_base.num_qo_heads // op_base.tp_size
-            
+            self.rope_scale = op_base.factor
+            self.rope_theta = op_base.theta
+
         def run(self, kqv, k_data, v_data, output):
             with prof_marker("RopeAppendCuda: SplitRopeAppend"):
                 bind_ropeappend.splitRopeAppend(
@@ -31,8 +33,8 @@ if platform_config.PLATFORM_CUDA:
                     self.op_base.rev_input_indptr,
                     self.op_base.per_token_offset,
                     self.num_qo_heads,
-                    1.0,
-                    500000.0,
+                    self.rope_scale,
+                    self.rope_theta,
                     0.0,
                     0.0,
                     self.stream.cuda_stream
@@ -44,11 +46,8 @@ class RopeAppendFlashinfer(Operations):
         name,
         device,
         rope_type="llama3",
-        theta=10000.0,
-        factor=8.0,
-        low_freq_factor=1.0,
-        high_freq_factor=4.0,
-        original_max_position_embeddings=8192,
+        theta=500000.0,
+        factor=1.0,
         nano_idx=None
     ):
         """
@@ -57,9 +56,6 @@ class RopeAppendFlashinfer(Operations):
             rope_type (str): The type of RoPE implementation to use. For llama3, pass "llama3".
             theta (float): The base used to compute the inverse frequency (typically set from config.rope_theta).
             factor (float): Scaling factor used in llama3.
-            low_freq_factor (float): Lower bound frequency factor (llama3).
-            high_freq_factor (float): Upper bound frequency factor (llama3).
-            original_max_position_embeddings (int): The original maximum context length used in pretraining.
         """
         super().__init__(name, device, nano_idx)
         self.inputs = {"kqv": IOWrapper(self, "kqv", device).is_input()}
@@ -70,9 +66,6 @@ class RopeAppendFlashinfer(Operations):
         self.rope_type = rope_type
         self.theta = theta  # typically config.rope_theta
         self.factor = factor
-        self.low_freq_factor = low_freq_factor
-        self.high_freq_factor = high_freq_factor
-        self.original_max_position_embeddings = original_max_position_embeddings
 
         self.impl_map = {}
         self.init_impl_map()
@@ -114,7 +107,8 @@ class RopeAppendFlashinfer(Operations):
             bind_ropeappend.updateKVCache(self.kv_indptr, self.kv_indices, self.kv_last_page_len, len(self.kv_last_page_len), self.page_size, self.num_kv_heads // self.tp_size, self.head_dim)
 
     def copy_nano(self, index):
-        new_op = RopeAppendFlashinfer(self.name, self.device, self.rope_type, self.theta, self.factor, self.low_freq_factor, self.high_freq_factor, self.original_max_position_embeddings, nano_idx=index)
+        new_op = RopeAppendFlashinfer(self.name, self.device, self.rope_type, self.theta, self.factor, nano_idx=index)
+        new_op.set_category(self.category)
         new_op.externals = self.externals
         new_op.expand_layer(self.layer_list)
         new_op.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim, self.tp_size)

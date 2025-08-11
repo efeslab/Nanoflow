@@ -21,13 +21,13 @@ if platform_config.PLATFORM_CUDA:
             super().__init__(op_base, stream, device)
             self.workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8).to(self.device)
             self.wrapper = flashinfer.decode.BatchDecodeWithPagedKVCacheWrapper(
-                self.workspace_buffer, "HND", False, True
+                float_workspace_buffer=self.workspace_buffer, kv_layout="HND", use_cuda_graph=False, use_tensor_cores=True
             )
             self.num_qo_heads = op_base.num_qo_heads // op_base.tp_size
             self.num_kv_heads = op_base.num_kv_heads // op_base.tp_size
             self.head_dim = op_base.head_dim
             # print("DecAttnBatchedCudaImpl initialized with cuda stream:", self.stream.cuda_stream)
-        
+
         def plan(self, kv_indptr, kv_indices, kv_last_page_len, page_size):
             with prof_marker("DecAttnBatchedCudaImpl.plan"):
                 with torch.cuda.stream(self.stream):
@@ -39,7 +39,7 @@ if platform_config.PLATFORM_CUDA:
                     # print("num_qo_heads: ", self.num_qo_heads)
                     # print("num_kv_heads: ", self.num_kv_heads)
                     # print("head_dim: ", self.head_dim)
-                
+
                     self.wrapper.plan(
                             kv_indptr,
                             kv_indices,
@@ -130,7 +130,7 @@ class DecAttnFlashinfer(Operations):
             ''')
 
 
-    def check_profiled(self, category_tag):
+    def is_profiled_in_db(self, category_tag):
         self.cursor.execute(f'''
             SELECT * FROM {category_tag}
             WHERE batch_size = ? AND seq_len = ? AND sm_count = ?

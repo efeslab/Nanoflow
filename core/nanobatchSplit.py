@@ -6,12 +6,16 @@ def split_nanobatch(op_list: list[Operations], op_nano_info_map: dict[str, tuple
     additional_virtual_ops = []
     device = op_list[0].device
     for op in op_list:
-        if op.name not in op_nano_info_map:
+        if (op.name not in op_nano_info_map):
             nano_op_list.append(op)
             continue
+        elif len(op_nano_info_map[op.name]) == 1:
+            op.setBatchSize(op_nano_info_map[op.name][0].batch_size)
+            nano_op_list.append(op)
+            continue
+
         nano_op_info_list = list(op_nano_info_map[op.name])
         op.isNanoSplit = True
-        op.nano_op_batchsizes = [info.batch_size for info in nano_op_info_list]
         op.nano_ops = []
 
         redists_in = []
@@ -31,29 +35,30 @@ def split_nanobatch(op_list: list[Operations], op_nano_info_map: dict[str, tuple
             redists_out.append(op_redist)
             additional_virtual_ops.append(op_redist)
 
-        for i in range(len(nano_op_info_list)):
-            copied_op = op.copy_nano(i)
-            copied_op.setBatchSize(nano_op_info_list[i].batch_size)
+        for info in nano_op_info_list:
+            batch_idx = info.batch_idx
+            copied_op = op.copy_nano(batch_idx)
+            copied_op.setBatchSize(info.batch_size)
 
             for j, (key, value) in enumerate(copied_op.inputs.items()):
-                redists_in[j].outputs[f"output_{i}"] >> value
+                redists_in[j].outputs[f"output_{batch_idx}"] >> value
             for j, (key, value) in enumerate(copied_op.outputs.items()):
-                value >> redists_out[j].inputs[f"input_{i}"]
-
+                value >> redists_out[j].inputs[f"input_{batch_idx}"]
+            
             nano_op_list.append(copied_op)
     
     nano_op_map = {op.name : op for op in nano_op_list}
-    for key, value in extra_links.items():
-        value, depend_on_prev_layer, depend_on_next_layer = value
-        op_key = nano_op_map.get(key)
-        op_value = nano_op_map.get(value)
-        # print("key", key, "value", value)
-        # find the name key and value in nano_op_list
-        # print("op_key.name", op_key.name, "key", key)
-        # print("op_value.name", op_value.name, "value", value)
-        if op_key and op_value:
-            op_value.append_dependency((op_key, depend_on_prev_layer, depend_on_next_layer))
-        else:
-            raise ValueError(f"Operation {key} or {value} not found in nano_op_list")
+    for key, list_of_values in extra_links.items():
+        for value, depend_on_prev_layer in list_of_values:
+            op_key = nano_op_map.get(key)
+            op_value = nano_op_map.get(value)
+            # print("key", key, "value", value)
+            # find the name key and value in nano_op_list
+            # print("op_key.name", op_key.name, "key", key)
+            # print("op_value.name", op_value.name, "value", value)
+            if op_key and op_value:
+                op_key.append_dependency((op_value, depend_on_prev_layer))
+            else:
+                raise ValueError(f"Operation {key} or {value} not found in nano_op_list")
 
     return nano_op_list, additional_virtual_ops

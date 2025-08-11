@@ -180,6 +180,7 @@ class RopeAppendTorch(Operations):
 
     def copy_nano(self, index):
         new_op = RopeAppendTorch(self.name, self.device, self.rope_type, self.theta, self.factor, self.low_freq_factor, self.high_freq_factor, self.original_max_position_embeddings, nano_idx=index)
+        new_op.set_category(self.category)
         new_op.externals = self.externals
         new_op.expand_layer(self.layer_list)
         new_op.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim, self.tp_size)
