@@ -3,10 +3,12 @@ git submodule update --recursive
 
 conda install -c gurobi gurobi
 
-pip install torch==2.7.0 torchvision==0.22.0+cu128 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cu128
+pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cu128
 pip install nvtx
 pip install loguru
 pip install transformers
+pip install matplotlib
+
 
 cd ..
 # install nsight
@@ -26,13 +28,14 @@ fi
 
 cd Nanoflow-python
 
-cd 3rdparty/cutlass
-git checkout main
-cd ../..
+# cd 3rdparty/cutlass
+# git checkout main
+# cd ../..
 
 # build flashinfer
 cd 3rdparty/flashinfer
-FLASHINFER_ENABLE_AOT=1 pip install -e . -v
+python -m pip install -v .
+# FLASHINFER_ENABLE_AOT=1 python -m pip install -v .
 cd ../..
 
 # build mscclpp
@@ -56,3 +59,7 @@ cd ../..
 # load llama3-8B weights
 cd core
 python weightSaver.py --config_path=../config_all/llama3-8B/1024.json
+
+# run llama3-8B model
+cd ../entry
+CUDA_VISIBLE_DEVICES=0 python run_llama3.py

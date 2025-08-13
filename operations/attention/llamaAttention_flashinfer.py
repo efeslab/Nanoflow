@@ -50,8 +50,8 @@ if platform_config.PLATFORM_CUDA:
                             page_size,
                             logits_soft_cap=0.0,
                             pos_encoding_mode="NONE",
-                            data_type=torch.float16,
-                            q_data_type=torch.float16
+                            q_data_type=torch.float16,
+                            kv_data_type=torch.float16
                         )
 
         def run(self, Q, kv_tuple, output):
@@ -103,7 +103,8 @@ class DecAttnFlashinfer(Operations):
         self.kv_last_page_len = self.externals["KVCache"].kv_last_page_len[start_req_idx: end_req_idx]
 
         self.page_size = self.externals["KVCache"].page_size
-        self.impl.plan(self.kv_indptr, self.kv_indices, self.kv_last_page_len, self.page_size)
+        if start_req_idx != end_req_idx:
+            self.impl.plan(self.kv_indptr, self.kv_indices, self.kv_last_page_len, self.page_size)
     
     def profile_update(self):
         self.impl.plan(self.kv_indptr, self.kv_indices, self.kv_last_page_len, self.page_size)
