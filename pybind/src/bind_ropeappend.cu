@@ -5,7 +5,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include "flashinfer/pos_enc.cuh"
 #include "flashinfer/page.cuh"
-#include "cutlass/cutlass.h"
+// #include "cutlass/cutlass.h"
 #include "small_cuda_operator.cuh"
 
 #include <cuda.h>

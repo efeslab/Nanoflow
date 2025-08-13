@@ -1,6 +1,6 @@
 #pragma once
 #include <cuda.h>
-#include "cutlass/cutlass.h"
+// #include "cutlass/cutlass.h"
 #include <cuda_runtime.h>
 #include "cuda_fp16.h"
 #include "flashinfer/pos_enc.cuh"
