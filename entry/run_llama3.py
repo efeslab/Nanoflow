@@ -87,7 +87,7 @@ def test_performance():
         with prof_marker(f"after_execute_step_4"):
             for req_idx, new_token in new_tokens:
                 output_strings[req_idx].extend(new_token)
-        print("new_tokens: ", new_tokens)
+        # print("new_tokens: ", new_tokens)
         with prof_marker(f"after_execute_step_5"):
             new_tokens = new_tokens[:-1]
             decode_batchsize = len(new_tokens)
@@ -106,12 +106,12 @@ def test_performance():
 def test_correctness(use_kv_cache=True):
     # input_strings = ["Hi, who are you?"]
     # input_strings = ["Hi, who are you?", "What's the weather today?"]
-    input_strings = [ "Hi, who are you?" for _ in range(384)]
+    input_string = "Hi, who are you?"
     # input_strings = [ "The university of washington is located in" for _ in range(16)]
-    input_ids = [tokenizer.encode(s) for s in input_strings]
+    input_ids = tokenizer.encode(input_string)
     # print(input_ids)
-    special_inputs_0 = [(0, input_ids[0]), (1, input_ids[1])]
-    special_inputs_1 = [(2, input_ids[2]), (3, input_ids[3])]
+    special_inputs_0 = [(0, input_ids.copy()), (1, input_ids.copy())]
+    special_inputs_1 = [(2, input_ids.copy()), (3, input_ids.copy())]
     output_strings = {}
     for idx, tensor in special_inputs_0:
         output_strings[idx] = tensor
@@ -119,7 +119,7 @@ def test_correctness(use_kv_cache=True):
     for idx, tensor in special_inputs_1:
         output_strings[idx] = tensor
 
-    pipeline.update(special_inputs_0, profile_result_path="../auto_search/8B_search_result.json")
+    pipeline.update(special_inputs_0)
     new_tokens = pipeline.run()
     for req_idx, new_token in new_tokens:
         output_strings[req_idx].extend(new_token)
@@ -129,11 +129,11 @@ def test_correctness(use_kv_cache=True):
     # print("new_tokens: ", new_tokens)
     if use_kv_cache:
         new_tokens.extend(special_inputs_1)
-        pipeline.update(new_tokens, decode_batchsize, profile_result_path="../auto_search/8B_search_result.json")
+        pipeline.update(new_tokens, decode_batchsize)
     else:
         new_tokens = [(0, output_strings[0]), (1, output_strings[1])]
         new_tokens.extend(special_inputs_1)
-        pipeline.update(new_tokens, 0, profile_result_path="../auto_search/8B_search_result.json")
+        pipeline.update(new_tokens, 0)
 
     new_tokens = pipeline.run()
     for req_idx, new_token in new_tokens:
@@ -143,10 +143,10 @@ def test_correctness(use_kv_cache=True):
     # print("new_tokens: ", new_tokens)
 
     if use_kv_cache:
-        pipeline.update(new_tokens, decode_batchsize, profile_result_path="../auto_search/8B_search_result.json")
+        pipeline.update(new_tokens, decode_batchsize)
     else:
         new_tokens = [(i, output_strings[i]) for i in range(4)]
-        pipeline.update(new_tokens, 0, profile_result_path="../auto_search/8B_search_result.json")
+        pipeline.update(new_tokens, 0)
 
     for i in range(20):
         print("Cycle: ", i)
@@ -157,16 +157,19 @@ def test_correctness(use_kv_cache=True):
         assert decode_batchsize == 4
         # print("new_tokens: ", new_tokens)
         if use_kv_cache:
-            pipeline.update(new_tokens, decode_batchsize, profile_result_path="auto_search/8B_search_result.json")
+            pipeline.update(new_tokens, decode_batchsize)
         else:
             new_tokens = [(i, output_strings[i]) for i in range(4)]
-            pipeline.update(new_tokens, 0, profile_result_path="auto_search/8B_search_result.json")
+            pipeline.update(new_tokens, 0)
 
     output_text = tokenizer.batch_decode(list(output_strings.values()), skip_special_tokens=True)
     print(output_text)
 
 def test_one_cycle():
-    special_inputs_0 = [(0, input_ids[0]), (1, input_ids[1])]
+    input_string = "Hi, who are you?"
+    # input_strings = [ "The university of washington is located in" for _ in range(16)]
+    input_ids = tokenizer.encode(input_string)
+    special_inputs_0 = [(0, input_ids.copy()), (1, input_ids.copy())]
     output_strings = {}
     for idx, tensor in special_inputs_0:
         output_strings[idx] = tensor

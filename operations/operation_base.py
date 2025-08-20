@@ -7,6 +7,7 @@ import sqlite3
 from core.IOWrapper import IOWrapper
 from core.weightWrapper import WeightWrapper    
 from core.processWeight import process_weight_none
+from core.categoryType import CategoryType
 from utils.prof_marker import prof_marker
 
 import gurobipy as gp
@@ -263,7 +264,7 @@ class Operations():
         return tag_list
 
 
-    def set_category(self, category: Optional[str]) -> None:
+    def set_category(self, category: Optional[CategoryType]) -> None:
         self.category = category
 
     def set_stream(self, stream: tuple[torch._C.Stream, int | None] | list[tuple[torch._C.Stream, int | None]]) -> None:

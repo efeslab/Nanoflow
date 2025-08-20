@@ -86,7 +86,6 @@ if __name__ == '__main__':
 
     sys.path.append("../")
     sys.path.append('../pybind/build')
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1, 2, 3"
     # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
     from core.worker import worker

@@ -285,8 +285,9 @@ class PFAttnFlashinfer(Operations):
         # print("kv_indices dtype: ", self.kv_indices.dtype)
         # print("kv_last_page_len: ", self.kv_last_page_len)
         # print("kv_last_page_len dtype: ", self.kv_last_page_len.dtype) 
-        self.impl.plan(self.qo_indicies, self.kv_indptr, self.kv_indices, self.kv_last_page_len, self.page_size,
-            causal=self.causal, logits_soft_cap=self.logits_soft_cap, pos_encoding_mode=self.pos_encoding_mode)
+        if start_req_idx != end_req_idx:
+            self.impl.plan(self.qo_indicies, self.kv_indptr, self.kv_indices, self.kv_last_page_len, self.page_size,
+                causal=self.causal, logits_soft_cap=self.logits_soft_cap, pos_encoding_mode=self.pos_encoding_mode)
         # print("qo_indicies: ", qo_indicies)
         # print("qo_indicies dtype: ", qo_indicies.dtype)
     

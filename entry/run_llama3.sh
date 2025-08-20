@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=7 python run_llama3.py

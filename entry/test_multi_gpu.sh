@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=2,5,6,7 python test_multi_gpu3.py
