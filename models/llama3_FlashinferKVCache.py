@@ -20,8 +20,8 @@ from core.weightManager import WeightManager
 from core.bufferAllocate import BufferAllocator
 from core.executor import Executor
 from core.nanobatchSplit import split_nanobatch
+from core.categoryType import CategoryType
 from utils.prof_marker import prof_marker
-from utils.util_functions import op_name_to_name_idx_layer
 
 class Pipeline():
     def __init__(self):
@@ -35,13 +35,14 @@ class Pipeline():
         self.hidden_dim = 4096
         self.intermediate_dim = 14 * 1024
         self.global_batch_size: Optional[int] = None
+        self.decode_batch_size: Optional[int] = None
         self.num_layers = 32
         self.layer_list = [i for i in range(self.num_layers)]
         self.page_size = 16
         self.device = "cuda:0"
         self.profile_dir = f"../profile_data/{self.pipeline_name}"
         self.profile_result: dict[str, Any] | None = None
-        self.categories = ["COMP", "MEM"]
+        self.categories = [CategoryType.COMP, CategoryType.MEM]
 
         self.buffer_fixed: bool = False
         self.is_auto_search_enabled: bool = False
@@ -69,7 +70,7 @@ class Pipeline():
             "GEMM_Test": (torch.cuda.Stream(), self.total_sm),
         }
 
-        self.streams: dict[str, dict[int, tuple[torch._C.Stream, int]]] = {}
+        self.streams: dict[CategoryType, dict[int, tuple[torch._C.Stream, int]]] = {}
         for category in self.categories:
             self.streams[category] = {}
 
@@ -88,11 +89,6 @@ class Pipeline():
 
         # Create green context streams for testing
         self.profile_streams: dict[str, tuple[torch._C.Stream, int]] = {}
-        self.sm_counts = [
-            i for i in range(8, 128, 8) # Assuming SM counts are in increments of 8
-        ]
-        num_sm_counts = len(self.sm_counts)
-        # [8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120]
         for i in range((num_sm_counts + 1) // 2):
             sm_count_1 = self.sm_counts[i]
             sm_count_2 = self.sm_counts[num_sm_counts - 1 - i]
@@ -284,14 +280,28 @@ class Pipeline():
         weight_manager = WeightManager(self.pipeline_name, weight_path, cached, self.device)
         weight_manager.set_weight(self.model_operations, self.device)
 
+
+    def init_category(self):
+        # set category for loop operations
+        self.layerNormAttn.set_category(CategoryType.COMP)
+        self.kqv.set_category(CategoryType.COMP)
+        self.ropeAppend.set_category(CategoryType.COMP)
+        self.decAttn.set_category(CategoryType.MEM)
+        self.pfAttn.set_category(CategoryType.COMP)
+        self.layerNormFFN.set_category(CategoryType.COMP)
+        self.o.set_category(CategoryType.COMP)
+        self.ug.set_category(CategoryType.COMP)
+        self.activation.set_category(CategoryType.COMP)
+        self.d.set_category(CategoryType.COMP)
+
     def clear_batch_size(self):
         # init the batchsize to None
         for op in self.all_operations:
             op.setBatchSize(None)
 
-    def config_batch_size(self, decode_batchsize):
+    def config_batch_size(self):
         self.global_input.setBatchSize(self.global_batch_size)
-        self.decAttn.setBatchSize(decode_batchsize)
+        self.decAttn.setBatchSize(self.decode_batch_size)
 
     def config_algorithm(self):
         params = {
@@ -322,21 +332,8 @@ class Pipeline():
         self.modelLayerNorm.config_tag("cuda", params)
         self.sample.config_tag("cuda", params)
 
-    def init_category(self):
-        # set category for loop operations
-        self.layerNormAttn.set_category("COMP")
-        self.kqv.set_category("COMP")
-        self.ropeAppend.set_category("COMP")
-        self.decAttn.set_category("MEM")
-        self.pfAttn.set_category("COMP")
-        self.layerNormFFN.set_category("COMP")
-        self.o.set_category("COMP")
-        self.ug.set_category("COMP")
-        self.activation.set_category("COMP")
-        self.d.set_category("COMP")
 
     def config_streams(self):
-        # manually set streams for running.
         self.global_input.set_stream((self.main_stream, self.total_sm))
         self.gen_embedding.set_stream((self.main_stream, self.total_sm))
 
@@ -486,7 +483,7 @@ class Pipeline():
                 # print(f"batch_size: {self.batch_size}")
                 # print("decode_batchsize: ", decode_batchsize)
                 self.clear_batch_size()
-                self.config_batch_size(decode_batch_size)
+                self.config_batch_size()
                 if use_nano_split:
                     self.nanobatch_split()
                 self.update_allocate_buffers()

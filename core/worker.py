@@ -68,12 +68,12 @@ def worker(start_time, rank, world_size, shared_batch_size, shared_array, barrie
                         pipeline.profile_run()
                 
                     # test for decode
-                    total_batch_sizes = [128, 256, 384]
+                    # total_batch_sizes = [128, 256, 384]
                     # total_batch_sizes = [128, 256, 384, 512, 640, 768, 896, 1024, 1152, 1280]
-                    # total_batch_sizes = [384]
+                    total_batch_sizes = [1280]
                     # prepare the decode inputs for a special input_length
                     input_length = 1024
-                    output_length = 512
+                    output_length = 0
                     prefill_input_ids = [input_ids[:input_length] for _ in range(1280)]
 
                     for total_batch_size in total_batch_sizes:
