@@ -3,6 +3,11 @@ import torch
 
 def test_correctness():
     # Spawn one worker per GPU (or per unit of parallelism).
+    input_string = "Hi, who are you?"
+    input_ids = tokenizer.encode(input_string)
+    output_strings = {}
+    for idx in range(4):
+        output_strings[idx] = input_ids.copy()
     processes = []
     for rank in range(world_size):
         start_time = time.perf_counter()
@@ -50,6 +55,7 @@ def test_correctness():
 
 def test_profile():
     # Spawn one worker per GPU (or per unit of parallelism).
+    prefill_context_ids = tokenizer.encode(prefill_context)  # which length is 1912.
     processes = []
     for rank in range(world_size):
         start_time = time.perf_counter()
@@ -81,12 +87,11 @@ def test_profile():
 if __name__ == '__main__':
     T0 = time.perf_counter()
     import torch.multiprocessing as mp
-    import sys, os
+    import sys
     import argparse
 
     sys.path.append("../")
     sys.path.append('../pybind/build')
-    # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
     from core.worker import worker
     from utils.util_functions import prepare_weight
@@ -110,13 +115,7 @@ if __name__ == '__main__':
 
     # print("initializing the modules and start mode setting, ", time.perf_counter() - T0)
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-70B-Instruct")
-    input_string = "Hi, who are you?"
-    input_ids = [(idx, tokenizer.encode(input_string)) for idx in range(4)]  # Simulating 4 requests with the same input string
-    prefill_context_ids = tokenizer.encode(prefill_context)  # which length is 1066.
 
-    output_strings = {}
-    for idx, ids in input_ids:
-        output_strings[idx] = ids
     # print("tokenize the inputs, initialize the output dict, ", time.perf_counter() - T0)
 
     weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
@@ -157,5 +156,5 @@ if __name__ == '__main__':
     
     print("create shared variables, ", time.perf_counter() - T0)
     
-    test_correctness()
-    # test_profile()
+    # test_correctness()
+    test_profile()

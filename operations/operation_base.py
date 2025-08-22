@@ -158,7 +158,7 @@ class Operations():
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
 
-            g = torch.cuda.CUDAGraph()
+            # g = torch.cuda.CUDAGraph()
             for _, impl in self.impl_map.items():
                 self.impl = impl(self, self.stream, self.device)
                 category_tag = impl.category_tag
@@ -170,26 +170,26 @@ class Operations():
                 for impl_tag, para_map in self.impl_configs_map[category_tag]:
                     self.impl.config(impl_tag, para_map)
                     self.profile_update()
-                    g.reset()
+                    # g.reset()
 
                     # warm up for 10 cycles.
                     for _ in range(10):
                         self.profile_run()
 
-                    torch.cuda.synchronize()
-                    # prepare a graph for 100 cycles.
+                    # # prepare a graph for 100 cycles.
                     rounds = 100
-                    with torch.cuda.graph(g, stream=self.stream):
-                        for round in range(rounds):
-                            self.profile_run()
-                    torch.cuda.synchronize()
+                    # with torch.cuda.graph(g, stream=self.stream):
+                    #     for round in range(rounds):
+                    #         self.profile_run()
+                    # torch.cuda.synchronize()
 
-                    # sync for network ops.
-                    self.profile_run()
+                    # self.profile_run()
 
                     start.record(self.stream)
                     with torch.cuda.stream(self.stream):
-                        g.replay()
+                        # g.replay()
+                        for round in range(rounds):
+                            self.profile_run()
                     end.record(self.stream)
                     torch.cuda.synchronize()
                     elapsed_ms = start.elapsed_time(end)
@@ -427,7 +427,7 @@ class Operation_Layer:
         # print(f"init_Variables: {self.name}, start_time: {self.start_time}, end_time: {self.end_time}")
         model.addConstr(self.end_time == self.start_time + self.duration_map[(self.batch_size, full_sm_count)], name=f"{self.name}_end_time")
 
-    def initVariablesStageTwo(self, model: gp.Model, sm_counts: list[int], categories: set[str | None]):
+    def initVariablesStageTwo(self, model: gp.Model, sm_counts: list[int], categories: set[CategoryType]):
         self.start_time = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_start")
         self.end_time = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_end")
         self.p_vars: dict[int, gp.Var] = {}  # Variables for p choices
@@ -483,4 +483,3 @@ class Operation_Layer:
 class NanoOpInfo:
     batch_idx: int
     batch_size: int
-    sm_count: int

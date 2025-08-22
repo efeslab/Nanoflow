@@ -2,7 +2,6 @@ import copy
 import json
 from typing import Any, Optional
 import torch
-import os
 
 from flashinfer.green_ctx import split_device_green_ctx_by_sm_count
 from operations.operation_base import NanoOpInfo, Operations, Operation_Layer
@@ -374,8 +373,7 @@ class Pipeline():
                 for nano_op_name, nano_op_info in op_info.items():
                     split_info_list.append(NanoOpInfo(
                         batch_idx=nano_op_info["batch_idx"],
-                        batch_size=nano_op_info["batch_size"],
-                        sm_count=nano_op_info["p_value"]
+                        batch_size=nano_op_info["batch_size"]
                     ))
                     extra_links[nano_op_name] = nano_op_info["extra_dep"]
 
@@ -384,13 +382,11 @@ class Pipeline():
             info = (
                 NanoOpInfo(
                     batch_idx=0,
-                    batch_size=self.decode_batch_size,
-                    sm_count=0
+                    batch_size=self.decode_batch_size
                 ),  
                 NanoOpInfo(
                     batch_idx=1,
-                    batch_size=self.global_batch_size - self.decode_batch_size,
-                    sm_count=132,
+                    batch_size=self.global_batch_size - self.decode_batch_size
                 )
             )
             op_nanobatch_info_map = {
@@ -403,8 +399,7 @@ class Pipeline():
                 "Activation": copy.deepcopy(info),
                 "D": copy.deepcopy(info),
             }
-            extra_links = {
-            }
+            extra_links = {}
 
         print("op_nanobatch_info_map", op_nanobatch_info_map)
         print("extra_links", extra_links)
