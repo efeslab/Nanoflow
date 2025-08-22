@@ -1,7 +1,9 @@
 import copy
+import json
+from typing import Any, Optional
 import torch
 
-from operations.operation_base import NanoOpInfo
+from operations.operation_base import NanoOpInfo, Operations, Operation_Layer
 from operations.activation.silu import Activation
 from operations.embedding.embedding import GenEmbedding
 from operations.globalOp.globalOp import GlobalInput, GlobalOutput
@@ -14,6 +16,7 @@ from operations.virtualOp.virtual_ops import Copy, Redist
 from core.bufferAllocate import BufferAllocator
 from core.executor import Executor
 from core.nanobatchSplit import split_nanobatch
+from core.categoryType import CategoryType
 
 
 class Pipeline():
@@ -27,11 +30,11 @@ class Pipeline():
         self.vocab_size = 128256
         self.hidden_dim = 4096
         self.intermediate_dim = 14 * 1024
-        self.batch_size = None
-        self.decode_batch_size = None
+        self.global_batch_size: Optional[int] = None
+        self.decode_batch_size: Optional[int] = None
         self.num_layers = 32
         self.layer_list = [i for i in range(self.num_layers)]
-        self.page_size = 64
+        self.page_size = 16
         self.device = "cuda:0"
         self.profile_dir = f"../profile_data/{self.pipeline_name}"
 
@@ -42,15 +45,15 @@ class Pipeline():
         self.init_dependency()
         self.init_set_shape()
 
-    def init_streams(self):
+    def init_streams(self): # used for dependency
         total_sm = 132
         self.sm_counts = [
-            i for i in range(8, 128, 8)
-        ] + [total_sm]  # Example SM counts, adjust as needed
+            i for i in range(8, 128, 8) # Assuming SM counts are in increments of 8
+        ] + [total_sm]  # Add the total SM count as the last element
 
         self.streams = {
-            "COMP": (torch.cuda.Stream(), total_sm),
-            "MEM": (torch.cuda.Stream(), total_sm),
+            CategoryType.COMP: (torch.cuda.Stream(), total_sm),
+            CategoryType.MEM: (torch.cuda.Stream(), total_sm),
         }
 
     def init_operations(self):
@@ -123,19 +126,20 @@ class Pipeline():
         self.redist_a = Redist("RedistAggregation", self.device, num_inputs=2, num_outputs=1)
 
         # Save operations in an instance variable
-        self.operation_list = [
+        self.original_model_operations: list[Operations] = [
             self.global_input, self.gen_embedding, self.layerNormAttn, self.kqv, self.ropeAppend,
             self.decAttn, self.pfAttn, self.o, self.layerNormFFN, self.ug, self.activation, self.d,
             self.modelLayerNorm, self.getLogits, self.sample, self.global_output
         ]
-        self.virtual_operation_list = [self.copy_embedding, self.copy_o, self.copy_d, self.redist_p, self.redist_a]
+        self.original_virtual_operations: list[Operations] = [self.copy_embedding, self.copy_o, self.copy_d, self.redist_p, self.redist_a]
 
-        self.op_for_buffer_allocation = []
-        self.op_layers = []
-        for op in self.operation_list + self.virtual_operation_list:
-            self.op_for_buffer_allocation.append(op)
-        for operation in self.operation_list:
-            self.op_layers.extend(operation.children)
+        self.model_operations = self.original_model_operations
+        self.virtual_operations = self.original_virtual_operations
+        self.all_operations = self.model_operations + self.virtual_operations # NOTE(Ziren): for further nanosplit or auto search, which should keep the original operations since we need to change the strategy of optimization in the runtime.
+
+        self.all_layer_operations: list[Operation_Layer] = []
+        for operation in self.model_operations:
+            self.all_layer_operations.extend(operation.children)
 
     def init_dependency(self):
         self.global_input.outputs["tokens"] >> self.gen_embedding.inputs["token"]
@@ -177,11 +181,12 @@ class Pipeline():
 
         self.sample.outputs["tokens"] >> self.global_output.inputs["tokens"]
         
-        for operation in self.operation_list + self.virtual_operation_list:
+        for operation in self.all_operations:
             operation.checkConnection()
     
+    
     def init_executor(self):
-        self.executor = Executor(self.op_layers, self.layer_list)
+        self.executor = Executor(self.all_layer_operations, self.layer_list)
         self.executor.plan_layer_ordering()
 
     def init_set_shape(self):
@@ -202,57 +207,48 @@ class Pipeline():
         self.sample.setShape(self.vocab_size)
         self.global_output.setShape()
 
-    def config_batch_size(self, decode_batchsize):
-        self.global_input.setBatchSize(self.batch_size)
-        self.decAttn.setBatchSize(decode_batchsize)
-
     def init_category(self):
-        self.layerNormAttn.set_category("COMP")
-        self.kqv.set_category("COMP")
-        self.ropeAppend.set_category("COMP")
-        self.decAttn.set_category("MEM")
-        self.pfAttn.set_category("COMP")
-        self.layerNormFFN.set_category("COMP")
-        self.o.set_category("COMP")
-        self.ug.set_category("COMP")
-        self.activation.set_category("COMP")
-        self.d.set_category("COMP")
+        # set category for loop operations
+        self.layerNormAttn.set_category(CategoryType.COMP)
+        self.kqv.set_category(CategoryType.COMP)
+        self.ropeAppend.set_category(CategoryType.COMP)
+        self.decAttn.set_category(CategoryType.MEM)
+        self.pfAttn.set_category(CategoryType.COMP)
+        self.layerNormFFN.set_category(CategoryType.COMP)
+        self.o.set_category(CategoryType.COMP)
+        self.ug.set_category(CategoryType.COMP)
+        self.activation.set_category(CategoryType.COMP)
+        self.d.set_category(CategoryType.COMP)
+
+    def config_batch_size(self):
+        self.global_input.setBatchSize(self.global_batch_size)
+        self.decAttn.setBatchSize(self.decode_batch_size)
 
     def config_streams(self):
         # Set stream for auto-search case
-        self.global_input.set_stream(self.streams["COMP"])
-        self.gen_embedding.set_stream(self.streams["COMP"])
+        self.layerNormAttn.set_stream([self.streams[CategoryType.COMP], self.streams[CategoryType.COMP]])
+        self.kqv.set_stream([self.streams[CategoryType.COMP], self.streams[CategoryType.COMP]])
+        self.ropeAppend.set_stream([self.streams[CategoryType.COMP], self.streams[CategoryType.COMP]])
+        self.decAttn.set_stream(self.streams[CategoryType.MEM])
+        self.pfAttn.set_stream(self.streams[CategoryType.COMP])
+        self.layerNormFFN.set_stream([self.streams[CategoryType.COMP], self.streams[CategoryType.COMP]])
+        self.o.set_stream([self.streams[CategoryType.COMP], self.streams[CategoryType.COMP]])
+        self.ug.set_stream([self.streams[CategoryType.COMP], self.streams[CategoryType.COMP]])
+        self.activation.set_stream([self.streams[CategoryType.COMP], self.streams[CategoryType.COMP]])
+        self.d.set_stream([self.streams[CategoryType.COMP], self.streams[CategoryType.COMP]])
 
-        self.layerNormAttn.set_stream([self.streams["COMP"], self.streams["COMP"]])
-        self.kqv.set_stream([self.streams["COMP"], self.streams["COMP"]])
-        self.ropeAppend.set_stream([self.streams["COMP"], self.streams["COMP"]])
-        self.decAttn.set_stream(self.streams["MEM"])
-        self.pfAttn.set_stream(self.streams["COMP"])
-        self.layerNormFFN.set_stream([self.streams["COMP"], self.streams["COMP"]])
-        self.o.set_stream([self.streams["COMP"], self.streams["COMP"]])
-        self.ug.set_stream([self.streams["COMP"], self.streams["COMP"]])
-        self.activation.set_stream([self.streams["COMP"], self.streams["COMP"]])
-        self.d.set_stream([self.streams["COMP"], self.streams["COMP"]])
-        
-        self.modelLayerNorm.set_stream(self.streams["COMP"])
-        self.sample.set_stream(self.streams["COMP"])
-        self.getLogits.set_stream(self.streams["COMP"])
-        self.global_output.set_stream(self.streams["COMP"])
-
-    def nanobatch_split(self, total_batchsize, decode_batchsize):
+    def nanobatch_split(self):
         info = (
             NanoOpInfo(
                 batch_idx=0,
-                batch_size=decode_batchsize,
-                sm_count=0
-            ),  
+                batch_size=self.decode_batch_size
+            ),
             NanoOpInfo(
                 batch_idx=1,
-                batch_size=total_batchsize - decode_batchsize,
-                sm_count=132,
+                batch_size=self.global_batch_size - self.decode_batch_size
             )
         )
-        op_nanobatch_info_map = {
+        op_nanobatch_info_map: dict[str, tuple[NanoOpInfo, ...]] = {
             "LayerNormAttn": copy.deepcopy(info),
             "KQV": copy.deepcopy(info),
             "RopeAppend": copy.deepcopy(info),
@@ -264,20 +260,23 @@ class Pipeline():
         }
         extra_links = {}
 
-        new_operation_list, addtional_virtual_ops = split_nanobatch(self.operation_list, op_nanobatch_info_map, extra_links)
-        self.op_for_buffer_allocation = []
-        self.new_operation_list = new_operation_list
-        self.op_layers = []
-        for op in new_operation_list + self.virtual_operation_list + addtional_virtual_ops:
-            print("op.name", op.name)
-            self.op_for_buffer_allocation.append(op)
-        for operation in new_operation_list:
-            self.op_layers.extend(operation.children)
+        print("op_nanobatch_info_map", op_nanobatch_info_map)
+        print("extra_links", extra_links)
+
+        model_ops, addtional_virtual_ops = split_nanobatch(self.original_model_operations, op_nanobatch_info_map, extra_links)
+        self.model_operations = model_ops
+        self.all_operations = []
+        self.all_layer_operations = []
+        for op in model_ops + self.virtual_operations + addtional_virtual_ops:
+            print("op.name", op.name, op.batch_size)
+            self.all_operations.append(op)
+        for operation in model_ops:
+            self.all_layer_operations.extend(operation.children)
         
     def update_allocate_buffers(self):
         # Build list of buffers(op_device)
         buffers_list = []
-        for operation in self.op_for_buffer_allocation:
+        for operation in self.all_operations:
             for _, wrapper in operation.inputs.items():
                 buffers_list.append(wrapper)
             for _, wrapper in operation.outputs.items():

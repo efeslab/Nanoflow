@@ -6,6 +6,7 @@ from utils.prof_marker import prof_marker
 from operations.operation_base import Operations, Operation_Layer
 from core.IOWrapper import IOWrapper
 from operations.impl_base import OperationImpl
+# from bind_allreduce
 
 class AllReduceTorchImpl(OperationImpl):
     category_tag = "torch"
@@ -78,6 +79,41 @@ class AllReduce(Operations):
             INSERT OR IGNORE INTO {category_tag} (batch_size, sm_count, N, average_time_ms)
             VALUES (?, ?, ?, ?);
         ''', (self.batch_size, self.sm_count, self.N, average_elapsed_ms))
+
+    # def profile_all(self):
+    #     with prof_marker(f"batchsize:{self.batch_size}"):
+    #         start = torch.cuda.Event(enable_timing=True)
+    #         end = torch.cuda.Event(enable_timing=True)
+
+    #         for _, impl in self.impl_map.items():
+    #             self.impl = impl(self, self.stream, self.device)
+    #             category_tag = impl.category_tag
+    #             is_profiled = self.is_profiled_in_db(category_tag)
+    #             if is_profiled:
+    #                 # If already profiled, we can skip profiling
+    #                 continue
+    #             # loop in the impl configs
+    #             for impl_tag, para_map in self.impl_configs_map[category_tag]:
+    #                 self.impl.config(impl_tag, para_map)
+    #                 self.profile_update()
+
+    #                 # warm up for 10 cycles.
+    #                 for _ in range(10):
+    #                     self.profile_run()
+
+    #                 rounds = 100
+    #                 start.record(self.stream)
+    #                 with torch.cuda.stream(self.stream):
+    #                     for round in range(rounds):
+    #                         self.profile_run()
+    #                 end.record(self.stream)
+    #                 torch.cuda.synchronize()
+    #                 elapsed_ms = start.elapsed_time(end)
+    #                 average_elapsed_ms = elapsed_ms / rounds
+    #                 # Store to results
+    #                 if self.is_save_db:
+    #                     self.store_profile_db(category_tag, impl_tag, average_elapsed_ms)
+    #         self.conn.commit()
 
     def run(self):
         self.impl.run(self.inputs["input"].tensor, self.outputs["output"].tensor)

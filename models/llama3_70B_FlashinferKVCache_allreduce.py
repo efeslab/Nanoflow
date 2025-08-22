@@ -3,7 +3,6 @@ import json
 from typing import Any, Optional
 import torch
 import torch.distributed as dist
-import os
 
 from flashinfer.green_ctx import split_device_green_ctx_by_sm_count
 from operations.operation_base import NanoOpInfo, Operations, Operation_Layer
@@ -27,7 +26,7 @@ from core.categoryType import CategoryType
 from utils.prof_marker import prof_marker
 
 class Pipeline():
-    def __init__(self, TP_idx, TP_size, PP_idx=0, PP_size=1, DP_idx=0, DP_size=1):
+    def __init__(self, TP_idx: int, TP_size: int, PP_idx=0, PP_size=1, DP_idx=0, DP_size=1):
         # Set parameters as instance variables.
         self.pipeline_name = f"Llama3-70B-with-2-allreduce-TP{TP_size}-PP{PP_size}-DP{DP_size}"
         self.num_kv_heads = 8
@@ -127,7 +126,7 @@ class Pipeline():
 
 
     def init_external_data(self):
-        self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048* 32, self.page_size, self.tp_size, self.device)
+        self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048* 36, self.page_size, self.tp_size, self.device)
         self.kv_cache = BatchedDistKVCache(self.kv_pool)
 
     def reset(self):
@@ -371,8 +370,6 @@ class Pipeline():
 
 
     def config_network(self, rank=0):
-        os.environ["MASTER_ADDR"] = "localhost"
-        os.environ["MASTER_PORT"] = "12547"
         dist.init_process_group(backend="nccl", rank=rank, world_size=self.num_cuda_devices)
         tp_group_idx = self.tp_idx // self.tp_size
         print("tp_group_idx: ", tp_group_idx, "tp_size: ", self.tp_size)
@@ -426,8 +423,7 @@ class Pipeline():
                 for nano_op_name, nano_op_info in op_info.items():
                     split_info_list.append(NanoOpInfo(
                         batch_idx=nano_op_info["batch_idx"],
-                        batch_size=nano_op_info["batch_size"],
-                        sm_count=nano_op_info["p_value"]
+                        batch_size=nano_op_info["batch_size"]
                     ))
                     extra_links[nano_op_name] = nano_op_info["extra_dep"]
 
@@ -537,8 +533,6 @@ class Pipeline():
         with prof_marker("update_step_10"):
             self.pfAttn.update(self.cumsum_input)
 
-    
-
     def run(self, file_name="out-tp-test", filefolder_name="llama3-kv-out-tp-test"):
 
         temp_out = torch.zeros(self.global_batch_size, dtype=torch.int32, device='cuda')
@@ -576,6 +570,7 @@ class Pipeline():
                 with prof_marker(f"{operation.name}"):
                     print("Operation name:", operation.name)
                     operation.profile_all()
+        torch.cuda.synchronize()
 
     def profile_print(self):
         for operation in self.model_operations:

@@ -7,40 +7,39 @@ from collections import defaultdict
 from models.llama3_AutoSearch import Pipeline
 from models.llama3_70B_allreduce_AutoSearch import Pipeline as Pipeline_70B_AllReduce
 from core.executor import Executor
+from core.categoryType import CategoryType
 from utils.util_functions import op_name_to_name_idx_layer
 from profileAnalysis import getGemvTimeAndSMCount, getByBatchsizeAndSMCount
 
 
-# global_batch_size = 2048
-# decode_batch_size = 640
-global_batch_size = 1024
-decode_batch_size = 384
+global_batch_size = 2048
+decode_batch_size = 640
+# global_batch_size = 1024
+# decode_batch_size = 384
 
 seq_len = 1024
 
-batch_size_range = list(range(128, global_batch_size+1, 128))
-print("batch_size_range:", batch_size_range)
-
 # create operations
 
-pipeline = Pipeline()
-stage1_figure_path = "8B_stage1_figure.png"
-stage2_figure_path = "8B_stage2_figure.png"
-dump_file = "8B_search_result.json"
+# pipeline = Pipeline()
+# stage1_figure_path = "8B_stage1_figure.png"
+# stage2_figure_path = "8B_stage2_figure.png"
+# dump_file = "8B_search_result.json"
 
 
-# pipeline = Pipeline_70B_AllReduce(TP_idx=0, TP_size=4)
-# stage1_figure_path = "70B_stage1_figure.png"
-# stage2_figure_path = "70B_stage2_figure.png"
-# dump_file = "70B_search_result.json"
+pipeline = Pipeline_70B_AllReduce(TP_idx=0, TP_size=4)
+stage1_figure_path = "70B_stage1_figure.png"
+stage2_figure_path = "70B_stage2_figure.png"
+dump_file = "70B_search_result.json"
 
 profile_dir = pipeline.profile_dir
 
 
 pipeline.init()
-pipeline.batch_size = global_batch_size
-pipeline.config_batch_size(decode_batch_size)
-pipeline.nanobatch_split(global_batch_size, decode_batch_size)
+pipeline.global_batch_size = global_batch_size
+pipeline.decode_batch_size = decode_batch_size
+pipeline.config_batch_size()
+pipeline.nanobatch_split()
 pipeline.update_allocate_buffers()
 
 # set streams
@@ -50,7 +49,7 @@ pipeline.config_streams()
 from operations.operation_base import Operation_Layer
 layer_num = 1
 all_layered_ops: list[Operation_Layer] = []
-for op in pipeline.new_operation_list:
+for op in pipeline.model_operations:
     if op.first_layer_only or op.last_layer_only:
         continue
     layered_ops = op.children[:layer_num]
@@ -107,7 +106,7 @@ for layer_op in all_layered_ops:
 
 # create sequantial constraints
 sequence_nano = {}
-category_nano_op_map: dict[str, list[Operation_Layer]] = defaultdict(list)
+category_nano_op_map: dict[CategoryType, list[Operation_Layer]] = defaultdict(list)
 for layer_op in all_layered_ops:
     category_nano_op_map[layer_op.category].append(layer_op)
 
@@ -184,7 +183,7 @@ from matplotlib import pyplot as plt
 # and each NanoOperation has the required attributes.
 
 # Extract unique operation types
-operation_types = sorted(set(n.category for n in all_layered_ops))
+operation_types = sorted(set(str(n.category) for n in all_layered_ops))
 y_positions = {op_type: i for i, op_type in enumerate(operation_types)}
 
 fig, ax = plt.subplots(figsize=(30, 6))
@@ -195,7 +194,7 @@ for n in all_layered_ops:
     start_time = n.start_time.X
     duration = n.duration_map[(n.batch_size, full_sm_counts)]  # Assuming duration is stored in a map with batch size as key
     batch_size = n.batch_size
-    op_type = n.category
+    op_type = str(n.category)
 
     y_position = y_positions[op_type]
     
@@ -234,7 +233,7 @@ for op_type, nano_ops in category_nano_op_map.items():
 # second search stage
 layer_num = 3
 second_stage_nano_ops: list[Operation_Layer] = []
-for op in pipeline.new_operation_list:
+for op in pipeline.model_operations:
     if op.first_layer_only or op.last_layer_only:
         continue
     layered_ops = op.children[:layer_num]
@@ -245,7 +244,7 @@ print("second_stage_nano_ops original name:", [op.original_name for op in second
 # Create sequantial constraints for the second stage
 categories = set(op.category for op in second_stage_nano_ops)
 
-category_nano_op_map_stage_two: dict[str, list[Operation_Layer]] = defaultdict(list)
+category_nano_op_map_stage_two: dict[CategoryType, list[Operation_Layer]] = defaultdict(list)
 for layer_op in second_stage_nano_ops:
     category_nano_op_map_stage_two[layer_op.category].append(layer_op)
 
@@ -408,7 +407,7 @@ for list1, list2 in itertools.combinations(category_lists, 2):
                 op1.is_extra_linked_after_op[op2.category] = True
 
 # Extract unique operation types
-operation_types = sorted(set(n.category for n in all_layered_ops))
+operation_types = sorted(set(str(n.category) for n in all_layered_ops))
 y_positions = {op_type: i for i, op_type in enumerate(operation_types)}
 
 fig, ax = plt.subplots(figsize=(30, 6))
@@ -419,7 +418,7 @@ for n in second_stage_nano_ops:
     start_time = n.start_time.X
     duration = n.duration_map[(n.batch_size, n.p_choice.X)]  # Assuming duration is stored in a map with batch size as key
     batch_size = n.batch_size
-    op_type = n.category
+    op_type = str(n.category)
 
     y_position = y_positions[op_type]
     
@@ -495,7 +494,6 @@ output_data = {
 with open(dump_file, "w") as f:
     json.dump(output_data, f, indent=4)
 
-
 print("delta_maps of LayerNormAttn0_0 and PFAttn_0:", delta_maps.get(("LayerNormAttn0_0", "PFAttn_0"), None))
 print(is_overlapping.get(("LayerNormAttn0_0", "PFAttn_0"), None))
 D1_0_layer_op = pipeline.d.nano_ops[1].children[0]
@@ -503,32 +501,3 @@ print("D1_0_layer_op:", D1_0_layer_op.name)
 print("D1_0_layer_op start time:", D1_0_layer_op.start_time.X
       , "end time:", D1_0_layer_op.end_time.X, "p_choice:", D1_0_layer_op.p_choice.X
       , "duration:", D1_0_layer_op.duration_map[(D1_0_layer_op.batch_size, D1_0_layer_op.p_choice.X)])
-
-# # sort category_nano_op_map by start time
-# for op_type, nano_ops in category_nano_op_map.items():
-#     category_nano_op_map[op_type] = sorted(nano_ops, key=lambda x: x.start_time.X)
-
-# # create a extra_links
-# extra_links = {
-
-# }
-
-# # print sorted category_nano_op_map
-# for op_type, nano_ops in category_nano_op_map.items():
-#     print(f"{op_type}: {[f'{n.name}({n.start_time.X:.2f})' for n in nano_ops]}")
-#     extra_links[(nano_ops[-1].parent.name, nano_ops[0].parent.name)] = (True, False)
-#     for op, next_op in zip(nano_ops[:-1], nano_ops[1:]):
-#         prev_layer_dep = False
-#         next_layer_dep = False
-#         if op.layer == next_op.layer:
-#             pass
-#         elif op.layer == next_op.layer - 1:
-#             prev_layer_dep = True
-#         elif op.layer == next_op.layer + 1:
-#             next_layer_dep = True
-#         else:
-#             raise ValueError(f"Unexpected layer order: {op.name}({op.layer}) -> {next_op.name}({next_op.layer})")
-#         # print(f"Linking {op.name} to {next_op.name}, prev_layer_dep: {prev_layer_dep}, next_layer_dep: {next_layer_dep}")
-#         extra_links[(op.parent.name, next_op.parent.name)] = (prev_layer_dep, next_layer_dep)
-
-# print("extra_links:", extra_links)
