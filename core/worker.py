@@ -1,12 +1,14 @@
 import time
 import torch
+import torch.multiprocessing as mp
 
 weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
 
-def worker(start_time, rank, world_size, shared_batch_size, shared_array, barrier, pipeline_list, command, input_ids):
+# def worker(start_time, rank, request_queue: mp.Queue, shared_decode_bts, result_queue: mp.Queue, shared_array, barrier, work_pipeline, command, input_ids): --- Ignore ---
+def worker(start_time, rank, request_queue: mp.Queue, shared_decode_bts, result_queue: mp.Queue, barrier, work_pipeline, command):
     torch.cuda.set_device(rank)
     device = f"cuda:{rank}"
-    pipeline = pipeline_list[rank]
+    pipeline = work_pipeline
     pipeline.set_device(rank, device)
 
     pipeline.init(weight_map_wzr, cached=True)
@@ -20,34 +22,44 @@ def worker(start_time, rank, world_size, shared_batch_size, shared_array, barrie
         # cmd = ''.join(command[:]).strip()
         cmd = command.value.decode()
         match cmd:
-            case "Prefill":
-                input0 = [(i, input_ids.copy()) for i in range(2)]
-                pipeline.update(input0, decode_batch_size=0)
-                # new_tokens = pipeline.run(file_name=f"./test_data/70B_test_torch_with_allreduce_{rank}", filefolder_name=f"./test_data/70B_test_torch_with_allreduce_{rank}_folder")
-                new_tokens = pipeline.run(file_name=f"./test_data/70B_test_flashinfer_with_allreduce_{rank}", filefolder_name=f"./test_data/70B_test_flashinfer_with_allreduce_{rank}_folder")
-                assert len(new_tokens) == 2, f"Expected 2 new tokens, got {len(new_tokens)}"
+            # case "Prefill":
+            #     input0 = [(i, input_ids.copy()) for i in range(2)]
+            #     pipeline.update(input0, decode_batch_size=0)
+            #     # new_tokens = pipeline.run(file_name=f"./test_data/70B_test_torch_with_allreduce_{rank}", filefolder_name=f"./test_data/70B_test_torch_with_allreduce_{rank}_folder")
+            #     new_tokens = pipeline.run(file_name=f"./test_data/70B_test_flashinfer_with_allreduce_{rank}", filefolder_name=f"./test_data/70B_test_flashinfer_with_allreduce_{rank}_folder")
+            #     assert len(new_tokens) == 2, f"Expected 2 new tokens, got {len(new_tokens)}"
+            #     print("new_tokens: ", new_tokens, "ttft: ", time.perf_counter() - start_time)
+            #     if rank == 0:
+            #         for req_idx, new_token in new_tokens:
+            #             shared_array[req_idx] = new_token[0]
+            #     new_tokens.extend([(i, input_ids.copy()) for i in range(2, 4)])
+            #     pipeline.update(new_tokens, decode_batch_size=2)
+
+            # case "Decode":
+            #     # new_tokens = pipeline.run(file_name=f"./test_data/70B_test_torch_with_allreduce_{rank}", filefolder_name=f"./test_data/70B_test_torch_with_allreduce_{rank}_folder")
+            #     new_tokens = pipeline.run(file_name=f"./test_data/70B_test_flashinfer_with_allreduce_{rank}", filefolder_name=f"./test_data/70B_test_flashinfer_with_allreduce_{rank}_folder")
+            #     assert len(new_tokens) == 4, f"Expected 4 new tokens, got {len(new_tokens)}"
+            #     print("new_tokens: ", new_tokens)
+            #     # save self.kv_cache.get(0,0) to a file for debugging
+            #     # if device == "cuda:0":
+            #     #     os.makedirs("./kv_cache_testing", exist_ok=True)
+            #     #     torch.save(pipeline.kv_cache.get(0, 0)[0].cpu(), f"./kv_cache_testing/kvcache_0_0_{cycle_count}.pt")
+            #     pipeline.update(new_tokens, decode_batch_size=4)
+                
+            #     if rank == 0:
+            #         for req_idx, new_token in new_tokens:
+            #             shared_array[req_idx] = new_token[0]
+            
+            case "Execute":
+                input = request_queue.get()
+                decode_bts = shared_decode_bts.value
+
+                pipeline.update(input, decode_bts)
+                new_tokens = pipeline.run()
                 print("new_tokens: ", new_tokens, "ttft: ", time.perf_counter() - start_time)
                 if rank == 0:
-                    for req_idx, new_token in new_tokens:
-                        shared_array[req_idx] = new_token[0]
-                new_tokens.extend([(i, input_ids.copy()) for i in range(2, 4)])
-                pipeline.update(new_tokens, decode_batch_size=2)
+                    result_queue.put(new_tokens)
 
-            case "Decode":
-                # new_tokens = pipeline.run(file_name=f"./test_data/70B_test_torch_with_allreduce_{rank}", filefolder_name=f"./test_data/70B_test_torch_with_allreduce_{rank}_folder")
-                new_tokens = pipeline.run(file_name=f"./test_data/70B_test_flashinfer_with_allreduce_{rank}", filefolder_name=f"./test_data/70B_test_flashinfer_with_allreduce_{rank}_folder")
-                assert len(new_tokens) == 4, f"Expected 4 new tokens, got {len(new_tokens)}"
-                print("new_tokens: ", new_tokens)
-                # save self.kv_cache.get(0,0) to a file for debugging
-                # if device == "cuda:0":
-                #     os.makedirs("./kv_cache_testing", exist_ok=True)
-                #     torch.save(pipeline.kv_cache.get(0, 0)[0].cpu(), f"./kv_cache_testing/kvcache_0_0_{cycle_count}.pt")
-                pipeline.update(new_tokens, decode_batch_size=4)
-                
-                if rank == 0:
-                    for req_idx, new_token in new_tokens:
-                        shared_array[req_idx] = new_token[0]
-            
             case "Profile":
                 pipeline.init_profile_data()
 
