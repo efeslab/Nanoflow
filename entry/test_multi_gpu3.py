@@ -1,10 +1,69 @@
 import time
 import torch
 
-def test_correctness():
+# def test_correctness():
+#     # Spawn one worker per GPU (or per unit of parallelism).
+#     input_string = "Hi, who are you?"
+#     input_ids = tokenizer.encode(input_string)
+#     output_strings = {}
+#     request_queue = mp.Queue(maxsize=100)
+
+#     for idx in range(4):
+#         output_strings[idx] = input_ids.copy()
+#     processes = []
+#     for rank in range(world_size):
+#         start_time = time.perf_counter()
+#         # print(f"Starting process {rank} on GPU {rank}")
+#         args = (T0, rank, request_queue, shared_decode_bts, shared_array, barrier, pipeline_list[rank], command, input_ids)
+#         p = mp.Process(target=worker, args=args)
+
+#         p.start()
+#         processes.append(p)
+#         # print(f"Process {rank} started on GPU {rank} in {time.perf_counter() - start_time:.2f} seconds")
+    
+#     command.value = b"Prefill"
+#     barrier.wait()
+#     barrier.wait()
+
+#     for i in range(2):
+#         output_strings[i].append(shared_array[i])
+
+#     command.value = b"Decode"
+#     iterations = 20
+#     for i in range(iterations):
+#         print(f"Iteration {i + 1}/{iterations}")
+#         # Set the shared task value.
+#         barrier.wait()
+
+#         barrier.wait()
+#         for i in range(4):
+#             output_strings[i].append(shared_array[i])
+    
+#     command.value = b"Terminate"
+#     # Execute the final two barrier waits so that all workers exit cleanly.
+#     barrier.wait()  # First barrier of termination iteration.
+#     barrier.wait()  # Second barrier of termination iteration.
+    
+#     print("Waiting for all processes to finish... ", time.perf_counter() - T0)
+#     # Wait for all worker processes to finish.
+#     for p in processes:
+#         p.join()
+
+#     print("All processes have finished.")
+
+#     output_text = tokenizer.batch_decode(list(output_strings.values()), skip_special_tokens=True)
+
+#     print(output_text)
+
+def test_correctness_new():
     # Spawn one worker per GPU (or per unit of parallelism).
     input_string = "Hi, who are you?"
     input_ids = tokenizer.encode(input_string)
+    input0 = [(i, input_ids.copy()) for i in range(2)]
+    input1 = [(i, input_ids.copy()) for i in range(2, 4)]
+    request_queues = [mp.Queue(maxsize=100) for _ in range(world_size)]
+    result_queue = mp.Queue(maxsize=100)
+
     output_strings = {}
     for idx in range(4):
         output_strings[idx] = input_ids.copy()
@@ -12,30 +71,40 @@ def test_correctness():
     for rank in range(world_size):
         start_time = time.perf_counter()
         # print(f"Starting process {rank} on GPU {rank}")
-        args = (T0, rank, world_size, shared_batch_size, shared_array, barrier, pipeline_list, command, input_ids)
+        args = (T0, rank, request_queues[rank], shared_decode_bts, result_queue, barrier, pipeline_list[rank], command, input_ids)
         p = mp.Process(target=worker, args=args)
 
         p.start()
         processes.append(p)
         # print(f"Process {rank} started on GPU {rank} in {time.perf_counter() - start_time:.2f} seconds")
     
-    command.value = b"Prefill"
+    command.value = b"Execute"
+    for queue in request_queues:
+        queue.put(input0)
+    shared_decode_bts.value = 0
     barrier.wait()
     barrier.wait()
 
-    for i in range(2):
-        output_strings[i].append(shared_array[i])
-
-    command.value = b"Decode"
+    new_tokens = result_queue.get()
+    for req_idx, new_token in new_tokens:
+        output_strings[req_idx].extend(new_token)
+    
+    new_tokens.extend(input1)
+    for queue in request_queues:
+        queue.put(new_tokens)
+    shared_decode_bts.value = 2
     iterations = 20
     for i in range(iterations):
         print(f"Iteration {i + 1}/{iterations}")
         # Set the shared task value.
         barrier.wait()
-
         barrier.wait()
-        for i in range(4):
-            output_strings[i].append(shared_array[i])
+        new_tokens = result_queue.get()
+        for req_idx, new_token in new_tokens:
+            output_strings[req_idx].extend(new_token)
+        for queue in request_queues:
+            queue.put(new_tokens)
+        shared_decode_bts.value = 4
     
     command.value = b"Terminate"
     # Execute the final two barrier waits so that all workers exit cleanly.
@@ -53,6 +122,90 @@ def test_correctness():
 
     print(output_text)
 
+def test_performance():
+    seq_len = 1024
+    global_batch_size = 2048
+    decode_batch_size = 640
+    prefill_batch_size = global_batch_size - decode_batch_size
+
+    prefill_context_ids = tokenizer.encode(prefill_context)  # which length is 1912.
+    prefill_input_ids = prefill_context_ids[:seq_len]
+    request_queues = [mp.Queue(maxsize=100) for _ in range(world_size)]
+    result_queue = mp.Queue(maxsize=100)
+
+    decode_inputs = []
+    output_strings = {}
+    processes = []
+    for rank in range(world_size):
+        start_time = time.perf_counter()
+        # print(f"Starting process {rank} on GPU {rank}")
+        args = (T0, rank, request_queues[rank], shared_decode_bts, result_queue, barrier, pipeline_list[rank], command)
+        p = mp.Process(target=worker, args=args)
+
+        p.start()
+        processes.append(p)
+        # print(f"Process {rank} started on GPU {rank} in {time.perf_counter() - start_time:.2f} seconds")
+    command.value = b"Execute"
+
+    for i in range(decode_batch_size):
+        output_strings[i] = prefill_input_ids.copy()
+        for queue in request_queues:
+            queue.put([(i, prefill_input_ids.copy())])
+        shared_decode_bts.value = 0
+
+        barrier.wait()
+        barrier.wait()
+
+        new_tokens = result_queue.get()
+        for req_idx, new_token in new_tokens:
+            output_strings[req_idx].extend(new_token)
+        decode_inputs.extend(new_tokens)
+        print("new_tokens: ", new_tokens)
+    
+    # prepare for the testing configuration
+    output_strings[decode_batch_size] = prefill_context_ids[:prefill_batch_size].copy()
+    decode_inputs.extend([(decode_batch_size, prefill_context_ids[:prefill_batch_size].copy())])
+    for queue in request_queues:
+        queue.put(decode_inputs)
+    shared_decode_bts.value = decode_batch_size
+
+    # pipeline.update(decode_inputs, decode_batch_size)
+
+    for i in range(decode_batch_size, decode_batch_size + 20):
+        print("Cycle: ", i - decode_batch_size)
+        next_prefill_idx = i + 1
+        # Set the shared task value.
+        barrier.wait()
+        barrier.wait()
+        new_tokens = result_queue.get()
+        for req_idx, new_token in new_tokens:
+            output_strings[req_idx].extend(new_token)
+
+        new_tokens = new_tokens[:-1]
+        assert len(new_tokens) == decode_batch_size
+
+        output_strings[next_prefill_idx] = prefill_context_ids[:prefill_batch_size].copy()
+
+        new_tokens.extend([(next_prefill_idx, prefill_context_ids[:prefill_batch_size].copy())])
+
+        for queue in request_queues:
+            queue.put(new_tokens)
+
+    command.value = b"Terminate"
+    # Execute the final two barrier waits so that all workers exit cleanly.
+    barrier.wait()  # First barrier of termination iteration.
+    barrier.wait()  # Second barrier of termination iteration.
+    
+    print("Waiting for all processes to finish... ", time.perf_counter() - T0)
+    # Wait for all worker processes to finish.
+    for p in processes:
+        p.join()
+
+    print("All processes have finished.")
+
+    output_text = tokenizer.batch_decode(list(output_strings.values())[:2], skip_special_tokens=True)
+    print(output_text)
+
 def test_profile():
     # Spawn one worker per GPU (or per unit of parallelism).
     prefill_context_ids = tokenizer.encode(prefill_context)  # which length is 1912.
@@ -60,7 +213,7 @@ def test_profile():
     for rank in range(world_size):
         start_time = time.perf_counter()
         # print(f"Starting process {rank} on GPU {rank}")
-        args = (T0, rank, world_size, shared_batch_size, shared_array, barrier, pipeline_list, command, prefill_context_ids)
+        args = (T0, rank, barrier, pipeline_list[rank], command, prefill_context_ids)
         p = mp.Process(target=worker, args=args)
 
         p.start()
@@ -95,7 +248,6 @@ if __name__ == '__main__':
 
     from core.worker import worker
     from utils.util_functions import prepare_weight
-    from multiprocessing import Value, Array, Barrier
     from transformers import AutoTokenizer
     from input_test import prefill_context
 
@@ -147,14 +299,14 @@ if __name__ == '__main__':
 
     # print("create pipeline instance, ", time.perf_counter() - T0)
     # Create a shared integer (for the task value) and a shared array to hold each worker's result.
-    command = Array('c', 32)  # A character array to hold the command string.
-    shared_batch_size = Value('i', 0)    # 'i' stands for a signed integer.
-    shared_array = Array('i', 4)  # An array of integers with length equal to world_size.
+    command = mp.Array('c', 32)  # A character array to hold the command string.
+    shared_decode_bts = mp.Value('i', 0)
 
     # Create a Barrier for world_size workers plus the main process.
-    barrier = Barrier(world_size + 1)
+    barrier = mp.Barrier(world_size + 1)
     
     print("create shared variables, ", time.perf_counter() - T0)
     
-    # test_correctness()
-    test_profile()
+    # test_correctness_new()
+    test_performance()
+    # test_profile()

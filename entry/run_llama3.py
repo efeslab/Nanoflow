@@ -27,9 +27,6 @@ tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
 # request_manager.release_request()
 # # print(request_manager.available_request_queue)
 
-global_batch_size = 2048
-decode_batch_size = 640
-
 # new_input_ids = []
 # for req in request_manager.available_request_queue:
 #     print("req.idx: ", req.req_idx)
@@ -38,7 +35,7 @@ decode_batch_size = 640
 #     new_input_ids.append((req.req_idx, req.prompt))
 # print("new_input_ids: ", new_input_ids)
 
-prefill_context_ids = tokenizer.encode(prefill_context) # which length is 1912.
+
 
 weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
 # weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
@@ -59,7 +56,12 @@ pipeline.init(weight_map_wzr, cached=True)
 # pipeline.config()
 def test_performance():
     seq_len = 1024
+    global_batch_size = 2048
+    decode_batch_size = 640
     prefill_batch_size = global_batch_size - decode_batch_size
+
+    prefill_context_ids = tokenizer.encode(prefill_context) # which length is 1912.
+
     prefill_input_ids = prefill_context_ids[:seq_len]
     output_strings = {}
     # initialize the reqs for first 384 requests
@@ -183,6 +185,8 @@ def test_one_cycle():
     print(output_text)
 
 def profile_one_cycle():
+    prefill_context_ids = tokenizer.encode(prefill_context) # which length is 1912.
+    
     pipeline.init_profile_data()
 
     stream_names = [ f"TEST_{i}" for i in range(len(pipeline.sm_counts)) ] + ["TEST_TOTAL"]
