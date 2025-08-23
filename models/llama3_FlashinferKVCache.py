@@ -48,6 +48,9 @@ class Pipeline():
         self.is_cuda_graph_enabled: bool = False
         self.plan_cuda_graph: bool = False
 
+    def set_device(self, rank, device):
+        pass
+
     def init(self, weight_path, cached=False):
         self.init_streams()
         self.init_external_data()
@@ -103,8 +106,8 @@ class Pipeline():
 
 
     def init_external_data(self):
-        # self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048, self.page_size, 1, self.device)
-        self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048* 26, self.page_size, 1, self.device)
+        self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048, self.page_size, 1, self.device)
+        # self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048* 26, self.page_size, 1, self.device)
         self.kv_cache = BatchedDistKVCache(self.kv_pool)
     
     def reset(self):
