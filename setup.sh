@@ -1,5 +1,4 @@
-git submodule init
-git submodule update --recursive
+git submodule update --init --recursive
 
 conda install -c gurobi gurobi
 
@@ -62,4 +61,4 @@ python weightSaver.py --config_path=../config_all/llama3-8B/1024.json
 
 # run llama3-8B model
 cd ../entry
-CUDA_VISIBLE_DEVICES=0 python run_llama3.py
+CUDA_VISIBLE_DEVICES=0 python run_llama3.py -l

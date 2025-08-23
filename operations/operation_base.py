@@ -158,7 +158,7 @@ class Operations():
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
 
-            # g = torch.cuda.CUDAGraph()
+            g = torch.cuda.CUDAGraph()
             for _, impl in self.impl_map.items():
                 self.impl = impl(self, self.stream, self.device)
                 category_tag = impl.category_tag
@@ -170,7 +170,7 @@ class Operations():
                 for impl_tag, para_map in self.impl_configs_map[category_tag]:
                     self.impl.config(impl_tag, para_map)
                     self.profile_update()
-                    # g.reset()
+                    g.reset()
 
                     # warm up for 10 cycles.
                     for _ in range(10):
@@ -178,18 +178,18 @@ class Operations():
 
                     # # prepare a graph for 100 cycles.
                     rounds = 100
-                    # with torch.cuda.graph(g, stream=self.stream):
-                    #     for round in range(rounds):
-                    #         self.profile_run()
+                    with torch.cuda.graph(g, stream=self.stream):
+                        for round in range(rounds):
+                            self.profile_run()
                     # torch.cuda.synchronize()
 
-                    # self.profile_run()
+                    self.profile_run()
 
                     start.record(self.stream)
                     with torch.cuda.stream(self.stream):
-                        # g.replay()
-                        for round in range(rounds):
-                            self.profile_run()
+                        g.replay()
+                        # for round in range(rounds):
+                        #     self.profile_run()
                     end.record(self.stream)
                     torch.cuda.synchronize()
                     elapsed_ms = start.elapsed_time(end)
