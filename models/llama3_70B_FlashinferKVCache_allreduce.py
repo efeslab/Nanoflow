@@ -458,7 +458,7 @@ class Pipeline():
         bufferAllocator.allocate_buffer(self.device)
         print(f"Total allocated: {bufferAllocator.total_allocated / 1024 / 1024} MB in {self.device}")
 
-    def update(self, new_input_infos, decode_batch_size = 0, is_profile = False, stream_name: str = "TEST_TOTAL", profile_result_path: Optional[str] = None, use_cuda_graph: bool = False, use_nano_split: bool = False):
+    def update(self, new_input_infos, decode_batch_size = 0, is_profile = False, stream_name: str = "TEST_TOTAL", profile_result_path: Optional[str] = None, use_auto_search: bool = False, use_nano_split: bool = False, use_cuda_graph: bool = False):
         # preprocess new_input_infos
         with prof_marker("update_step_0"):
             self.input_req_idx = []
@@ -489,13 +489,12 @@ class Pipeline():
             self.is_cuda_graph_enabled = False
         self.is_cuda_graph_enabled = use_cuda_graph
 
-        if profile_result_path is not None:
-            self.is_auto_search_enabled = True
+        self.is_auto_search_enabled = use_auto_search
+        if profile_result_path is not None and use_auto_search:
             with open(profile_result_path, "r") as f:
                 self.profile_result = json.load(f)
-        else:
-            self.is_auto_search_enabled = False
-            self.profile_result = None
+        elif profile_result_path is None and use_auto_search:
+            raise ValueError("profile_result_path must be provided when use_auto_search is True")
         
         # update if batch size or decode batch size has changed
         if not self.buffer_fixed:
