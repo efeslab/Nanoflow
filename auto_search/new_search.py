@@ -344,8 +344,8 @@ for combo in itertools.product(*category_lists):
     for idx in range(num_categories):
         op = combo[idx]
         other_ops = combo[:idx] + combo[idx+1:]
-        print(f"Adding resource constraints for {op.name} in category {idx}")
-        print(f"Other operations in the combination: {[other_op.name for other_op in other_ops]}")
+        # print(f"Adding resource constraints for {op.name} in category {idx}")
+        # print(f"Other operations in the combination: {[other_op.name for other_op in other_ops]}")
         # Add constraints for each operation in the combination
         second_stage_model.addConstr(op.p_choice + gp.quicksum(other_op.p_choice * is_overlapping[(op.name, other_op.name)] for other_op in other_ops) <= full_sm_counts,
                                      name=f"resource_constraint_{op.name}_category_{idx}")

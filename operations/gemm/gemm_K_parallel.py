@@ -55,11 +55,11 @@ class GEMM_K_Parallel(Operations):
         #     self.add_impl(GEMMCudaImpl)
     
     def setShape(self, N, K, tp_idx=0, tp_size=1):
+        self.N = N
+        self.K = K
         self.tp_idx = tp_idx
         self.tp_size = tp_size
         # print("tp_idx", self.tp_idx, "tp_size", self.tp_size)
-        self.N = N
-        self.K = K
         self.tp_N = N
         self.tp_K = K // tp_size
         print("name", self.name, "N:", self.tp_N, "K:", self.tp_K)
@@ -129,8 +129,8 @@ class GEMM_K_Parallel(Operations):
 
     def run(self, layer):
         with prof_marker("GEMM_run"):
-            # with prof_marker("Allocate Sliced C"):
-            C = self.inputs["C"].tensor if self.bias else torch.empty((self.batch_size, self.N), dtype=torch.float16, device=self.device)
+            with prof_marker("Assign C"):
+                C = self.inputs["C"].tensor if self.bias else None
             self.impl.run(self.inputs["A"].tensor, self.weights["B"].weight_map[layer], C, self.outputs["D"].tensor)
 
     def profile_run(self):

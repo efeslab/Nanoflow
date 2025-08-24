@@ -55,11 +55,11 @@ class GEMM_N_Parallel(Operations):
         #     self.add_impl(GEMMCudaImpl)
     
     def setShape(self, N, K, tp_idx=0, tp_size=1):
+        self.N = N
+        self.K = K
         self.tp_idx = tp_idx
         self.tp_size = tp_size
         # print("tp_idx", self.tp_idx, "tp_size", self.tp_size)
-        self.N = N
-        self.K = K
         self.tp_N = N // tp_size
         self.tp_K = K
         print("name", self.name, "N:", self.tp_N, "K:", self.tp_K)

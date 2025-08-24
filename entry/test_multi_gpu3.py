@@ -124,39 +124,57 @@ def test_correctness_new():
 
 def test_performance():
     seq_len = 1024
+    # global_batch_size = 1024
     global_batch_size = 2048
+    # decode_batch_size = 128
     decode_batch_size = 640
     prefill_batch_size = global_batch_size - decode_batch_size
 
     prefill_context_ids = tokenizer.encode(prefill_context)  # which length is 1912.
     prefill_input_ids = prefill_context_ids[:seq_len]
-    request_queues = [mp.Queue(maxsize=100) for _ in range(world_size)]
-    result_queue = mp.Queue(maxsize=100)
+    request_queues = [mp.Queue(maxsize=1000) for _ in range(world_size)]
+    result_queue = mp.Queue(maxsize=1000)
 
+    prefill_inputs = []
     decode_inputs = []
     output_strings = {}
     processes = []
     for rank in range(world_size):
         start_time = time.perf_counter()
         # print(f"Starting process {rank} on GPU {rank}")
-        args = (T0, rank, request_queues[rank], shared_decode_bts, result_queue, barrier, pipeline_list[rank], command)
+        args = (T0, rank, request_queues[rank], shared_decode_bts, result_queue, barrier, pipeline_list[rank], use_auto_search, use_nanosplit, use_cuda_graph, command)
         p = mp.Process(target=worker, args=args)
 
         p.start()
         processes.append(p)
         # print(f"Process {rank} started on GPU {rank} in {time.perf_counter() - start_time:.2f} seconds")
     command.value = b"Execute"
+    shared_decode_bts.value = 0
+    use_auto_search.value = 0
+    use_nanosplit.value = 0
+    use_cuda_graph.value = 0
 
-    for i in range(decode_batch_size):
-        output_strings[i] = prefill_input_ids.copy()
+    group_prefill_size = 16
+    cycles = (decode_batch_size + group_prefill_size - 1) // group_prefill_size
+
+
+    for i in range(cycles):
+        prefill_inputs = []
+        if i == cycles - 1:
+            for j in range(i * group_prefill_size, decode_batch_size):
+                prefill_inputs.append((j, prefill_input_ids.copy()))
+                output_strings[j] = prefill_input_ids.copy()
+        else:
+            for j in range(i * group_prefill_size, (i + 1) * group_prefill_size):
+                prefill_inputs.append((j, prefill_input_ids.copy()))
+                output_strings[j] = prefill_input_ids.copy()
         for queue in request_queues:
-            queue.put([(i, prefill_input_ids.copy())])
-        shared_decode_bts.value = 0
+            queue.put_nowait(prefill_inputs)
 
         barrier.wait()
         barrier.wait()
 
-        new_tokens = result_queue.get()
+        new_tokens = result_queue.get(timeout=1)
         for req_idx, new_token in new_tokens:
             output_strings[req_idx].extend(new_token)
         decode_inputs.extend(new_tokens)
@@ -166,10 +184,11 @@ def test_performance():
     output_strings[decode_batch_size] = prefill_context_ids[:prefill_batch_size].copy()
     decode_inputs.extend([(decode_batch_size, prefill_context_ids[:prefill_batch_size].copy())])
     for queue in request_queues:
-        queue.put(decode_inputs)
+        queue.put_nowait(decode_inputs)
     shared_decode_bts.value = decode_batch_size
-
-    # pipeline.update(decode_inputs, decode_batch_size)
+    use_auto_search.value = 1
+    use_nanosplit.value = 1
+    use_cuda_graph.value = 0
 
     for i in range(decode_batch_size, decode_batch_size + 20):
         print("Cycle: ", i - decode_batch_size)
@@ -177,11 +196,12 @@ def test_performance():
         # Set the shared task value.
         barrier.wait()
         barrier.wait()
-        new_tokens = result_queue.get()
+        new_tokens = result_queue.get(timeout=1)
         for req_idx, new_token in new_tokens:
             output_strings[req_idx].extend(new_token)
 
         new_tokens = new_tokens[:-1]
+        print("new_tokens: ", new_tokens)
         assert len(new_tokens) == decode_batch_size
 
         output_strings[next_prefill_idx] = prefill_context_ids[:prefill_batch_size].copy()
@@ -189,7 +209,9 @@ def test_performance():
         new_tokens.extend([(next_prefill_idx, prefill_context_ids[:prefill_batch_size].copy())])
 
         for queue in request_queues:
-            queue.put(new_tokens)
+            queue.put_nowait(new_tokens)
+
+    print("Start to terminate")
 
     command.value = b"Terminate"
     # Execute the final two barrier waits so that all workers exit cleanly.
@@ -210,15 +232,18 @@ def test_profile():
     # Spawn one worker per GPU (or per unit of parallelism).
     prefill_context_ids = tokenizer.encode(prefill_context)  # which length is 1912.
     processes = []
+    request_queues = [mp.Queue(maxsize=1000) for _ in range(world_size)]
+    result_queue = mp.Queue(maxsize=1000)
     for rank in range(world_size):
         start_time = time.perf_counter()
         # print(f"Starting process {rank} on GPU {rank}")
-        args = (T0, rank, barrier, pipeline_list[rank], command, prefill_context_ids)
+        args = (T0, rank, request_queues[rank], shared_decode_bts, result_queue, barrier, pipeline_list[rank], 0, 0, 0, command)
         p = mp.Process(target=worker, args=args)
 
         p.start()
         processes.append(p)
         # print(f"Process {rank} started on GPU {rank} in {time.perf_counter() - start_time:.2f} seconds")
+        request_queues[rank].put_nowait(prefill_context_ids)
     
     command.value = b"Profile"
     barrier.wait()
@@ -301,6 +326,9 @@ if __name__ == '__main__':
     # Create a shared integer (for the task value) and a shared array to hold each worker's result.
     command = mp.Array('c', 32)  # A character array to hold the command string.
     shared_decode_bts = mp.Value('i', 0)
+    use_auto_search = mp.Value('i', 0)
+    use_nanosplit = mp.Value('i', 0)
+    use_cuda_graph = mp.Value('i', 0)
 
     # Create a Barrier for world_size workers plus the main process.
     barrier = mp.Barrier(world_size + 1)

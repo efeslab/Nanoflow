@@ -57,12 +57,12 @@ class Activation(Operations):
             self.add_impl(SiluMultiplyCudaImpl)
         
     def setShape(self, N, tp_idx=0, tp_size=1):
-        self.N = N // tp_size
+        self.N = N
         self.tp_idx = tp_idx
         self.tp_size = tp_size
-        tp_N = N // tp_size
-        self.inputs["input"].init_shape((0, tp_N * 2))
-        self.outputs["output"].init_shape((0, tp_N))
+        self.tp_N = N // tp_size
+        self.inputs["input"].init_shape((0, self.tp_N * 2))
+        self.outputs["output"].init_shape((0, self.tp_N))
     
     def copy_nano(self, index):
         new_op = Activation(self.name, self.device, nano_idx=index)
@@ -91,7 +91,7 @@ class Activation(Operations):
         self.cursor.execute(f'''
             INSERT OR IGNORE INTO {category_tag} (batch_size, sm_count, hidden_dim, average_time_ms)
             VALUES (?, ?, ?, ?);
-        ''', (self.batch_size, self.sm_count, self.N, average_elapsed_ms))
+        ''', (self.batch_size, self.sm_count, self.tp_N, average_elapsed_ms))
 
     def run(self):
         self.impl.run(self.inputs["input"].tensor, self.outputs["output"].tensor)
