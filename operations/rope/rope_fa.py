@@ -15,12 +15,12 @@ class RopeAppendBatchedFAImpl(OperationImpl):
     category_tag = "flash_attn_batched"  # type: ignore[assignment]
 
     def __init__(
-        self, op_base: "RopeAppendBatched", stream: torch.cuda.Stream, device_id: int
+        self, op_base: "RopeAppendBatched", stream: torch.cuda.Stream, device: str,
     ):
         self.op_base: RopeAppendBatched
-        super().__init__(op_base, stream, device_id)
+        super().__init__(op_base, stream, device)
         self.rope_type = op_base.rope_type
-        self.device_id = device_id
+        self.device = device
         if self.rope_type == "llama3":
             self.base = 500000.0
             self.rotary_dim = 128
@@ -33,7 +33,7 @@ class RopeAppendBatchedFAImpl(OperationImpl):
         self.num_qo_heads = int(op_base.num_qo_heads)  # type: ignore
         self.head_dim = int(op_base.head_dim)  # type: ignore
         self.cache = self._compute_cos_sin_cache().to(
-            dtype=torch.float16, device=f"cuda:{device_id}"
+            dtype=torch.float16, device=device
         )
 
     def _compute_inv_freq(self, base: float) -> torch.Tensor:
@@ -162,9 +162,9 @@ class RopeAppendBatchedFAImpl(OperationImpl):
                 KVCache.store_last_kv(
                     k,
                     v,
-                    self.op_base.io_device.tensor_offset,
-                    self.op_base.io_device.tensor_offset
-                    + self.op_base.io_device.batch_size,
+                    self.op_base.tensor_offset,
+                    self.op_base.tensor_offset
+                    + self.op_base.batch_size,
                 )
 
 
@@ -179,12 +179,12 @@ class RopeAppendBatchedvLLMImpl(OperationImpl):
     category_tag = "vllm"  # type: ignore[assignment]
 
     def __init__(
-        self, op_base: "RopeAppendBatched", stream: torch.cuda.Stream, device_id: int
+        self, op_base: "RopeAppendBatched", stream: torch.cuda.Stream, device: str,
     ):
         self.op_base: RopeAppendBatched
-        super().__init__(op_base, stream, device_id)
+        super().__init__(op_base, stream, device)
         self.rope_type = op_base.rope_type
-        self.device_id = device_id
+        self.device = device
         if self.rope_type == "llama3":
             self.base = 500000.0
             self.rotary_dim = 128
@@ -197,7 +197,7 @@ class RopeAppendBatchedvLLMImpl(OperationImpl):
         self.num_qo_heads = int(op_base.num_qo_heads)  # type: ignore
         self.head_dim = int(op_base.head_dim)  # type: ignore
         self.cache = self._compute_cos_sin_cache().to(
-            dtype=torch.float16, device=f"cuda:{device_id}"
+            dtype=torch.float16, device=device
         )
 
     def _compute_cos_sin_cache(self) -> torch.Tensor:
@@ -275,9 +275,9 @@ class RopeAppendBatchedvLLMImpl(OperationImpl):
                 KVCache.store_last_kv(
                     k,
                     v,
-                    self.op_base.io_device.tensor_offset,
-                    self.op_base.io_device.tensor_offset
-                    + self.op_base.io_device.batch_size,
+                    self.op_base.tensor_offset,
+                    self.op_base.tensor_offset
+                    + self.op_base.batch_size,
                 )
 
 
@@ -319,6 +319,8 @@ class RopeAppendBatched(Operations):
         self.op_layer = RopeAppendBatched_Layer
         self.start_req_idx: int
         self.end_req_idx: int
+        self.tensor_offset: int
+        self.batch_size: int
         self.qo_indices: torch.Tensor
         self.seqlens: torch.Tensor
         self.max_seqlen: int
@@ -342,18 +344,20 @@ class RopeAppendBatched(Operations):
             (0, self.num_qo_heads * self.head_dim // self.tp_size)
         )
 
-    def update(self, qo_indices: list[int], decode_batchsize: int, device_id: int):
+    def update(self, qo_indices: list[int], decode_batchsize: int, device: str):
         if self.isNanoSplit:
             for nano_op in self.nano_ops:
-                nano_op.update(qo_indices, decode_batchsize, device_id)
+                nano_op.update(qo_indices, decode_batchsize, device)
         else:
             """Stores the starting indices for the query/key segments."""
-            self.io_device = self.children[device_id].inputs["kqv"]
+            io_device = self.inputs["kqv"]
+            self.tensor_offset = io_device.tensor_offset
+            self.batch_size = io_device.batch_size
             self.start_req_idx = tensor_offset_to_req_idx(
-                qo_indices, self.io_device.tensor_offset
+                qo_indices, io_device.tensor_offset
             )
             self.end_req_idx = tensor_offset_to_req_idx(
-                qo_indices, self.io_device.tensor_offset + self.io_device.batch_size
+                qo_indices, io_device.tensor_offset + io_device.batch_size
             )
             if self.start_req_idx == self.end_req_idx:
                 return
@@ -361,7 +365,7 @@ class RopeAppendBatched(Operations):
                 torch.tensor(
                     qo_indices[self.start_req_idx : self.end_req_idx + 1],
                     dtype=torch.int32,
-                    device=f"cuda:{device_id}",
+                    device=device,
                 )
                 - qo_indices[self.start_req_idx]
             )
@@ -380,13 +384,13 @@ class RopeAppendBatched(Operations):
                     self.qo_indices[i] : self.qo_indices[i] + seqlen
                 ] = (i + self.start_req_idx)
             self.qo_indices = self.qo_indices.to(
-                dtype=torch.int32, device=f"cuda:{device_id}"
+                dtype=torch.int32, device=device
             )
             self.per_token_offset = self.per_token_offset.to(
-                dtype=torch.long, device=f"cuda:{device_id}"
+                dtype=torch.long, device=device
             )
             self.rev_input_indptr = self.rev_input_indptr.to(
-                dtype=torch.int32, device=f"cuda:{device_id}"
+                dtype=torch.int32, device=device
             )
             if isinstance(self.externals["KVCache"], KVCachevLLM):
                 self.slot_mapping = self.externals["KVCache"].get_slot_mapping(

@@ -157,11 +157,11 @@ class DecPagedAttn(Operations):
             (0, num_qo_heads * head_dim)
         )
 
-    def update(self, cumsum_input: list[int], device_id: int):
+    def update(self, cumsum_input: list[int], device: str):
         self.qo_indicies = torch.tensor(
-            cumsum_input, dtype=torch.int32, device=f"cuda:{device_id}"
+            cumsum_input, dtype=torch.int32, device=device
         )
-        io_device = self.children[device_id].inputs["Q"]
+        io_device = self.inputs["Q"]
         self.start_req_idx = tensor_offset_to_req_idx(
             self.qo_indicies.tolist(), io_device.tensor_offset
         )
