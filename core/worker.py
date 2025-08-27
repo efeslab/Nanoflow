@@ -1,7 +1,7 @@
 import time
-import nvtx
 import torch
 import torch.multiprocessing as mp
+from utils.prof_marker import prof_marker
 
 weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
 profile_result_path = "../auto_search/70B_search_result.json"
@@ -54,15 +54,15 @@ def worker(start_time, rank, request_queue: mp.Queue, shared_decode_bts, result_
             
             case "Execute":
                 time.sleep(0.01)
-                with nvtx.annotate(f"Worker {rank} Execute S1", color="blue"):
+                with prof_marker(f"Worker {rank} Execute S1", color="blue"):
                     input = request_queue.get(timeout=1)
                     decode_bts = shared_decode_bts.value
-                with nvtx.annotate(f"Worker {rank} Execute S2", color="blue"):
+                with prof_marker(f"Worker {rank} Execute S2", color="blue"):
                     pipeline.update(input, decode_batch_size=decode_bts, profile_result_path=profile_result_path, use_auto_search=use_auto_search.value, use_nano_split=use_nanosplit.value, use_cuda_graph=use_cuda_graph.value)
-                with nvtx.annotate(f"Worker {rank} Execute S3", color="blue"):
+                with prof_marker(f"Worker {rank} Execute S3", color="blue"):
                     new_tokens = pipeline.run()
                 # print("new_tokens: ", new_tokens, "ttft: ", time.perf_counter() - start_time)
-                with nvtx.annotate(f"Worker {rank} Execute S4", color="blue"):
+                with prof_marker(f"Worker {rank} Execute S4", color="blue"):
                     if rank == 0:
                         result_queue.put_nowait(new_tokens)
 

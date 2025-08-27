@@ -2,6 +2,7 @@ import copy
 import torch
 import os
 
+from operations.allreduce.allreduce import AllReduce
 from operations.operation_base import NanoOpInfo, Operations
 from operations.activation.silu import Activation
 from operations.embedding.embedding import GenEmbedding
@@ -29,9 +30,9 @@ pf_stream_sm = 16
 
 
 class Pipeline:
-    def __init__(self, max_seq_len: int = 1024, max_batch_size: int = 768):
+    def __init__(self, TP_idx: int, TP_size: int, max_seq_len: int = 1024, max_batch_size: int = 768):
         # Set parameters as instance variables.
-        self.pipeline_name = "Llama3-8B"
+        self.pipeline_name = "Llama3-8B-TP2"
         self.num_kv_heads = 8
         self.num_qo_heads = 32
         self.kqv_heads = self.num_qo_heads + 2 * self.num_kv_heads
@@ -46,6 +47,10 @@ class Pipeline:
         self.layer_list = [i for i in range(self.num_layers)]
         self.num_devices = torch.cuda.device_count()
         self.page_size = 64
+        self.tp_idx = TP_idx
+        self.tp_size = TP_size
+        self.pp_size = 1
+        self.dp_size = 1
         self.max_seq_len = max_seq_len
         self.kv_cache: KVCachevLLM
 
@@ -69,6 +74,7 @@ class Pipeline:
         gemm_stream_with_pf, pf_stream = create_streams_with_cumask(
             [gemm_stream_with_pf_sm, gemm_stream_with_dc_sm], self.device
         )
+        network_stream = torch.cuda.Stream()
 
         self.streams = {
             "GEMM": (gemm_stream, None),
@@ -76,6 +82,7 @@ class Pipeline:
             "GEMM_WITH_PF": (gemm_stream_with_pf, None),
             "DC_ATTN": (dc_stream, None),
             "PF_ATTN": (pf_stream, None),
+            "NETWORK": (network_stream, None),
         }
 
     def init_external_data(self, for_test=False):
@@ -85,6 +92,7 @@ class Pipeline:
             head_dim=self.head_dim,
             max_seqlen=self.max_seq_len,
             max_batch_size=self.max_batch_size,
+            tp_size=self.tp_size,
         )
 
     def init_operations(self):
@@ -97,6 +105,7 @@ class Pipeline:
             .first_only()
         )
         self.gen_embedding_layers = self.gen_embedding.expand_layer(self.layer_list)
+        
 
         self.layerNormAttn = LayerNorm("LayerNormAttn", self.device).setWeightName(
             "model.layers.{layer}.input_layernorm.weight"
@@ -128,6 +137,9 @@ class Pipeline:
             "model.layers.{layer}.self_attn.o_proj.weight"
         )
         self.o_layers = self.o.expand_layer(self.layer_list)
+
+        self.allReduce_o = AllReduce("AllReduceO", self.device)
+        self.allReduce_o_layers = self.allReduce_o.expand_layer(self.layer_list)
 
         self.layerNormFFN = LayerNorm("LayerNormFFN", self.device).setWeightName(
             "model.layers.{layer}.post_attention_layernorm.weight"
@@ -239,7 +251,8 @@ class Pipeline:
         self.pfAttn.outputs["output"] >> self.redist_a.inputs["input_1"]
         self.redist_a.outputs["output_0"] >> self.o.inputs["A"]
 
-        self.o.outputs["D"] >> self.copy_o.inputs["input_0"]
+        self.o.outputs["D"] >> self.allReduce_o.inputs["input"]
+        self.allReduce_o.outputs["output"] >> self.copy_o.inputs["input_0"]
         self.copy_o.outputs["output_0"] >> self.layerNormFFN.inputs["input"]
         self.copy_o.outputs["output_1"] >> self.d.inputs["C"]
 
@@ -249,7 +262,8 @@ class Pipeline:
 
         self.activation.outputs["output"] >> self.d.inputs["A"]
 
-        self.d.outputs["D"] >> self.copy_d.inputs["input_0"]
+        self.d.outputs["D"] >> self.allReduce_d.inputs["input"]
+        self.allReduce_d.outputs["output"] >> self.copy_d.inputs["input_0"]
         self.copy_d.outputs["output_0"] >> (self.copy_embedding.inputs["input_1"], True)
         self.copy_d.outputs["output_1"] >> self.modelLayerNorm.inputs["input"]
 
@@ -271,19 +285,21 @@ class Pipeline:
         self.global_input.setShape()
         self.gen_embedding.setShape(self.hidden_dim, self.vocab_size)
         self.layerNormAttn.setShape(self.hidden_dim)
-        self.kqv.setShape(self.kqv_heads * self.head_dim, self.hidden_dim).setParameter(
+        self.kqv.setShape(self.kqv_heads * self.head_dim, self.hidden_dim, tp_idx=self.tp_idx, tp_size=self.tp_size).setParameter(
             1.0, 0.0
         )
-        self.decAttn.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim)
-        self.pfAttn.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim)
-        self.ropeAppend.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim)
-        self.o.setShape(self.hidden_dim, self.hidden_dim).setParameter(1.0, 1.0)
+        self.decAttn.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim, tp_size=self.tp_size)
+        self.pfAttn.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim, tp_size=self.tp_size)
+        self.ropeAppend.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim, tp_size=self.tp_size)
+        self.o.setShape(self.hidden_dim, self.hidden_dim, tp_idx=self.tp_idx, tp_size=self.tp_size).setParameter(1.0, 1.0)
+        self.allReduce_o.setShape(self.hidden_dim, tp_idx=self.tp_idx, tp_size=self.tp_size)
         self.layerNormFFN.setShape(self.hidden_dim)
-        self.ug.setShape(self.intermediate_dim * 2, self.hidden_dim).setParameter(
+        self.ug.setShape(self.intermediate_dim * 2, self.hidden_dim, tp_idx=self.tp_idx, tp_size=self.tp_size).setParameter(
             1.0, 0.0
         )
-        self.d.setShape(self.hidden_dim, self.intermediate_dim).setParameter(1.0, 1.0)
-        self.activation.setShape(self.intermediate_dim)
+        self.activation.setShape(self.intermediate_dim, tp_idx=self.tp_idx, tp_size=self.tp_size)
+        self.d.setShape(self.hidden_dim, self.intermediate_dim, tp_idx=self.tp_idx, tp_size=self.tp_size).setParameter(1.0, 1.0)
+        self.allReduce_d.setShape(self.hidden_dim, tp_idx=self.tp_idx, tp_size=self.tp_size)
         self.modelLayerNorm.setShape(self.hidden_dim)
         self.getLogits.setShape(self.vocab_size, self.hidden_dim).setParameter(1.0, 0.0)
         self.sample.setShape(self.vocab_size)
@@ -343,6 +359,7 @@ class Pipeline:
         self.decAttn.set_stream(self.streams["DC_ATTN"])
         self.pfAttn.set_stream(self.streams["PF_ATTN"])
         self.o.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
+        self.allReduce_o.set_stream(self.streams["NETWORK"])
         self.layerNormFFN.set_stream(
             [self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]]
         )
@@ -351,6 +368,7 @@ class Pipeline:
             [self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]]
         )
         self.d.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
+        self.allReduce_d.set_stream(self.streams["NETWORK"])
         self.modelLayerNorm.set_stream(self.streams["GEMM"])
         self.sample.set_stream(self.streams["GEMM"])
         self.getLogits.set_stream(self.streams["GEMM"])
