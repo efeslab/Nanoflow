@@ -40,6 +40,7 @@ tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
 weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
 # weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
 # weight_map_amd_kan = "/work1/kasikci/kanzhu/models/llama3-8b"
+# weight_map_yi = "/app/llama3-8b"
 if args.load_hf_weight:
     pipeline_weight_list = [
         (i, f"cuda:{i}", Pipeline()) for i in range(1)

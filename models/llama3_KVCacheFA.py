@@ -49,7 +49,8 @@ class Pipeline:
         self.max_seq_len = max_seq_len
         self.kv_cache: KVCachevLLM
 
-    def set_device(self, device: str):
+    def set_device(self, rank: int, device: str):
+        self.rank = rank
         self.device = device
 
     def init(self, weight_path, cached=False):
@@ -263,7 +264,7 @@ class Pipeline:
             operation.checkConnection()
 
     def init_executor(self):
-        # assert 0 <= device_id < self.num_cuda_devices, "device_id should be in range [0, num_devices)"
+        # assert 0 <= device_id < self.num_devices, "device_id should be in range [0, num_devices)"
         self.executor = Executor(self.op_layers, self.layer_list)
         self.executor.plan_layer_ordering()
 
@@ -398,6 +399,10 @@ class Pipeline:
         decode_batch_size=0,
         is_profile=False,
         stream_name: str = "GEMM_Test",
+        profile_result_path: str = None,
+        use_auto_search: bool = False,
+        use_nano_split: bool = False,
+        use_cuda_graph: bool = False,
     ):
         self.input_req_idx = []
         self.input_ids = []
@@ -420,7 +425,8 @@ class Pipeline:
                 # print("decode_batchsize: ", decode_batchsize)
                 self.clear_batch_size()
                 self.config_batch_size(decode_batch_size)
-                self.nanobatch_split(self.batch_size, decode_batch_size)
+                if use_nano_split:
+                    self.nanobatch_split(self.batch_size, decode_batch_size)
                 self.update_allocate_buffers()
                 # print("finish update_allocate_buffers")
                 self.config_streams()
