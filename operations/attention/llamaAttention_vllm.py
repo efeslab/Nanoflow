@@ -151,10 +151,10 @@ class DecPagedAttn(Operations):
         self.num_qo_heads = num_qo_heads // tp_size
         self.head_dim = head_dim
         self.inputs["Q"].init_shape(
-            (0, num_qo_heads * head_dim)
+            (0, self.num_qo_heads * self.head_dim)
         )
         self.outputs["output"].init_shape(
-            (0, num_qo_heads * head_dim)
+            (0, self.num_qo_heads * self.head_dim)
         )
 
     def update(self, cumsum_input: list[int], device: str):
