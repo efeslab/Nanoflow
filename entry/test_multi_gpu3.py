@@ -281,6 +281,7 @@ if __name__ == '__main__':
     # from models.llama3_70B_FlashinferKVCache_allgather import Pipeline
     # from models.llama3_70B_KVCacheTorch_allreduce import Pipeline
     from models.llama3_70B_FlashinferKVCache_allreduce import Pipeline
+    # from models.llama3_8B_KVCacheFA_TP2 import Pipeline
 
     print("import modules, ", time.perf_counter() - T0)
     mp.set_start_method('spawn')

@@ -1,6 +1,7 @@
 import copy
 import torch
 import os
+import torch.distributed as dist
 
 from operations.allreduce.allreduce import AllReduce
 from operations.operation_base import NanoOpInfo, Operations
@@ -8,6 +9,7 @@ from operations.activation.silu import Activation
 from operations.embedding.embedding import GenEmbedding
 from operations.globalOp.globalOp import GlobalInput, GlobalOutput
 from operations.gemm.gemm_N_parallel import GEMM_N_Parallel
+from operations.gemm.gemm_K_parallel import GEMM_K_Parallel
 from operations.norm.rmsnorm import LayerNorm
 from operations.rope.rope_fa import RopeAppendBatched
 from operations.sampling.max_sampling import Sampling
@@ -54,7 +56,8 @@ class Pipeline:
         self.max_seq_len = max_seq_len
         self.kv_cache: KVCachevLLM
 
-    def set_device(self, device: str):
+    def set_device(self, rank: int, device: str):
+        self.rank = rank
         self.device = device
 
     def init(self, weight_path, cached=False):
@@ -64,6 +67,8 @@ class Pipeline:
         self.init_dependency()
         self.init_set_shape()
         self.init_set_weight(weight_path, cached)
+        self.config_network(self.rank)
+        self.update_network_ops()
 
     def init_streams(self):
         self.main_stream = torch.cuda.Stream()
@@ -92,6 +97,7 @@ class Pipeline:
             head_dim=self.head_dim,
             max_seqlen=self.max_seq_len,
             max_batch_size=self.max_batch_size,
+            device_id=self.rank,
             tp_size=self.tp_size,
         )
 
@@ -133,7 +139,7 @@ class Pipeline:
         self.pfAttn.externals["KVCache"] = self.kv_cache
         self.pfAttn_layers = self.pfAttn.expand_layer(self.layer_list)
 
-        self.o = GEMM_N_Parallel("O", self.device, bias=True).setWeightName(
+        self.o = GEMM_K_Parallel("O", self.device, bias=True).setWeightName(
             "model.layers.{layer}.self_attn.o_proj.weight"
         )
         self.o_layers = self.o.expand_layer(self.layer_list)
@@ -157,10 +163,13 @@ class Pipeline:
         self.activation = Activation("Activation", self.device)
         self.activation_layers = self.activation.expand_layer(self.layer_list)
 
-        self.d = GEMM_N_Parallel("D", self.device, bias=True).setWeightName(
+        self.d = GEMM_K_Parallel("D", self.device, bias=True).setWeightName(
             "model.layers.{layer}.mlp.down_proj.weight"
         )
         self.d_layers = self.d.expand_layer(self.layer_list)
+
+        self.allReduce_d = AllReduce("AllReduceD", self.device)
+        self.allReduce_d_layers = self.allReduce_d.expand_layer(self.layer_list)
 
         self.getLogits = (
             GEMM_N_Parallel("GetLogits", self.device)
@@ -208,10 +217,12 @@ class Pipeline:
             self.decAttn,
             self.pfAttn,
             self.o,
+            self.allReduce_o,
             self.layerNormFFN,
             self.ug,
             self.activation,
             self.d,
+            self.allReduce_d,
             self.modelLayerNorm,
             self.getLogits,
             self.sample,
@@ -277,7 +288,7 @@ class Pipeline:
             operation.checkConnection()
 
     def init_executor(self):
-        # assert 0 <= device_id < self.num_cuda_devices, "device_id should be in range [0, num_devices)"
+        # assert 0 <= device_id < self.num_devices, "device_id should be in range [0, num_devices)"
         self.executor = Executor(self.op_layers, self.layer_list)
         self.executor.plan_layer_ordering()
 
@@ -337,11 +348,20 @@ class Pipeline:
         self.ropeAppend.config_tag(["flash_attn_batched", "flash_attn_batched"])
         self.layerNormFFN.config_tag(["torch", "torch"])
         self.o.config_tag([gemm_tag, gemm_tag])
+        self.allReduce_o.config_tag("torch")
         self.ug.config_tag([gemm_tag, gemm_tag])
         self.d.config_tag([gemm_tag, gemm_tag])
+        self.allReduce_d.config_tag("torch")
         self.modelLayerNorm.config_tag("torch")
         self.sample.config_tag(gemm_tag)
         self.getLogits.config_tag(gemm_tag)
+
+    def config_network(self, rank=0):
+        dist.init_process_group(backend="nccl", rank=rank, world_size=self.num_devices)
+        tp_group_idx = self.tp_idx // self.tp_size
+        print("tp_group_idx: ", tp_group_idx, "tp_size: ", self.tp_size)
+        self.tp_group = dist.new_group(ranks=[i for i in range(tp_group_idx * self.tp_size, (tp_group_idx + 1) * self.tp_size)])
+        # print("tp_group in main: ", self.tp_group)
 
     def config_streams(self):
         # manually set streams for running.
@@ -377,6 +397,10 @@ class Pipeline:
     def profile_config_streams(self, stream_tuple):
         for operation in self.operation_list:
             operation.set_stream(stream_tuple)
+
+    def update_network_ops(self):
+        self.allReduce_o.update(self.tp_group)
+        self.allReduce_d.update(self.tp_group)
 
     def nanobatch_split(self, total_batchsize, decode_batchsize):
         info = (
