@@ -338,10 +338,10 @@ class RopeAppendBatched(Operations):
         self.head_dim = head_dim
         self.tp_size = tp_size
         self.inputs["kqv"].init_shape(
-            (0, (self.num_qo_heads + 2 * self.num_kv_heads) * self.head_dim // self.tp_size)
+            (0, (self.num_qo_heads + 2 * self.num_kv_heads) * self.head_dim)
         )
         self.outputs["q"].init_shape(
-            (0, self.num_qo_heads * self.head_dim // self.tp_size)
+            (0, self.num_qo_heads * self.head_dim)
         )
 
     def update(self, qo_indices: list[int], decode_batchsize: int, device: str):
