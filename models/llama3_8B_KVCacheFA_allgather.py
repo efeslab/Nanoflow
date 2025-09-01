@@ -1,40 +1,41 @@
 import copy
 import torch
-import os
 import torch.distributed as dist
+import os, sys
 
-from operations.allreduce.allreduce import AllReduce
+sys.path.append("../")
+sys.path.append("../pybind/build")
+os.environ["HF_HOME"] = "/code/hf"
+
 from operations.operation_base import NanoOpInfo, Operations
 from operations.activation.silu import Activation
+from operations.allgather.allgather import AllGather
 from operations.embedding.embedding import GenEmbedding
 from operations.globalOp.globalOp import GlobalInput, GlobalOutput
 from operations.gemm.gemm_N_parallel import GEMM_N_Parallel
-from operations.gemm.gemm_K_parallel import GEMM_K_Parallel
 from operations.norm.rmsnorm import LayerNorm
-from operations.rope.rope_fa import RopeAppendBatched
 from operations.sampling.max_sampling import Sampling
-from operations.rope.rope_flashinfer import RopeAppendFlashinfer
-from operations.attention.llamaAttention_flashattn import PFAttnFA
-from operations.attention.llamaAttention_vllm import DecPagedAttn
+from operations.rope.rope_fa import RopeAppendBatched
+from operations.attention.llamaAttention_flashattn import DecAttnFA, PFAttnFA
 from operations.virtualOp.virtual_ops import Copy, Redist
-from kvcache.kv import KVCacheNone, KVCachevLLM
+from kvcache.kv import KVCacheBatched, KVCacheNone, KVCacheTorch
 from core.weightManager import WeightManager
 from core.bufferAllocate import BufferAllocator
 from core.executor import Executor
 from core.nanobatchSplit import split_nanobatch
-from utils.cu_mask import create_streams_with_cumask
 from utils.prof_marker import prof_marker
-
-gemm_stream_with_dc_sm = 256
-gemm_stream_with_pf_sm = 48
-dc_stream_sm = 288
-pf_stream_sm = 16
 
 
 class Pipeline:
-    def __init__(self, TP_idx: int, TP_size: int, max_seq_len: int = 1024, max_batch_size: int = 768):
+    def __init__(
+        self,
+        TP_idx: int,
+        TP_size: int,
+        max_seq_len: int = 1024,
+        max_batch_size: int = 768,
+    ):
         # Set parameters as instance variables.
-        self.pipeline_name = "Llama3-8B-TP2"
+        self.pipeline_name = f"Llama3-8B-TP{TP_size}-allgather"
         self.num_kv_heads = 8
         self.num_qo_heads = 32
         self.kqv_heads = self.num_qo_heads + 2 * self.num_kv_heads
@@ -42,10 +43,8 @@ class Pipeline:
         self.vocab_size = 128256
         self.hidden_dim = 4096
         self.intermediate_dim = 14 * 1024
-        self.max_batch_size = max_batch_size
-        self.batch_size = 0
+        self.batch_size = None
         self.num_layers = 32
-        self.device: str = "cuda:0"
         self.layer_list = [i for i in range(self.num_layers)]
         self.num_devices = torch.cuda.device_count()
         self.page_size = 64
@@ -53,8 +52,13 @@ class Pipeline:
         self.tp_size = TP_size
         self.pp_size = 1
         self.dp_size = 1
-        self.max_seq_len = max_seq_len
-        self.kv_cache: KVCachevLLM
+        assert (
+            self.pp_size * self.dp_size * self.tp_size == self.num_devices
+        ), f"num_devices {self.num_devices} should be equal to pp_size * dp_size * tp_size {self.pp_size * self.dp_size * self.tp_size}"
+        # create torch.distributed group
+        assert (
+            self.num_devices % self.tp_size == 0
+        ), f"num_devices {self.num_devices} should be divisible by tp_size {self.tp_size}"
 
     def set_device(self, rank: int, device: str):
         self.rank = rank
@@ -67,36 +71,34 @@ class Pipeline:
         self.init_dependency()
         self.init_set_shape()
         self.init_set_weight(weight_path, cached)
-        self.config_network(self.rank)
+        self.config_network()
         self.update_network_ops()
+
 
     def init_streams(self):
         self.main_stream = torch.cuda.Stream()
-        gemm_stream = torch.cuda.Stream()
-        gemm_stream_with_dc, dc_stream = create_streams_with_cumask(
-            [gemm_stream_with_dc_sm, gemm_stream_with_pf_sm], self.device
-        )
-        gemm_stream_with_pf, pf_stream = create_streams_with_cumask(
-            [gemm_stream_with_pf_sm, gemm_stream_with_dc_sm], self.device
-        )
-        network_stream = torch.cuda.Stream()
-
+        GEMM_STREAM = torch.cuda.Stream()
+        GEMV_STREAM = torch.cuda.Stream()
+        NETWORK_STREAM = torch.cuda.Stream()
+        OTHER_STREAM = torch.cuda.Stream()
+        # self.streams = {
+        #     "GEMM": (GEMM_STREAM, None),
+        #     "GEMV": (GEMV_STREAM, None),
+        #     "NETWORK": (NETWORK_STREAM, None),
+        #     "OTHER": (OTHER_STREAM, None),
+        # }
         self.streams = {
-            "GEMM": (gemm_stream, None),
-            "GEMM_WITH_DC": (gemm_stream_with_dc, None),
-            "GEMM_WITH_PF": (gemm_stream_with_pf, None),
-            "DC_ATTN": (dc_stream, None),
-            "PF_ATTN": (pf_stream, None),
-            "NETWORK": (network_stream, None),
+            "GEMM": (GEMM_STREAM, None),
+            "GEMV": (GEMM_STREAM, None),
+            "NETWORK": (GEMM_STREAM, None),
+            "OTHER": (GEMM_STREAM, None),
         }
 
-    def init_external_data(self, for_test=False):
-        self.kv_cache = KVCachevLLM(
+    def init_external_data(self):
+        self.kv_cache = KVCacheBatched(
             num_layers=self.num_layers,
             num_heads=self.num_kv_heads,
             head_dim=self.head_dim,
-            max_seqlen=self.max_seq_len,
-            max_batch_size=self.max_batch_size,
             device_id=self.rank,
             tp_size=self.tp_size,
         )
@@ -111,7 +113,6 @@ class Pipeline:
             .first_only()
         )
         self.gen_embedding_layers = self.gen_embedding.expand_layer(self.layer_list)
-        
 
         self.layerNormAttn = LayerNorm("LayerNormAttn", self.device).setWeightName(
             "model.layers.{layer}.input_layernorm.weight"
@@ -131,7 +132,7 @@ class Pipeline:
         self.ropeAppend.externals["KVCache"] = self.kv_cache
         self.ropeAppend_layers = self.ropeAppend.expand_layer(self.layer_list)
 
-        self.decAttn = DecPagedAttn("DecAttn", self.device)
+        self.decAttn = DecAttnFA("DecAttn", self.device)
         self.decAttn.externals["KVCache"] = self.kv_cache
         self.decAttn_layers = self.decAttn.expand_layer(self.layer_list)
 
@@ -139,13 +140,16 @@ class Pipeline:
         self.pfAttn.externals["KVCache"] = self.kv_cache
         self.pfAttn_layers = self.pfAttn.expand_layer(self.layer_list)
 
-        self.o = GEMM_K_Parallel("O", self.device, bias=True).setWeightName(
+        self.allGather_attn = AllGather("AllGatherAttn", self.device)
+        self.allGather_attn_layers = self.allGather_attn.expand_layer(self.layer_list)
+
+        self.o = GEMM_N_Parallel("O", self.device, bias=True).setWeightName(
             "model.layers.{layer}.self_attn.o_proj.weight"
         )
         self.o_layers = self.o.expand_layer(self.layer_list)
 
-        self.allReduce_o = AllReduce("AllReduceO", self.device)
-        self.allReduce_o_layers = self.allReduce_o.expand_layer(self.layer_list)
+        self.allGather_o = AllGather("AllGatherO", self.device)
+        self.allGather_o_layers = self.allGather_o.expand_layer(self.layer_list)
 
         self.layerNormFFN = LayerNorm("LayerNormFFN", self.device).setWeightName(
             "model.layers.{layer}.post_attention_layernorm.weight"
@@ -163,13 +167,18 @@ class Pipeline:
         self.activation = Activation("Activation", self.device)
         self.activation_layers = self.activation.expand_layer(self.layer_list)
 
-        self.d = GEMM_K_Parallel("D", self.device, bias=True).setWeightName(
+        self.allGather_activation = AllGather("AllGatherActivation", self.device)
+        self.allGather_activation_layers = self.allGather_activation.expand_layer(
+            self.layer_list
+        )
+
+        self.d = GEMM_N_Parallel("D", self.device, bias=True).setWeightName(
             "model.layers.{layer}.mlp.down_proj.weight"
         )
         self.d_layers = self.d.expand_layer(self.layer_list)
 
-        self.allReduce_d = AllReduce("AllReduceD", self.device)
-        self.allReduce_d_layers = self.allReduce_d.expand_layer(self.layer_list)
+        self.allGather_d = AllGather("AllGatherD", self.device)
+        self.allGather_d_layers = self.allGather_d.expand_layer(self.layer_list)
 
         self.getLogits = (
             GEMM_N_Parallel("GetLogits", self.device)
@@ -216,13 +225,15 @@ class Pipeline:
             self.ropeAppend,
             self.decAttn,
             self.pfAttn,
+            self.allGather_attn,
             self.o,
-            self.allReduce_o,
+            self.allGather_o,
             self.layerNormFFN,
             self.ug,
             self.activation,
+            self.allGather_activation,
             self.d,
-            self.allReduce_d,
+            self.allGather_d,
             self.modelLayerNorm,
             self.getLogits,
             self.sample,
@@ -247,6 +258,7 @@ class Pipeline:
         self.global_input.outputs["tokens"] >> self.gen_embedding.inputs["token"]
 
         self.gen_embedding.outputs["output"] >> self.copy_embedding.inputs["input_0"]
+
         self.copy_embedding.outputs["output_0"] >> self.layerNormAttn.inputs["input"]
         self.copy_embedding.outputs["output_1"] >> self.o.inputs["C"]
 
@@ -260,10 +272,12 @@ class Pipeline:
 
         self.decAttn.outputs["output"] >> self.redist_a.inputs["input_0"]
         self.pfAttn.outputs["output"] >> self.redist_a.inputs["input_1"]
-        self.redist_a.outputs["output_0"] >> self.o.inputs["A"]
+        self.redist_a.outputs["output_0"] >> self.allGather_attn.inputs["input"]
+        self.allGather_attn.outputs["output"] >> self.o.inputs["A"]
 
-        self.o.outputs["D"] >> self.allReduce_o.inputs["input"]
-        self.allReduce_o.outputs["output"] >> self.copy_o.inputs["input_0"]
+        self.o.outputs["D"] >> self.allGather_o.inputs["input"]
+        self.allGather_o.outputs["output"] >> self.copy_o.inputs["input_0"]
+
         self.copy_o.outputs["output_0"] >> self.layerNormFFN.inputs["input"]
         self.copy_o.outputs["output_1"] >> self.d.inputs["C"]
 
@@ -271,12 +285,14 @@ class Pipeline:
 
         self.ug.outputs["D"] >> self.activation.inputs["input"]
 
-        self.activation.outputs["output"] >> self.d.inputs["A"]
+        self.activation.outputs["output"] >> self.allGather_activation.inputs["input"]
+        self.allGather_activation.outputs["output"] >> self.d.inputs["A"]
 
-        self.d.outputs["D"] >> self.allReduce_d.inputs["input"]
-        self.allReduce_d.outputs["output"] >> self.copy_d.inputs["input_0"]
-        self.copy_d.outputs["output_0"] >> (self.copy_embedding.inputs["input_1"], True)
-        self.copy_d.outputs["output_1"] >> self.modelLayerNorm.inputs["input"]
+        self.d.outputs["D"] >> self.allGather_d.inputs["input"]
+        self.allGather_d.outputs["output"] >> self.copy_d.inputs["input_0"]
+
+        self.copy_d.outputs["output_0"] >> self.modelLayerNorm.inputs["input"]
+        self.copy_d.outputs["output_1"] >> (self.copy_embedding.inputs["input_1"], True)
 
         self.modelLayerNorm.outputs["output"] >> self.getLogits.inputs["A"]
 
@@ -288,7 +304,7 @@ class Pipeline:
             operation.checkConnection()
 
     def init_executor(self):
-        # assert 0 <= device_id < self.num_devices, "device_id should be in range [0, num_devices)"
+        # assert 0 <= device_id < self.num_cuda_devices, "device_id should be in range [0, num_devices)"
         self.executor = Executor(self.op_layers, self.layer_list)
         self.executor.plan_layer_ordering()
 
@@ -296,21 +312,52 @@ class Pipeline:
         self.global_input.setShape()
         self.gen_embedding.setShape(self.hidden_dim, self.vocab_size)
         self.layerNormAttn.setShape(self.hidden_dim)
-        self.kqv.setShape(self.kqv_heads * self.head_dim, self.hidden_dim, tp_idx=self.tp_idx, tp_size=self.tp_size).setParameter(
-            1.0, 0.0
+        self.kqv.setShape(
+            self.kqv_heads * self.head_dim,
+            self.hidden_dim,
+            tp_idx=self.tp_idx,
+            tp_size=self.tp_size,
+        ).setParameter(1.0, 0.0)
+        self.ropeAppend.setShape(
+            self.num_kv_heads, self.num_qo_heads, self.head_dim, tp_size=self.tp_size
         )
-        self.decAttn.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim, tp_size=self.tp_size)
-        self.pfAttn.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim, tp_size=self.tp_size)
-        self.ropeAppend.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim, tp_size=self.tp_size)
-        self.o.setShape(self.hidden_dim, self.hidden_dim, tp_idx=self.tp_idx, tp_size=self.tp_size).setParameter(1.0, 1.0)
-        self.allReduce_o.setShape(self.hidden_dim, tp_idx=self.tp_idx, tp_size=self.tp_size)
+        self.decAttn.setShape(
+            self.num_kv_heads, self.num_qo_heads, self.head_dim, tp_size=self.tp_size
+        )
+        self.pfAttn.setShape(
+            self.num_kv_heads, self.num_qo_heads, self.head_dim, tp_size=self.tp_size
+        )
+        self.allGather_attn.setShape(
+            self.num_qo_heads * self.head_dim, tp_idx=self.tp_idx, tp_size=self.tp_size
+        )
+        self.o.setShape(
+            self.hidden_dim, self.hidden_dim, tp_idx=self.tp_idx, tp_size=self.tp_size
+        ).setParameter(1.0, 1.0)
+        self.allGather_o.setShape(
+            self.hidden_dim, tp_idx=self.tp_idx, tp_size=self.tp_size
+        )
         self.layerNormFFN.setShape(self.hidden_dim)
-        self.ug.setShape(self.intermediate_dim * 2, self.hidden_dim, tp_idx=self.tp_idx, tp_size=self.tp_size).setParameter(
-            1.0, 0.0
+        self.ug.setShape(
+            self.intermediate_dim * 2,
+            self.hidden_dim,
+            tp_idx=self.tp_idx,
+            tp_size=self.tp_size,
+        ).setParameter(1.0, 0.0)
+        self.d.setShape(
+            self.hidden_dim,
+            self.intermediate_dim,
+            tp_idx=self.tp_idx,
+            tp_size=self.tp_size,
+        ).setParameter(1.0, 1.0)
+        self.allGather_d.setShape(
+            self.hidden_dim, tp_idx=self.tp_idx, tp_size=self.tp_size
         )
-        self.activation.setShape(self.intermediate_dim, tp_idx=self.tp_idx, tp_size=self.tp_size)
-        self.d.setShape(self.hidden_dim, self.intermediate_dim, tp_idx=self.tp_idx, tp_size=self.tp_size).setParameter(1.0, 1.0)
-        self.allReduce_d.setShape(self.hidden_dim, tp_idx=self.tp_idx, tp_size=self.tp_size)
+        self.activation.setShape(
+            self.intermediate_dim, tp_idx=self.tp_idx, tp_size=self.tp_size
+        )
+        self.allGather_activation.setShape(
+            self.intermediate_dim, tp_idx=self.tp_idx, tp_size=self.tp_size
+        )
         self.modelLayerNorm.setShape(self.hidden_dim)
         self.getLogits.setShape(self.vocab_size, self.hidden_dim).setParameter(1.0, 0.0)
         self.sample.setShape(self.vocab_size)
@@ -330,84 +377,84 @@ class Pipeline:
 
     def clear_batch_size(self):
         # init the batchsize to None
-        for op in self.op_for_buffer_allocation:
-            op.setBatchSize(None)
+        for op_device in self.operation_list:
+            op_device.setBatchSize(None)
 
     def config_batch_size(self, decode_batchsize):
         self.global_input.setBatchSize(self.batch_size)
         self.decAttn.setBatchSize(decode_batchsize)
 
     def config_algorithm(self):
-        gemm_tag = "torch"
-        self.gen_embedding.config_tag(gemm_tag)
-        self.decAttn.config_tag("vllm")
+        self.gen_embedding.config_tag("torch")
+        self.layerNormAttn.config_tag("torch")
+        self.activation.config_tag("torch")
+        self.allGather_activation.config_tag("torch")
+        self.kqv.config_tag("torch")
+        self.ropeAppend.config_tag("flash_attn_batched")
+        self.decAttn.config_tag("flash_attn_batched")
         self.pfAttn.config_tag("flash_attn_batched")
-        self.layerNormAttn.config_tag(["torch", "torch"])
-        self.activation.config_tag(["torch", "torch"])
-        self.kqv.config_tag([gemm_tag, gemm_tag])
-        self.ropeAppend.config_tag(["flash_attn_batched", "flash_attn_batched"])
-        self.layerNormFFN.config_tag(["torch", "torch"])
-        self.o.config_tag([gemm_tag, gemm_tag])
-        self.allReduce_o.config_tag("torch")
-        self.ug.config_tag([gemm_tag, gemm_tag])
-        self.d.config_tag([gemm_tag, gemm_tag])
-        self.allReduce_d.config_tag("torch")
+        self.allGather_attn.config_tag("torch")
+        self.layerNormFFN.config_tag("torch")
+        self.o.config_tag("torch")
+        self.allGather_o.config_tag("torch")
+        self.ug.config_tag("torch")
+        self.d.config_tag("torch")
+        self.allGather_d.config_tag("torch")
         self.modelLayerNorm.config_tag("torch")
-        self.sample.config_tag(gemm_tag)
-        self.getLogits.config_tag(gemm_tag)
+        self.sample.config_tag("torch")
+        self.getLogits.config_tag("torch")
 
-    def config_network(self, rank=0):
-        dist.init_process_group(backend="nccl", rank=rank, world_size=self.num_devices)
-        tp_group_idx = self.tp_idx // self.tp_size
-        print("tp_group_idx: ", tp_group_idx, "tp_size: ", self.tp_size)
-        self.tp_group = dist.new_group(ranks=[i for i in range(tp_group_idx * self.tp_size, (tp_group_idx + 1) * self.tp_size)])
+    def config_network(self):
+        os.environ["MASTER_ADDR"] = "localhost"
+        os.environ["MASTER_PORT"] = "12549"
+        dist.init_process_group(
+            backend="nccl", rank=self.rank, world_size=self.num_devices
+        )
+        group_index = self.rank // self.tp_size
+        # print("group_index: ", group_index)
+        self.tp_group = dist.new_group(
+            ranks=[
+                i
+                for i in range(
+                    group_index * self.tp_size, (group_index + 1) * self.tp_size
+                )
+            ]
+        )
         # print("tp_group in main: ", self.tp_group)
 
     def config_streams(self):
-        # manually set streams for running.
         self.global_input.set_stream(self.streams["GEMM"])
         self.gen_embedding.set_stream(self.streams["GEMM"])
-        self.layerNormAttn.set_stream(
-            [self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]]
-        )
-        self.kqv.set_stream(
-            [self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]]
-        )
-        self.ropeAppend.set_stream(
-            [self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]]
-        )
-        self.decAttn.set_stream(self.streams["DC_ATTN"])
-        self.pfAttn.set_stream(self.streams["PF_ATTN"])
-        self.o.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
-        self.allReduce_o.set_stream(self.streams["NETWORK"])
-        self.layerNormFFN.set_stream(
-            [self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]]
-        )
-        self.ug.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
-        self.activation.set_stream(
-            [self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]]
-        )
-        self.d.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
-        self.allReduce_d.set_stream(self.streams["NETWORK"])
+        self.layerNormAttn.set_stream(self.streams["GEMM"])
+        self.activation.set_stream(self.streams["GEMM"])
+        self.allGather_activation.set_stream(self.streams["NETWORK"])
+        self.kqv.set_stream(self.streams["GEMM"])
+        self.ropeAppend.set_stream(self.streams["GEMM"])
+        self.decAttn.set_stream(self.streams["GEMV"])
+        self.pfAttn.set_stream(self.streams["GEMV"])
+        self.allGather_attn.set_stream(self.streams["NETWORK"])
+        self.layerNormFFN.set_stream(self.streams["GEMM"])
+        self.o.set_stream(self.streams["GEMM"])
+        self.allGather_o.set_stream(self.streams["NETWORK"])
+        self.ug.set_stream(self.streams["GEMM"])
+        self.d.set_stream(self.streams["GEMM"])
+        self.allGather_d.set_stream(self.streams["NETWORK"])
         self.modelLayerNorm.set_stream(self.streams["GEMM"])
         self.sample.set_stream(self.streams["GEMM"])
         self.getLogits.set_stream(self.streams["GEMM"])
         self.global_output.set_stream(self.streams["GEMM"])
 
-    def profile_config_streams(self, stream_tuple):
-        for operation in self.operation_list:
-            operation.set_stream(stream_tuple)
-
     def update_network_ops(self):
-        self.allReduce_o.update(self.tp_group)
-        self.allReduce_d.update(self.tp_group)
+        self.allGather_attn.update(self.tp_group)
+        self.allGather_activation.update(self.tp_group)
+        self.allGather_o.update(self.tp_group)
+        self.allGather_d.update(self.tp_group)
 
     def nanobatch_split(self, total_batchsize, decode_batchsize):
+        return
         info = (
             NanoOpInfo(batch_idx=0, batch_size=decode_batchsize),
-            NanoOpInfo(
-                batch_idx=1, batch_size=total_batchsize - decode_batchsize
-            ),
+            NanoOpInfo(batch_idx=1, batch_size=total_batchsize - decode_batchsize),
         )
         op_nanobatch_info_map = {
             "LayerNormAttn": copy.deepcopy(info),
@@ -440,6 +487,10 @@ class Pipeline:
         decode_batch_size=0,
         is_profile=False,
         stream_name: str = "GEMM_Test",
+        profile_result_path: str = None,
+        use_auto_search: bool = False,
+        use_nano_split: bool = False,
+        use_cuda_graph: bool = False,
     ):
         self.input_req_idx = []
         self.input_ids = []
@@ -462,7 +513,8 @@ class Pipeline:
                 # print("decode_batchsize: ", decode_batchsize)
                 self.clear_batch_size()
                 self.config_batch_size(decode_batch_size)
-                self.nanobatch_split(self.batch_size, decode_batch_size)
+                if use_nano_split:
+                    self.nanobatch_split(self.batch_size, decode_batch_size)
                 self.update_allocate_buffers()
                 # print("finish update_allocate_buffers")
                 self.config_streams()
@@ -487,8 +539,9 @@ class Pipeline:
         with prof_marker("update_step_6"):
             self.kv_cache.update(self.input_req_idx, self.cumsum_input)
         with prof_marker("update_step_7"):
-            assert self.global_input.outputs["tokens"].tensor is not None
-            self.global_input.outputs["tokens"].tensor.copy_(input_tensor)
+            self.global_input.outputs["tokens"].tensor.copy_(
+                input_tensor
+            )
         with prof_marker("update_step_8"):
             self.ropeAppend.update(self.cumsum_input, decode_batch_size, self.device)
         with prof_marker("update_step_9"):
@@ -512,13 +565,21 @@ class Pipeline:
 
         bufferAllocator.allocate_buffer(self.device)
         print(
-            f"Total allocated: {bufferAllocator.total_allocated / 1024 / 1024} MB in {self.device}"
+            f"Total allocated: {bufferAllocator.total_allocated / 1024 / 1024} MB in device {self.device}"
         )
+
+    def profile(self):
+        for operation in self.operation_list:
+            operation.profile()
+
+    def search_profile_data(self):
+        operation_base = Operations()
+        operation_base.search_profile_data()
 
     def run(
         self,
-        file_name="./test_data/llama3-8B-flashinfer",
-        filefolder_name="./test_data/llama3-8B-flashinfer_folder",
+        file_name="out-operator_layer_test",
+        filefolder_name="llama3-kv-out-rope_test",
     ):
 
         temp_out = torch.zeros(self.batch_size, dtype=torch.int32, device="cuda")
@@ -526,7 +587,7 @@ class Pipeline:
         os.makedirs(f"./{filefolder_name}", exist_ok=True)
 
         self.executor.execute(temp_out, self.main_stream)
-        # self.executor.print_debug(temp_out, file_name, filefolder_name=filefolder_name)
+        # self.executor.print_debug(temp_out, f"{file_name}_{self.rank}", filefolder_name=f"{filefolder_name}_{self.rank}")
 
         with prof_marker("after_execute_before_return"):
             temp_out = temp_out.cpu()
@@ -539,3 +600,6 @@ class Pipeline:
                 # print(f"req_idx: {req_idx}, new_token: {new_token}")
                 output.append((req_idx, new_token))
         return output
+
+    def terminate(self):
+        dist.destroy_process_group()

@@ -127,11 +127,11 @@ class DecAttnFA(Operations):
             (0, self.num_qo_heads * self.head_dim)
         )
 
-    def update(self, cumsum_input: list[int], device_id: int):
+    def update(self, cumsum_input: list[int], device: str):
         self.qo_indices = torch.tensor(
-            cumsum_input, dtype=torch.int32, device=f"cuda:{device_id}"
+            cumsum_input, dtype=torch.int32, device=device
         )
-        io_device = self.children[device_id].inputs["Q"]
+        io_device = self.inputs["Q"]
         self.start_req_idx = tensor_offset_to_req_idx(
             self.qo_indices.tolist(), io_device.tensor_offset
         )
@@ -172,19 +172,19 @@ class PFAttnFABatchedImpl(OperationImpl):
 
     category_tag = "flash_attn_batched"
 
-    def __init__(self, op_base: "PFAttnFA", stream: torch.cuda.Stream, device_id: int):
+    def __init__(self, op_base: "PFAttnFA", stream: torch.cuda.Stream, device: str):
         r"""Initialize the PFAttn operator.
 
         Parameters
         ----------
         op_base : PFAttn
             The base operator it implements.
-        device_id : int
+        device : str
             The device ID.
         """
         self.op_base: PFAttnFA
-        super().__init__(op_base, stream, device_id)  # type: ignore
-        self.device_id = device_id
+        super().__init__(op_base, stream, device)  # type: ignore
+        self.device_id = device
         self.num_qo_heads = int(op_base.num_qo_heads)  # type: ignore
         self.num_kv_heads = int(op_base.num_kv_heads)  # type: ignore
         self.head_dim = int(op_base.head_dim)  # type: ignore
