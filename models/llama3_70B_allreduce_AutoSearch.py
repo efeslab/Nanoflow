@@ -236,7 +236,7 @@ class Pipeline():
         self.layerNormAttn.set_category(CategoryType.COMP)
         self.kqv.set_category(CategoryType.COMP)
         self.ropeAppend.set_category(CategoryType.COMP)
-        self.decAttn.set_category(CategoryType.MEM)
+        self.decAttn.set_category(CategoryType.COMP)
         self.pfAttn.set_category(CategoryType.COMP)
         self.layerNormFFN.set_category(CategoryType.COMP)
         self.o.set_category(CategoryType.COMP)
@@ -247,8 +247,8 @@ class Pipeline():
         self.allReduce_d.set_category(CategoryType.NET)
 
     def update_network_ops(self):
-        self.allReduce_o.update(None)
-        self.allReduce_d.update(None)
+        self.allReduce_o.update(None, None, None, None)
+        self.allReduce_d.update(None, None, None, None)
 
     def config_batch_size(self):
         self.global_input.setBatchSize(self.global_batch_size)

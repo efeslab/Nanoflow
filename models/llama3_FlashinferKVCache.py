@@ -106,8 +106,8 @@ class Pipeline():
 
 
     def init_external_data(self):
-        self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048, self.page_size, 1, self.device)
-        # self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048* 26, self.page_size, 1, self.device)
+        # self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048, self.page_size, 1, self.device)
+        self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048* 26, self.page_size, 1, self.device)
         self.kv_cache = BatchedDistKVCache(self.kv_pool)
     
     def reset(self):

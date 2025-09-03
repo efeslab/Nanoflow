@@ -16,8 +16,8 @@ from transformers import (
 
 from input_test import prefill_context
 
-MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"  # requires agreeing to Meta’s license
-# MODEL_ID = "meta-llama/Meta-Llama-3-70B-Instruct"  # requires agreeing to Meta’s license
+# MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"  # requires agreeing to Meta’s license
+MODEL_ID = "meta-llama/Meta-Llama-3-70B-Instruct"  # requires agreeing to Meta’s license
 
 # 1) Load tokenizer
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)

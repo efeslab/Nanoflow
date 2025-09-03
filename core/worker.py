@@ -24,36 +24,7 @@ def worker(start_time, rank, request_queue: mp.Queue, shared_decode_bts, result_
         # cmd = ''.join(command[:]).strip()
         cmd = command.value.decode()
         match cmd:
-            # case "Prefill":
-            #     input0 = [(i, input_ids.copy()) for i in range(2)]
-            #     pipeline.update(input0, decode_batch_size=0)
-            #     # new_tokens = pipeline.run(file_name=f"./test_data/70B_test_torch_with_allreduce_{rank}", filefolder_name=f"./test_data/70B_test_torch_with_allreduce_{rank}_folder")
-            #     new_tokens = pipeline.run(file_name=f"./test_data/70B_test_flashinfer_with_allreduce_{rank}", filefolder_name=f"./test_data/70B_test_flashinfer_with_allreduce_{rank}_folder")
-            #     assert len(new_tokens) == 2, f"Expected 2 new tokens, got {len(new_tokens)}"
-            #     print("new_tokens: ", new_tokens, "ttft: ", time.perf_counter() - start_time)
-            #     if rank == 0:
-            #         for req_idx, new_token in new_tokens:
-            #             shared_array[req_idx] = new_token[0]
-            #     new_tokens.extend([(i, input_ids.copy()) for i in range(2, 4)])
-            #     pipeline.update(new_tokens, decode_batch_size=2)
-
-            # case "Decode":
-            #     # new_tokens = pipeline.run(file_name=f"./test_data/70B_test_torch_with_allreduce_{rank}", filefolder_name=f"./test_data/70B_test_torch_with_allreduce_{rank}_folder")
-            #     new_tokens = pipeline.run(file_name=f"./test_data/70B_test_flashinfer_with_allreduce_{rank}", filefolder_name=f"./test_data/70B_test_flashinfer_with_allreduce_{rank}_folder")
-            #     assert len(new_tokens) == 4, f"Expected 4 new tokens, got {len(new_tokens)}"
-            #     print("new_tokens: ", new_tokens)
-            #     # save self.kv_cache.get(0,0) to a file for debugging
-            #     # if device == "cuda:0":
-            #     #     os.makedirs("./kv_cache_testing", exist_ok=True)
-            #     #     torch.save(pipeline.kv_cache.get(0, 0)[0].cpu(), f"./kv_cache_testing/kvcache_0_0_{cycle_count}.pt")
-            #     pipeline.update(new_tokens, decode_batch_size=4)
-                
-            #     if rank == 0:
-            #         for req_idx, new_token in new_tokens:
-            #             shared_array[req_idx] = new_token[0]
-            
             case "Execute":
-                time.sleep(0.01)
                 with prof_marker(f"Worker {rank} Execute S1", color="blue"):
                     input = request_queue.get(timeout=1)
                     decode_bts = shared_decode_bts.value
@@ -114,7 +85,7 @@ def worker(start_time, rank, request_queue: mp.Queue, shared_decode_bts, result_
 
             case "Terminate":
                 # Termination signal received.
-                pipeline.terminate()
+                # pipeline.terminate()
                 barrier.wait()
                 break
         # Second barrier: wait until all workers finish computation.

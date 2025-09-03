@@ -62,7 +62,7 @@ class GEMM_K_Parallel(Operations):
         # print("tp_idx", self.tp_idx, "tp_size", self.tp_size)
         self.tp_N = N
         self.tp_K = K // tp_size
-        print("name", self.name, "N:", self.tp_N, "K:", self.tp_K)
+        # print("name", self.name, "N:", self.tp_N, "K:", self.tp_K)
         self.weights["B"].shape = (self.tp_K, self.tp_N)
         self.inputs["A"].init_shape((0, self.tp_K))
         if self.bias:

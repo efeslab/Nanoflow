@@ -3,7 +3,7 @@ import torch
 torch.backends.cuda.matmul.allow_tf32 = True   # ok; irrelevant if using fp16/bf16 inputs
 device = "cuda"
 
-M,N,K = 2048, 4096, 6144
+M,N,K = 1280, 8192, 2560
 A = torch.randn(M, K, device=device, dtype=torch.float16)
 B = torch.randn(K, N, device=device, dtype=torch.float16)
 

@@ -1,60 +1,6 @@
 import time
 import torch
 
-# def test_correctness():
-#     # Spawn one worker per GPU (or per unit of parallelism).
-#     input_string = "Hi, who are you?"
-#     input_ids = tokenizer.encode(input_string)
-#     output_strings = {}
-#     request_queue = mp.Queue(maxsize=100)
-
-#     for idx in range(4):
-#         output_strings[idx] = input_ids.copy()
-#     processes = []
-#     for rank in range(world_size):
-#         start_time = time.perf_counter()
-#         # print(f"Starting process {rank} on GPU {rank}")
-#         args = (T0, rank, request_queue, shared_decode_bts, shared_array, barrier, pipeline_list[rank], command, input_ids)
-#         p = mp.Process(target=worker, args=args)
-
-#         p.start()
-#         processes.append(p)
-#         # print(f"Process {rank} started on GPU {rank} in {time.perf_counter() - start_time:.2f} seconds")
-    
-#     command.value = b"Prefill"
-#     barrier.wait()
-#     barrier.wait()
-
-#     for i in range(2):
-#         output_strings[i].append(shared_array[i])
-
-#     command.value = b"Decode"
-#     iterations = 20
-#     for i in range(iterations):
-#         print(f"Iteration {i + 1}/{iterations}")
-#         # Set the shared task value.
-#         barrier.wait()
-
-#         barrier.wait()
-#         for i in range(4):
-#             output_strings[i].append(shared_array[i])
-    
-#     command.value = b"Terminate"
-#     # Execute the final two barrier waits so that all workers exit cleanly.
-#     barrier.wait()  # First barrier of termination iteration.
-#     barrier.wait()  # Second barrier of termination iteration.
-    
-#     print("Waiting for all processes to finish... ", time.perf_counter() - T0)
-#     # Wait for all worker processes to finish.
-#     for p in processes:
-#         p.join()
-
-#     print("All processes have finished.")
-
-#     output_text = tokenizer.batch_decode(list(output_strings.values()), skip_special_tokens=True)
-
-#     print(output_text)
-
 def test_correctness_new():
     # Spawn one worker per GPU (or per unit of parallelism).
     input_string = "Hi, who are you?"
@@ -71,7 +17,7 @@ def test_correctness_new():
     for rank in range(world_size):
         start_time = time.perf_counter()
         # print(f"Starting process {rank} on GPU {rank}")
-        args = (T0, rank, request_queues[rank], shared_decode_bts, result_queue, barrier, pipeline_list[rank], command, input_ids)
+        args = (T0, rank, request_queues[rank], shared_decode_bts, result_queue, barrier, pipeline_list[rank], use_auto_search, use_nanosplit, use_cuda_graph, command)
         p = mp.Process(target=worker, args=args)
 
         p.start()
@@ -178,7 +124,7 @@ def test_performance():
         for req_idx, new_token in new_tokens:
             output_strings[req_idx].extend(new_token)
         decode_inputs.extend(new_tokens)
-        print("new_tokens: ", new_tokens)
+        # print("new_tokens: ", new_tokens)
     
     # prepare for the testing configuration
     output_strings[decode_batch_size] = prefill_context_ids[:prefill_batch_size].copy()
@@ -188,7 +134,7 @@ def test_performance():
     shared_decode_bts.value = decode_batch_size
     use_auto_search.value = 1
     use_nanosplit.value = 1
-    use_cuda_graph.value = 0
+    use_cuda_graph.value = 1
 
     for i in range(decode_batch_size, decode_batch_size + 20):
         print("Cycle: ", i - decode_batch_size)
@@ -201,7 +147,7 @@ def test_performance():
             output_strings[req_idx].extend(new_token)
 
         new_tokens = new_tokens[:-1]
-        print("new_tokens: ", new_tokens)
+        # print("new_tokens: ", new_tokens)
         assert len(new_tokens) == decode_batch_size
 
         output_strings[next_prefill_idx] = prefill_context_ids[:prefill_batch_size].copy()
@@ -304,6 +250,13 @@ if __name__ == '__main__':
     PP_size = 1
     DP_size = 1
 
+    import bind_all_reduce
+    unique_id_1 = bind_all_reduce.get_nccl_unique_id()
+    unique_id_2 = bind_all_reduce.get_nccl_unique_id()
+    unique_id_3 = bind_all_reduce.get_nccl_unique_id()
+    unique_id_4 = bind_all_reduce.get_nccl_unique_id()
+
+    unique_nccl_ids = [unique_id_1, unique_id_2, unique_id_3, unique_id_4]
     assert world_size == TP_size * PP_size * DP_size, f"world size {world_size} is not equal to TP size {TP_size} * PP size {PP_size} * DP size {DP_size}"
 
     if args.load_hf_weight:
@@ -319,7 +272,8 @@ if __name__ == '__main__':
 
     pipeline_list = [ Pipeline(
         TP_idx=i,
-        TP_size=TP_size,) for i in range(world_size) ]
+        TP_size=TP_size,
+        unique_nccl_ids=unique_nccl_ids) for i in range(world_size) ]
     
     # print(f"Number of GPUs: {world_size}")
 
@@ -336,6 +290,6 @@ if __name__ == '__main__':
     
     print("create shared variables, ", time.perf_counter() - T0)
     
-    # test_correctness_new()
-    test_performance()
+    test_correctness_new()
+    # test_performance()
     # test_profile()
