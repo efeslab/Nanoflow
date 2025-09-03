@@ -7,7 +7,6 @@ sys.path.append("../")
 from utils.cu_mask import create_streams_with_cumask
 
 # from flashinfer import single_prefill_with_kv_cache
-# from flashinfer.green_ctx import split_device_green_ctx_by_sm_count
 # import nvtx
 # import nvmath
 

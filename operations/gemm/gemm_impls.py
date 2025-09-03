@@ -3,9 +3,9 @@ import platform_config
 from operations.impl_base import OperationImpl
 
 if platform_config.PLATFORM_CUDA:
-    from bind_cublass_set import set_cublas_sm_count_target
+    from utils.green_ctx import set_sm_count_target
 else:
-    def set_cublas_sm_count_target(sm_count):
+    def set_sm_count_target(sm_count):
         pass
 
 class GEMMTorchImpl(OperationImpl):
@@ -19,12 +19,12 @@ class GEMMTorchImpl(OperationImpl):
             self.beta = self.op_base.beta
 
         # if self.op_base.sm_count is not None:
-        #     bind_cublass_set.set_cublas_sm_count_target(self.op_base.sm_count)
+        #     set_sm_count_target(self.op_base.sm_count)
     
     def run(self, A, B, C, D):
         with torch.cuda.stream(self.stream):
             if self.op_base.sm_count is not None:
-                set_cublas_sm_count_target(self.op_base.sm_count)
+                set_sm_count_target(self.op_base.sm_count)
             if self.bias or self.alpha != 1:
                 torch.addmm(C, A, B, beta=self.beta, alpha=self.alpha, out=D)
             else:

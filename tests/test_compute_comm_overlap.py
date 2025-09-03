@@ -3,7 +3,7 @@ import sys
 import os
 import torch
 from flashinfer import single_prefill_with_kv_cache
-from flashinfer.green_ctx import split_device_green_ctx_by_sm_count
+from utils.green_ctx import split_device_green_ctx_by_sm_count
 import nvtx
 import nvmath
 
