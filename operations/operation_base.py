@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-import os
+from os import path
 from typing import Type, Optional
 from operations.impl_base import OperationImpl
 import torch
@@ -127,10 +127,7 @@ class Operations():
         self.init_impl_configs()
 
     def setup_profile(self, profile_dir, append_mode=False, is_save_db=True):
-        if not os.path.exists(profile_dir):
-            os.makedirs(profile_dir)
-        
-        self.conn = sqlite3.connect(os.path.join(profile_dir, f"{self.name}.db"))
+        self.conn = sqlite3.connect(path.join(profile_dir, f"{self.name}.db"))
         self.cursor = self.conn.cursor()
         self.is_save_db = is_save_db
 

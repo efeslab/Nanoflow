@@ -3,6 +3,8 @@ import json
 from typing import Any, Optional
 import torch
 import torch.distributed as dist
+from bind_all_reduce import NCCLWrapper
+
 
 from flashinfer.green_ctx import split_device_green_ctx_by_sm_count
 from operations.operation_base import NanoOpInfo, Operations, Operation_Layer
@@ -26,7 +28,7 @@ from core.categoryType import CategoryType
 from utils.prof_marker import prof_marker
 
 class Pipeline():
-    def __init__(self, TP_idx: int, TP_size: int, PP_idx=0, PP_size=1, DP_idx=0, DP_size=1):
+    def __init__(self, TP_idx: int, TP_size: int, PP_idx=0, PP_size=1, DP_idx=0, DP_size=1, unique_nccl_ids = []):
         # Set parameters as instance variables.
         self.pipeline_name = f"Llama3-70B-with-2-allreduce-TP{TP_size}-PP{PP_size}-DP{DP_size}"
         self.num_kv_heads = 8
@@ -49,6 +51,7 @@ class Pipeline():
         self.pp_size = PP_size
         self.dp_idx = DP_idx
         self.dp_size = DP_size
+        self.unique_nccl_ids = unique_nccl_ids
 
         assert self.pp_size * self.dp_size * self.tp_size == self.num_cuda_devices, f"num_cuda_devices {self.num_cuda_devices} should be equal to pp_size * dp_size * tp_size {self.pp_size * self.dp_size * self.tp_size}"
         # create torch.distributed group
@@ -57,7 +60,8 @@ class Pipeline():
         # profile related variables
         self.profile_dir = f"../profile_data/{self.pipeline_name}"
         self.profile_result: dict[str, Any] | None = None
-        self.categories = [CategoryType.COMP, CategoryType.MEM, CategoryType.NET]
+        # self.categories = [CategoryType.COMP, CategoryType.MEM, CategoryType.NET]
+        self.categories = [CategoryType.COMP, CategoryType.NET]
 
         self.buffer_fixed: bool = False
         self.is_auto_search_enabled: bool = False
@@ -99,7 +103,7 @@ class Pipeline():
             for i in range((num_sm_counts + 1) // 2):
                 sm_count_1 = self.sm_counts[i]
                 sm_count_2 = self.sm_counts[num_sm_counts - 1 - i]
-                print(f"Creating green context streams for SM counts: {sm_count_1}, {sm_count_2}")
+                # print(f"Creating green context streams for SM counts: {sm_count_1}, {sm_count_2}")
 
                 (stream_1, stream_2, _), _ = split_device_green_ctx_by_sm_count(
                     torch.device(self.device),
@@ -114,7 +118,7 @@ class Pipeline():
         for i in range((num_sm_counts + 1) // 2):
             sm_count_1 = self.sm_counts[i]
             sm_count_2 = self.sm_counts[num_sm_counts - 1 - i]
-            print(f"Creating green context streams for SM counts: {sm_count_1}, {sm_count_2}")
+            # print(f"Creating green context streams for SM counts: {sm_count_1}, {sm_count_2}")
 
             (stream_1, stream_2, _), _ = split_device_green_ctx_by_sm_count(
                 torch.device(self.device),
@@ -319,7 +323,7 @@ class Pipeline():
         self.layerNormAttn.set_category(CategoryType.COMP)
         self.kqv.set_category(CategoryType.COMP)
         self.ropeAppend.set_category(CategoryType.COMP)
-        self.decAttn.set_category(CategoryType.MEM)
+        self.decAttn.set_category(CategoryType.COMP)
         self.pfAttn.set_category(CategoryType.COMP)
         self.layerNormFFN.set_category(CategoryType.COMP)
         self.o.set_category(CategoryType.COMP)
@@ -395,11 +399,13 @@ class Pipeline():
             self.pfAttn.set_stream((self.main_stream, self.total_sm))
             self.layerNormFFN.set_stream((self.main_stream, self.total_sm))
             self.o.set_stream((self.main_stream, self.total_sm))
-            self.allReduce_o.set_stream((self.main_stream, self.total_sm))
+            self.allReduce_o.set_stream(self.streams[CategoryType.NET][self.total_sm])
+            # self.allReduce_o.set_stream((self.main_stream, self.total_sm))
             self.ug.set_stream((self.main_stream, self.total_sm))
             self.activation.set_stream((self.main_stream, self.total_sm))
             self.d.set_stream((self.main_stream, self.total_sm))
-            self.allReduce_d.set_stream((self.main_stream, self.total_sm))
+            self.allReduce_d.set_stream(self.streams[CategoryType.NET][self.total_sm])
+            # self.allReduce_d.set_stream((self.main_stream, self.total_sm))
         
         self.getLogits.set_stream((self.main_stream, self.total_sm))
         self.modelLayerNorm.set_stream((self.main_stream, self.total_sm))
@@ -411,8 +417,8 @@ class Pipeline():
             operation.set_stream(stream_tuple)
 
     def update_network_ops(self):
-        self.allReduce_o.update(self.tp_group)
-        self.allReduce_d.update(self.tp_group)
+        self.allReduce_o.update(self.tp_group, self.rank, self.tp_size, self.unique_nccl_ids[0:2])
+        self.allReduce_d.update(self.tp_group, self.rank, self.tp_size, self.unique_nccl_ids[2:4])
 
     def nanobatch_split(self):
         op_nanobatch_info_map: dict[str, tuple[NanoOpInfo, ...]] = {}
@@ -555,7 +561,9 @@ class Pipeline():
         return output
 
     def terminate(self):
+        print(f"Rank {self.rank}:  Terminating process group...")
         dist.destroy_process_group()
+        print(f"Rank {self.rank}:  Process group terminated.")
 
     # profile related functions
     def init_profile_data(self, append_mode=False):

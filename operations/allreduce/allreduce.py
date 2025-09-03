@@ -6,7 +6,8 @@ from utils.prof_marker import prof_marker
 from operations.operation_base import Operations, Operation_Layer
 from core.IOWrapper import IOWrapper
 from operations.impl_base import OperationImpl
-# from bind_allreduce
+from bind_all_reduce import NCCLWrapper
+
 
 class AllReduceTorchImpl(OperationImpl):
     category_tag = "torch"
@@ -14,14 +15,21 @@ class AllReduceTorchImpl(OperationImpl):
         super().__init__(op_base, stream, device)
         self.tp_size = op_base.tp_size
         self.subgroup = op_base.subgroup
+        self.rank = op_base.rank
+        self.world_size = op_base.tp_size
+        self.unique_nccl_id = op_base.unique_nccl_id[0]
         self.N = op_base.N
-        # self.reduce_buffer = op_base.inputs["input"].tensor.clone()
+        self.nccl_wrapper = NCCLWrapper(self.rank, self.world_size, self.unique_nccl_id)
     
     def run(self, input, output):
         with torch.cuda.stream(self.stream):
-            # temp = input.clone()
-            work = dist.all_reduce(input, op=dist.ReduceOp.SUM, group=self.subgroup, async_op=True)
-            work.wait()
+            handle = self.nccl_wrapper.all_reduce(input, "sum")
+            # print(f"Handle created: {handle}")
+            handle.wait()
+            # print("Handle.wait() completed")
+            # work = dist.all_reduce(input, op=dist.ReduceOp.SUM, group=self.subgroup, async_op=True)
+            # work.wait()
+            
             output.copy_(input)
 
 class AllReduce(Operations):
@@ -47,15 +55,18 @@ class AllReduce(Operations):
         self.inputs["input"].init_shape((0, self.N))
         self.outputs["output"].init_shape((0, self.N))
 
-    def update(self, subgroup):
+    def update(self, subgroup, rank, tp_size, unique_nccl_id):
         self.subgroup = subgroup
+        self.rank = rank
+        self.tp_size = tp_size
+        self.unique_nccl_id = unique_nccl_id
 
     def copy_nano(self, index):
         new_op = AllReduce(self.name, self.device, nano_idx=index)
         new_op.set_category(self.category)
         new_op.expand_layer(self.layer_list)
         new_op.setShape(self.N, self.tp_idx, self.tp_size)
-        new_op.update(self.subgroup)
+        new_op.update(self.subgroup, self.rank, self.tp_size, list(self.unique_nccl_id[index]))
 
         self.nano_ops.append(new_op)
 

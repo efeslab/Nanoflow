@@ -25,12 +25,18 @@ seq_len = 1024
 # stage1_figure_path = "8B_stage1_figure.png"
 # stage2_figure_path = "8B_stage2_figure.png"
 # dump_file = "8B_search_result.json"
+# stage1_figure_path = "8B_stage1_figure_large_btz_reverse_v.pdf"
+# stage2_figure_path = "8B_stage2_figure_large_btz_reverse_v.pdf"
+# dump_file = "8B_search_result_large_btz_reverse_v.json"
 
 
 pipeline = Pipeline_70B_AllReduce(TP_idx=0, TP_size=4)
-stage1_figure_path = "70B_stage1_figure.png"
-stage2_figure_path = "70B_stage2_figure.png"
-dump_file = "70B_search_result.json"
+# stage1_figure_path = "70B_stage1_figure.pdf"
+# stage2_figure_path = "70B_stage2_figure.pdf"
+# dump_file = "70B_search_result.json"
+stage1_figure_path = "70B_stage1_figure_reverse_v.pdf"
+stage2_figure_path = "70B_stage2_figure_reverse_v.pdf"
+dump_file = "70B_search_result_reverse_v.json"
 
 profile_dir = pipeline.profile_dir
 
@@ -382,63 +388,100 @@ for list1, list2 in itertools.combinations(category_lists, 2):
     print(f"filtered_list2: {[op.name for op in filtered_list2]}")
     for op1 in filtered_list1:
         # filter the elements in list2 that have smaller end_time.X than op1.start_time.X
-        filtered_list2_for_op1 = [op2 for op2 in filtered_list2 if op2.end_time.X < op1.start_time.X + epsilon]
+        filtered_list2_for_op1 = [op2 for op2 in list2 if op_name_to_name_idx_layer(op2.name)[2] <= 1 and op2.end_time.X < op1.start_time.X + 2*epsilon]
         if filtered_list2_for_op1:
             op2 = filtered_list2_for_op1[-1]
             print(f"Attempting to add dependency from {op2.name} to {op1.name}")
             if not (op1.is_extra_linked_before_op[op2.category] or op2.is_extra_linked_after_op[op1.category]):
                 print(f"Adding dependency from {op2.name} to {op1.name}")
-                op1.parent.append_dependency((op2.parent, False))
+                prev_layer_flag = False if op_name_to_name_idx_layer(op2.name)[2] == 1 else True
+                op1.parent.append_dependency((op2.parent, prev_layer_flag))
                 op1.is_extra_linked_before_op[op2.category] = True
                 op2.is_extra_linked_after_op[op1.category] = True
 
 
-
     for op2 in filtered_list2:
         # filter the elements in list1 that have smaller end_time.X than op2.start_time.X
-        filtered_list1_for_op2 = [op1 for op1 in filtered_list1 if op1.end_time.X < op2.start_time.X + epsilon]
+        filtered_list1_for_op2 = [op1 for op1 in list1 if op_name_to_name_idx_layer(op1.name)[2] <= 1 and op1.end_time.X < op2.start_time.X + 2*epsilon]
         if filtered_list1_for_op2:
             op1 = filtered_list1_for_op2[-1]
             print(f"Attempting to add dependency from {op1.name} to {op2.name}")
             if not (op2.is_extra_linked_before_op[op1.category] or op1.is_extra_linked_after_op[op2.category]):
                 print(f"Adding dependency from {op1.name} to {op2.name}")
-                op2.parent.append_dependency((op1.parent, False))
+                prev_layer_flag = False if op_name_to_name_idx_layer(op1.name)[2] == 1 else True
+                op2.parent.append_dependency((op1.parent, prev_layer_flag))
                 op2.is_extra_linked_before_op[op1.category] = True
                 op1.is_extra_linked_after_op[op2.category] = True
 
-# Extract unique operation types
-operation_types = sorted(set(str(n.category) for n in all_layered_ops))
-y_positions = {op_type: i for i, op_type in enumerate(operation_types)}
+# Extract unique operation types (categories) -> x axis
+operation_types = sorted({str(n.category) for n in all_layered_ops})
+x_positions = {op_type: i for i, op_type in enumerate(operation_types)}
 
-fig, ax = plt.subplots(figsize=(30, 6))
+# Taller figure since time is now vertical
+fig, ax = plt.subplots(figsize=(15, 30))
 
 for n in second_stage_nano_ops:
-    n_name = n.name
-    # Access the optimized values of the variables
+    # Values from optimizer
     start_time = n.start_time.X
-    duration = n.duration_map[(n.batch_size, n.p_choice.X)]  # Assuming duration is stored in a map with batch size as key
-    batch_size = n.batch_size
+    duration = n.duration_map[(n.batch_size, n.p_choice.X)]
     op_type = str(n.category)
+    x = x_positions[op_type]
 
-    y_position = y_positions[op_type]
-    
-    # Plot the operation as a horizontal bar
-    ax.barh(y_position, duration, left=start_time, height=0.8, alpha=0.7, edgecolor="black")
-    
-    # Annotate with operation name and batch size
-    label = f"{n.name}\nL{n.layer}\nP {n.p_choice.X}\n"
-    ax.text(start_time + duration / 2, y_position, label, ha="center", va="center", color="black", fontsize=12)
-    
-# Set y-ticks and labels
-ax.set_yticks(list(y_positions.values()))
-ax.set_yticklabels(list(y_positions.keys()))
-ax.set_xlabel("Time (ms)")
-ax.set_ylabel("Operation Type")
-ax.set_title("Nano Operations Timeline with Batch Sizes")
-ax.grid(True, linestyle="--", alpha=0.6)
+    # Vertical bar: height=duration, bottom=start_time
+    ax.bar(x, duration, bottom=start_time, width=0.8, alpha=0.7, edgecolor="black")
+
+    # Put the label rotated along the bar to save horizontal space
+    if duration > 0.03:  # Only label if the bar is tall enough
+        label = f"{n.name} L{n.layer} SM {n.p_choice.X}"
+    else:
+        label = None
+    ax.text(x, start_time + duration/2, label,
+            ha="center", va="center", rotation=0, fontsize=10, color="black")
+
+# Axes & labels (now swapped)
+ax.set_xticks(list(x_positions.values()))
+ax.set_xticklabels(list(x_positions.keys()), rotation=45, ha="right")
+ax.set_ylabel("Time (ms)")
+ax.set_xlabel("Operation Type")
+ax.set_title("Nano Operations Timeline with Batch Sizes (vertical)")
+ax.grid(True, axis="y", linestyle="--", alpha=0.6)
 
 plt.tight_layout()
 plt.savefig(stage2_figure_path)
+
+# # Extract unique operation types
+# operation_types = sorted(set(str(n.category) for n in all_layered_ops))
+# y_positions = {op_type: i for i, op_type in enumerate(operation_types)}
+
+# fig, ax = plt.subplots(figsize=(30, 6))
+
+# for n in second_stage_nano_ops:
+#     n_name = n.name
+#     # Access the optimized values of the variables
+#     start_time = n.start_time.X
+#     duration = n.duration_map[(n.batch_size, n.p_choice.X)]  # Assuming duration is stored in a map with batch size as key
+#     batch_size = n.batch_size
+#     op_type = str(n.category)
+
+#     y_position = y_positions[op_type]
+    
+#     # Plot the operation as a horizontal bar
+#     ax.barh(y_position, duration, left=start_time, height=0.8, alpha=0.7, edgecolor="black")
+    
+#     # Annotate with operation name and batch size
+#     label = f"{n.name}\nL{n.layer}\nP {n.p_choice.X}\n"
+#     ax.text(start_time + duration / 2, y_position, label, ha="center", va="center", color="black", fontsize=12)
+    
+# # Set y-ticks and labels
+# ax.set_yticks(list(y_positions.values()))
+# ax.set_yticklabels(list(y_positions.keys()))
+# ax.set_xlabel("Time (ms)")
+# ax.set_ylabel("Operation Type")
+# ax.set_title("Nano Operations Timeline with Batch Sizes")
+# ax.grid(True, linestyle="--", alpha=0.6)
+
+# plt.tight_layout()
+# plt.savefig(stage2_figure_path)
 
 output_overlap_map: defaultdict[str, dict[str, int]] = defaultdict(dict)
 output_op_infos: dict[str, dict[str, dict]] = {}
@@ -476,6 +519,9 @@ for op in second_stage_nano_ops:
     output_op_infos[op_basename][op.parent.name] = {
         "batch_idx": op_batch_idx,
         "batch_size": op.batch_size,
+        "start_time": op.start_time.X,
+        "end_time": op.end_time.X,
+        "duration_time": op.duration_map[(op.batch_size, op.p_choice.X)],
         "p_value": p_value,
         "algo_tag": algo_tag,
         "extra_dep": str_extra_dep,
@@ -488,8 +534,7 @@ for op in second_stage_nano_ops:
 import json
 # Save the output to a JSON file
 output_data = {
-    "operations": output_op_infos,
-    "overlaps": output_overlap_map
+    "operations": output_op_infos
 }
 with open(dump_file, "w") as f:
     json.dump(output_data, f, indent=4)

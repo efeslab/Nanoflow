@@ -62,7 +62,7 @@ class GEMM_N_Parallel(Operations):
         # print("tp_idx", self.tp_idx, "tp_size", self.tp_size)
         self.tp_N = N // tp_size
         self.tp_K = K
-        print("name", self.name, "N:", self.tp_N, "K:", self.tp_K)
+        # print("name", self.name, "N:", self.tp_N, "K:", self.tp_K)
         self.weights["B"].shape = (self.tp_K, self.tp_N)
         self.inputs["A"].init_shape((0, self.tp_K))
         if self.bias:
@@ -133,7 +133,7 @@ class GEMM_N_Parallel(Operations):
                 stride = self.N // self.tp_size
                 offset = self.tp_idx * stride
 
-                C = self.inputs["C"].tensor[:, offset: offset + stride] if self.bias else torch.empty((self.batch_size, stride), dtype=torch.float16, device=self.device)
+                C = self.inputs["C"].tensor[:, offset: offset + stride] if self.bias else None
             self.impl.run(self.inputs["A"].tensor, self.weights["B"].weight_map[layer], C, self.outputs["D"].tensor)
 
     def profile_run(self):

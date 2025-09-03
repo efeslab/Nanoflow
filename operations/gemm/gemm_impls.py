@@ -25,7 +25,7 @@ class GEMMTorchImpl(OperationImpl):
         with torch.cuda.stream(self.stream):
             if self.op_base.sm_count is not None:
                 set_cublas_sm_count_target(self.op_base.sm_count)
-            if self.bias or self.alpha:
+            if self.bias or self.alpha != 1:
                 torch.addmm(C, A, B, beta=self.beta, alpha=self.alpha, out=D)
             else:
                 torch.matmul(A, B, out=D)
