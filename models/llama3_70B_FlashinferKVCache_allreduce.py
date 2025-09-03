@@ -6,7 +6,7 @@ import torch.distributed as dist
 from bind_all_reduce import NCCLWrapper
 
 
-from flashinfer.green_ctx import split_device_green_ctx_by_sm_count
+from utils.green_ctx import split_device_green_ctx_by_sm_count
 from operations.operation_base import NanoOpInfo, Operations, Operation_Layer
 from operations.activation.silu import Activation
 from operations.allreduce.allreduce import AllReduce
