@@ -7,6 +7,7 @@ pip install nvtx
 pip install loguru
 pip install transformers
 pip install matplotlib
+pip install nvmath-python
 
 
 cd ..

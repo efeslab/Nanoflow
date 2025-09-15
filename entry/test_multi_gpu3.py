@@ -174,7 +174,7 @@ def test_performance():
     output_text = tokenizer.batch_decode(list(output_strings.values())[:2], skip_special_tokens=True)
     print(output_text)
 
-def test_profile():
+def profile():
     # Spawn one worker per GPU (or per unit of parallelism).
     prefill_context_ids = tokenizer.encode(prefill_context)  # which length is 1912.
     processes = []
@@ -234,6 +234,7 @@ if __name__ == '__main__':
 
     arg_parser = argparse.ArgumentParser()
     arg_parser.add_argument("-l", "--load_hf_weight", action="store_true", help="Load weights from huggingface")
+    arg_parser.add_argument("-tp", "--tensor_parallel_size", type=int, required=True, help="Tensor parallel size")
 
     args = arg_parser.parse_args()
 
@@ -246,17 +247,13 @@ if __name__ == '__main__':
 
     world_size = torch.cuda.device_count()
     print("world size: ", world_size)
-    TP_size = 4
+    TP_size = args.tensor_parallel_size
     PP_size = 1
     DP_size = 1
 
-    import bind_all_reduce
-    unique_id_1 = bind_all_reduce.get_nccl_unique_id()
-    unique_id_2 = bind_all_reduce.get_nccl_unique_id()
-    unique_id_3 = bind_all_reduce.get_nccl_unique_id()
-    unique_id_4 = bind_all_reduce.get_nccl_unique_id()
+    from bind_all_reduce import NCCLWrapper
 
-    unique_nccl_ids = [unique_id_1, unique_id_2, unique_id_3, unique_id_4]
+    unique_nccl_ids = [NCCLWrapper.get_nccl_unique_id() for _ in range(2)]
     assert world_size == TP_size * PP_size * DP_size, f"world size {world_size} is not equal to TP size {TP_size} * PP size {PP_size} * DP size {DP_size}"
 
     if args.load_hf_weight:
@@ -290,6 +287,6 @@ if __name__ == '__main__':
     
     print("create shared variables, ", time.perf_counter() - T0)
     
-    test_correctness_new()
-    # test_performance()
-    # test_profile()
+    # test_correctness_new()
+    test_performance()
+    # profile()

@@ -270,7 +270,7 @@ class Operations():
             for i, nano_op in enumerate(self.nano_ops):
                 nano_op.set_stream(stream[i])
         else:
-            print(f"Setting stream for {self.name} (isNanoSplit: {self.isNanoSplit}) to {stream}")
+            # print(f"Setting stream for {self.name} (isNanoSplit: {self.isNanoSplit}) to {stream}")
             assert not isinstance(stream, list), "Stream must be a single stream"
             self.stream = stream[0]
             self.sm_count = stream[1]

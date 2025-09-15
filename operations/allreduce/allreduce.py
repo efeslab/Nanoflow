@@ -17,16 +17,13 @@ class AllReduceTorchImpl(OperationImpl):
         self.subgroup = op_base.subgroup
         self.rank = op_base.rank
         self.world_size = op_base.tp_size
-        self.unique_nccl_id = op_base.unique_nccl_id[0]
         self.N = op_base.N
-        self.nccl_wrapper = NCCLWrapper(self.rank, self.world_size, self.unique_nccl_id)
+        self.nccl_wrapper = op_base.nccl_wrapper
     
     def run(self, input, output):
         with torch.cuda.stream(self.stream):
-            handle = self.nccl_wrapper.all_reduce(input, "sum")
-            # print(f"Handle created: {handle}")
-            handle.wait()
-            # print("Handle.wait() completed")
+            self.nccl_wrapper.all_reduce(input, "sum")
+
             # work = dist.all_reduce(input, op=dist.ReduceOp.SUM, group=self.subgroup, async_op=True)
             # work.wait()
             
@@ -44,6 +41,7 @@ class AllReduce(Operations):
         self.impl_map = {}
         self.init_impl_map()
         self.op_layer = AllReduce_Layer
+        self.nccl_wrapper = None
     
     def init_impl_map(self):
         self.add_impl(AllReduceTorchImpl)
@@ -60,13 +58,17 @@ class AllReduce(Operations):
         self.rank = rank
         self.tp_size = tp_size
         self.unique_nccl_id = unique_nccl_id
+        # print("unique_nccl_id:", self.unique_nccl_id)
+        if unique_nccl_id is not None:
+            self.nccl_wrapper = NCCLWrapper(self.rank, self.tp_size, self.unique_nccl_id)
 
     def copy_nano(self, index):
         new_op = AllReduce(self.name, self.device, nano_idx=index)
         new_op.set_category(self.category)
         new_op.expand_layer(self.layer_list)
         new_op.setShape(self.N, self.tp_idx, self.tp_size)
-        new_op.update(self.subgroup, self.rank, self.tp_size, list(self.unique_nccl_id[index]))
+        new_op.update(self.subgroup, self.rank, self.tp_size, None)
+        new_op.nccl_wrapper = self.nccl_wrapper
 
         self.nano_ops.append(new_op)
 
