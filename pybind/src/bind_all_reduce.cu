@@ -88,6 +88,59 @@ public:
     return input;
   }
 
+auto all_reduce_uninplace(torch::Tensor &input, torch::Tensor &output, const std::string &op_str = "sum")
+      -> torch::Tensor {
+    assert(initialized_ && "NCCLWrapper not initialized");
+    assert(input.is_cuda() && "Input tensor must be on GPU");
+    assert(input.is_contiguous() && "Input tensor must be contiguous");
+    assert(output.is_cuda() && "Output tensor must be on GPU");
+    assert(output.is_contiguous() && "Output tensor must be contiguous");
+    assert(input.sizes() == output.sizes() && "Input and output tensors must have the same shape");
+    assert(input.scalar_type() == output.scalar_type() && "Input and output tensors must have the same data type");
+
+
+    ncclRedOp_t op;
+    if (op_str == "sum") {
+      op = ncclSum;
+    } else if (op_str == "prod" || op_str == "product") {
+      op = ncclProd;
+    } else if (op_str == "max") {
+      op = ncclMax;
+    } else if (op_str == "min") {
+      op = ncclMin;
+    } else {
+      throw std::runtime_error("Unsupported reduction operation: " + op_str);
+    }
+
+    auto input_ptr = input.data_ptr();
+    auto output_ptr = output.data_ptr();
+    auto num_elements = input.numel();
+    auto dtype = input.scalar_type();
+
+    ncclDataType_t nccl_dtype;
+    switch (dtype) {
+    case torch::kFloat32:
+      nccl_dtype = ncclFloat32;
+      break;
+    case torch::kFloat16:
+      nccl_dtype = ncclFloat16;
+      break;
+    case torch::kInt32:
+      nccl_dtype = ncclInt32;
+      break;
+    case torch::kInt64:
+      nccl_dtype = ncclInt64;
+      break;
+    default:
+      assert(false && "Unsupported data type for all-reduce");
+    }
+
+    ncclAllReduce(input_ptr, output_ptr, num_elements, nccl_dtype, op, comm_,
+                  c10::cuda::getCurrentCUDAStream());
+
+    return output;
+  }
+
   void barrier() {
     auto tensor =
         torch::ones({}, torch::dtype(torch::kInt32).device(torch::kCUDA));
