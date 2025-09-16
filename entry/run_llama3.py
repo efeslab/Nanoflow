@@ -8,7 +8,7 @@ from utils.prof_marker import prof_marker
 from utils.frontend import requestManager
 from utils.util_functions import prepare_weight
 from transformers import AutoTokenizer
-from input_test import prefill_context
+from utils.input_test import prefill_context
 
 
 # from models.llama3_KVCacheTorch import Pipeline

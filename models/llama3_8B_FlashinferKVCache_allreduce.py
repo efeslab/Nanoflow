@@ -3,6 +3,8 @@ import json
 from typing import Any, Optional
 import torch
 import torch.distributed as dist
+from bind_all_reduce import NCCLWrapper
+
 
 from utils.green_ctx import split_device_green_ctx_by_sm_count
 from operations.operation_base import NanoOpInfo, Operations, Operation_Layer
@@ -31,7 +33,14 @@ from utils.prof_marker import prof_marker
 
 class Pipeline:
     def __init__(
-        self, TP_idx: int, TP_size: int, PP_idx=0, PP_size=1, DP_idx=0, DP_size=1
+        self,
+        TP_idx: int,
+        TP_size: int,
+        PP_idx=0,
+        PP_size=1,
+        DP_idx=0,
+        DP_size=1,
+        unique_nccl_ids=[],
     ):
         # Set parameters as instance variables.
         self.pipeline_name = (
@@ -44,10 +53,9 @@ class Pipeline:
         self.vocab_size = 128256
         self.hidden_dim = 4096
         self.intermediate_dim = 14 * 1024
-        self.batch_size = 0
-        self.num_layers = 32
         self.global_batch_size: Optional[int] = None
         self.decode_batch_size: Optional[int] = None
+        self.num_layers = 32
         self.layer_list = [i for i in range(self.num_layers)]
         self.num_cuda_devices = torch.cuda.device_count()
         self.page_size = 16
@@ -58,6 +66,7 @@ class Pipeline:
         self.pp_size = PP_size
         self.dp_idx = DP_idx
         self.dp_size = DP_size
+        self.unique_nccl_ids = unique_nccl_ids
 
         assert (
             self.pp_size * self.dp_size * self.tp_size == self.num_cuda_devices
@@ -111,9 +120,9 @@ class Pipeline:
             for i in range((num_sm_counts + 1) // 2):
                 sm_count_1 = self.sm_counts[i]
                 sm_count_2 = self.sm_counts[num_sm_counts - 1 - i]
-                print(
-                    f"Creating green context streams for SM counts: {sm_count_1}, {sm_count_2}"
-                )
+                # print(
+                #     f"Creating green context streams for SM counts: {sm_count_1}, {sm_count_2}"
+                # )
 
                 (stream_1, stream_2, _), _ = split_device_green_ctx_by_sm_count(
                     torch.device(self.device), [sm_count_1, sm_count_2]
@@ -127,9 +136,9 @@ class Pipeline:
         for i in range((num_sm_counts + 1) // 2):
             sm_count_1 = self.sm_counts[i]
             sm_count_2 = self.sm_counts[num_sm_counts - 1 - i]
-            print(
-                f"Creating green context streams for SM counts: {sm_count_1}, {sm_count_2}"
-            )
+            # print(
+            #     f"Creating green context streams for SM counts: {sm_count_1}, {sm_count_2}"
+            # )
 
             (stream_1, stream_2, _), _ = split_device_green_ctx_by_sm_count(
                 torch.device(self.device), [sm_count_1, sm_count_2]
@@ -142,6 +151,7 @@ class Pipeline:
         self.profile_streams[f"TEST_TOTAL"] = (torch.cuda.Stream(), self.total_sm)
 
     def init_external_data(self):
+        print("Initializing external data...")
         # self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048 * 14, self.page_size, self.tp_size, self.device) # H100 TP4 config
         self.kv_pool = DistKVPool(
             self.num_layers,
@@ -152,9 +162,11 @@ class Pipeline:
             self.tp_size,
             self.device,
         )  # H200 TP4 config
+        # self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048*12, self.page_size, self.tp_size, self.device) # H200 TP2 config
         self.kv_cache = BatchedDistKVCache(self.kv_pool)
 
     def reset(self):
+        print("Resetting pipeline state...")
         # reset kv cache
         self.kv_cache.reset()
 
@@ -341,7 +353,7 @@ class Pipeline:
         self.allReduce_d.outputs["output"] >> self.copy_d.inputs["input_0"]
 
         self.copy_d.outputs["output_0"] >> self.modelLayerNorm.inputs["input"]
-        self.copy_d.outputs["output_1"] >> (self.copy_embedding.inputs["input_1"], True)
+        self.copy_d.outputs["output_1"] >> (self.copy_embedding.inputs["input_1"], 1)
 
         self.modelLayerNorm.outputs["output"] >> self.getLogits.inputs["A"]
 
@@ -353,6 +365,7 @@ class Pipeline:
             operation.checkConnection()
 
     def init_executor(self):
+        print("Initializing executor...")
         self.executor = Executor(self.all_layer_operations, self.layer_list)
         self.executor.plan_layer_ordering()
 
@@ -422,7 +435,7 @@ class Pipeline:
         self.layerNormAttn.set_category(CategoryType.COMP)
         self.kqv.set_category(CategoryType.COMP)
         self.ropeAppend.set_category(CategoryType.COMP)
-        self.decAttn.set_category(CategoryType.MEM)
+        self.decAttn.set_category(CategoryType.COMP)
         self.pfAttn.set_category(CategoryType.COMP)
         self.layerNormFFN.set_category(CategoryType.COMP)
         self.o.set_category(CategoryType.COMP)
@@ -438,10 +451,17 @@ class Pipeline:
             op.setBatchSize(None)
 
     def config_batch_size(self):
+        print(
+            "Configuring batch sizes: global_batch_size =",
+            self.global_batch_size,
+            ", decode_batch_size =",
+            self.decode_batch_size,
+        )
         self.global_input.setBatchSize(self.global_batch_size)
         self.decAttn.setBatchSize(self.decode_batch_size)
 
     def config_algorithm(self):
+        print("Configuring algorithms...")
         params = {
             "use_cuda_graph": self.is_cuda_graph_enabled,
         }
@@ -491,6 +511,7 @@ class Pipeline:
         # print("tp_group in main: ", self.tp_group)
 
     def config_streams(self):
+        print("Configuring streams...")
         self.global_input.set_stream((self.main_stream, self.total_sm))
         self.gen_embedding.set_stream((self.main_stream, self.total_sm))
 
@@ -526,8 +547,14 @@ class Pipeline:
             operation.set_stream(stream_tuple)
 
     def update_network_ops(self):
-        self.allReduce_o.update(self.tp_group)
-        self.allReduce_d.update(self.tp_group)
+        print("Updating network operations with NCCL IDs...")
+        # print("original unique_nccl_ids: ", self.unique_nccl_ids)
+        self.allReduce_o.update(
+            self.tp_group, self.rank, self.tp_size, self.unique_nccl_ids[0:5]
+        )
+        self.allReduce_d.update(
+            self.tp_group, self.rank, self.tp_size, self.unique_nccl_ids[5:10]
+        )
 
     def nanobatch_split(self):
         op_nanobatch_info_map: dict[str, tuple[NanoOpInfo, ...]] = {}
@@ -561,6 +588,7 @@ class Pipeline:
             self.all_layer_operations.extend(operation.children)
 
     def update_allocate_buffers(self):
+        print("Allocating buffers...")
         # Build list of buffers(op_device)
         buffers_list = []
         for operation in self.all_operations:
@@ -656,6 +684,7 @@ class Pipeline:
                     self.config_streams()
                 self.config_algorithm()
                 self.init_executor()
+                print("Executor plan_layer_ordering finished")
 
         with prof_marker("update_step_4"):
             request_length = torch.tensor(
@@ -686,6 +715,7 @@ class Pipeline:
             self.decAttn.update(self.cumsum_input)
         with prof_marker("update_step_10"):
             self.pfAttn.update(self.cumsum_input)
+        # print("Update finished")
 
     def run(self, file_name="out-tp-test", filefolder_name="llama3-kv-out-tp-test"):
 
@@ -693,13 +723,17 @@ class Pipeline:
 
         # os.makedirs(f"./{filefolder_name}", exist_ok=True)
 
-        # self.executor.execute(
+        self.executor.execute(
+            temp_out,
+            self.main_stream,
+            plan_cuda_graph=self.plan_cuda_graph,
+            is_cuda_graph_enabled=self.is_cuda_graph_enabled,
+        )
+        # self.executor.print_debug(
         #     temp_out,
-        #     self.main_stream,
-        #     plan_cuda_graph=self.plan_cuda_graph,
-        #     is_cuda_graph_enabled=self.is_cuda_graph_enabled,
+        #     f"{file_name}_{self.rank}",
+        #     filefolder_name=f"{filefolder_name}_{self.rank}",
         # )
-        self.executor.print_debug(temp_out, f"{file_name}_{self.rank}", filefolder_name=f"{filefolder_name}_{self.rank}")
 
         with prof_marker("after_execute_before_return"):
             temp_out = temp_out.cpu()
@@ -714,7 +748,9 @@ class Pipeline:
         return output
 
     def terminate(self):
+        print(f"Rank {self.rank}:  Terminating process group...")
         dist.destroy_process_group()
+        print(f"Rank {self.rank}:  Process group terminated.")
 
     # profile related functions
     def init_profile_data(self, append_mode=False):
