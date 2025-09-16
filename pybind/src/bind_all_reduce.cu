@@ -41,55 +41,7 @@ public:
     return NcclIdToWrapper(id);
   }
 
-  auto all_reduce(torch::Tensor &input, const std::string &op_str = "sum")
-      -> torch::Tensor {
-    assert(initialized_ && "NCCLWrapper not initialized");
-    assert(input.is_cuda() && "Input tensor must be on GPU");
-    assert(input.is_contiguous() && "Input tensor must be contiguous");
-
-    ncclRedOp_t op;
-    if (op_str == "sum") {
-      op = ncclSum;
-    } else if (op_str == "prod" || op_str == "product") {
-      op = ncclProd;
-    } else if (op_str == "max") {
-      op = ncclMax;
-    } else if (op_str == "min") {
-      op = ncclMin;
-    } else {
-      throw std::runtime_error("Unsupported reduction operation: " + op_str);
-    }
-
-    auto input_ptr = input.data_ptr();
-    auto num_elements = input.numel();
-    auto dtype = input.scalar_type();
-
-    ncclDataType_t nccl_dtype;
-    switch (dtype) {
-    case torch::kFloat32:
-      nccl_dtype = ncclFloat32;
-      break;
-    case torch::kFloat16:
-      nccl_dtype = ncclFloat16;
-      break;
-    case torch::kInt32:
-      nccl_dtype = ncclInt32;
-      break;
-    case torch::kInt64:
-      nccl_dtype = ncclInt64;
-      break;
-    default:
-      assert(false && "Unsupported data type for all-reduce");
-    }
-
-    ncclAllReduce(input_ptr, input_ptr, num_elements, nccl_dtype, op, comm_,
-                  c10::cuda::getCurrentCUDAStream());
-
-    return input;
-  }
-
-auto all_reduce_uninplace(torch::Tensor &input, torch::Tensor &output, const std::string &op_str = "sum")
-      -> torch::Tensor {
+  void all_reduce(torch::Tensor &input, torch::Tensor &output, const std::string &op_str = "sum"){
     assert(initialized_ && "NCCLWrapper not initialized");
     assert(input.is_cuda() && "Input tensor must be on GPU");
     assert(input.is_contiguous() && "Input tensor must be contiguous");
@@ -138,8 +90,53 @@ auto all_reduce_uninplace(torch::Tensor &input, torch::Tensor &output, const std
     ncclAllReduce(input_ptr, output_ptr, num_elements, nccl_dtype, op, comm_,
                   c10::cuda::getCurrentCUDAStream());
 
-    return output;
   }
+
+  void all_reduce_inplace(torch::Tensor &input, const std::string &op_str = "sum"){
+    assert(initialized_ && "NCCLWrapper not initialized");
+    assert(input.is_cuda() && "Input tensor must be on GPU");
+    assert(input.is_contiguous() && "Input tensor must be contiguous");
+
+    ncclRedOp_t op;
+    if (op_str == "sum") {
+      op = ncclSum;
+    } else if (op_str == "prod" || op_str == "product") {
+      op = ncclProd;
+    } else if (op_str == "max") {
+      op = ncclMax;
+    } else if (op_str == "min") {
+      op = ncclMin;
+    } else {
+      throw std::runtime_error("Unsupported reduction operation: " + op_str);
+    }
+
+    auto input_ptr = input.data_ptr();
+    auto num_elements = input.numel();
+    auto dtype = input.scalar_type();
+
+    ncclDataType_t nccl_dtype;
+    switch (dtype) {
+    case torch::kFloat32:
+      nccl_dtype = ncclFloat32;
+      break;
+    case torch::kFloat16:
+      nccl_dtype = ncclFloat16;
+      break;
+    case torch::kInt32:
+      nccl_dtype = ncclInt32;
+      break;
+    case torch::kInt64:
+      nccl_dtype = ncclInt64;
+      break;
+    default:
+      assert(false && "Unsupported data type for all-reduce");
+    }
+
+    ncclAllReduce(input_ptr, input_ptr, num_elements, nccl_dtype, op, comm_,
+                  c10::cuda::getCurrentCUDAStream());
+
+  }
+
 
   void barrier() {
     auto tensor =
@@ -185,7 +182,9 @@ PYBIND11_MODULE(bind_all_reduce, m) {
       .def_static("get_nccl_unique_id", &NCCLWrapper::get_nccl_unique_id,
                   "Get the unique ID for NCCL initialization")
       .def("all_reduce", &NCCLWrapper::all_reduce,
-           "Perform all-reduce operation")
+           "Perform all-reduce operation with separate input and output tensors")
+      .def("all_reduce_inplace", &NCCLWrapper::all_reduce_inplace,
+           "Perform all-reduce operation in-place")
       .def("barrier", &NCCLWrapper::barrier, "Synchronize all processes")
       .def("send", &NCCLWrapper::send, "Send a tensor to a destination process")
       .def("recv", &NCCLWrapper::recv, "Receive a tensor from a source process");

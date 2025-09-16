@@ -230,10 +230,10 @@ for op_type, nano_ops in category_nano_op_map.items():
 # Apply stream dependencies
 for op_type, nano_ops in category_nano_op_map.items():
     print(f"{op_type}: {[f'{n.name}({n.start_time.X:.2f})' for n in nano_ops]}")
-    nano_ops[0].parent.append_dependency((nano_ops[-1].parent, True))
+    nano_ops[0].parent.append_dependency((nano_ops[-1].parent, 1))
     for op, next_op in zip(nano_ops[:-1], nano_ops[1:]):
         print(f"Linking {op.name} to {next_op.name}")
-        next_op.parent.append_dependency((op.parent, False))
+        next_op.parent.append_dependency((op.parent, 0))
         # print(f"Linking {op.name} to {next_op.name}, prev_layer_dep: {prev_layer_dep}, next_layer_dep: {next_layer_dep}")
 
 # second search stage
@@ -388,27 +388,36 @@ for list1, list2 in itertools.combinations(category_lists, 2):
     print(f"filtered_list2: {[op.name for op in filtered_list2]}")
     for op1 in filtered_list1:
         # filter the elements in list2 that have smaller end_time.X than op1.start_time.X
-        filtered_list2_for_op1 = [op2 for op2 in list2 if op_name_to_name_idx_layer(op2.name)[2] <= 1 and op2.end_time.X < op1.start_time.X + 2*epsilon]
+        filtered_list2_for_op1 = [op2 for op2 in list2 if op2.end_time.X < op1.start_time.X + 2*epsilon]
         if filtered_list2_for_op1:
             op2 = filtered_list2_for_op1[-1]
             print(f"Attempting to add dependency from {op2.name} to {op1.name}")
             if not (op1.is_extra_linked_before_op[op2.category] or op2.is_extra_linked_after_op[op1.category]):
                 print(f"Adding dependency from {op2.name} to {op1.name}")
-                prev_layer_flag = False if op_name_to_name_idx_layer(op2.name)[2] == 1 else True
+                op2_layer = op_name_to_name_idx_layer(op2.name)[2]
+                prev_layer_flag = 0
+                if op2_layer == 0:
+                    prev_layer_flag = 1
+                elif op2_layer == 2:
+                    prev_layer_flag = -1
                 op1.parent.append_dependency((op2.parent, prev_layer_flag))
                 op1.is_extra_linked_before_op[op2.category] = True
                 op2.is_extra_linked_after_op[op1.category] = True
 
-
     for op2 in filtered_list2:
         # filter the elements in list1 that have smaller end_time.X than op2.start_time.X
-        filtered_list1_for_op2 = [op1 for op1 in list1 if op_name_to_name_idx_layer(op1.name)[2] <= 1 and op1.end_time.X < op2.start_time.X + 2*epsilon]
+        filtered_list1_for_op2 = [op1 for op1 in list1 if op1.end_time.X < op2.start_time.X + 2*epsilon]
         if filtered_list1_for_op2:
             op1 = filtered_list1_for_op2[-1]
             print(f"Attempting to add dependency from {op1.name} to {op2.name}")
             if not (op2.is_extra_linked_before_op[op1.category] or op1.is_extra_linked_after_op[op2.category]):
                 print(f"Adding dependency from {op1.name} to {op2.name}")
-                prev_layer_flag = False if op_name_to_name_idx_layer(op1.name)[2] == 1 else True
+                op1_layer = op_name_to_name_idx_layer(op1.name)[2]
+                prev_layer_flag = 0
+                if op1_layer == 0:
+                    prev_layer_flag = 1
+                elif op1_layer == 2:
+                    prev_layer_flag = -1
                 op2.parent.append_dependency((op1.parent, prev_layer_flag))
                 op2.is_extra_linked_before_op[op1.category] = True
                 op1.is_extra_linked_after_op[op2.category] = True
@@ -423,7 +432,8 @@ fig, ax = plt.subplots(figsize=(15, 30))
 for n in second_stage_nano_ops:
     # Values from optimizer
     start_time = n.start_time.X
-    duration = n.duration_map[(n.batch_size, n.p_choice.X)]
+    p_value = round(n.p_choice.X)
+    duration = n.duration_map[(n.batch_size, p_value)]
     op_type = str(n.category)
     x = x_positions[op_type]
 
@@ -432,7 +442,7 @@ for n in second_stage_nano_ops:
 
     # Put the label rotated along the bar to save horizontal space
     if duration > 0.03:  # Only label if the bar is tall enough
-        label = f"{n.name} L{n.layer} SM {n.p_choice.X}"
+        label = f"{n.name} L{n.layer} SM {p_value}"
     else:
         label = None
     ax.text(x, start_time + duration/2, label,

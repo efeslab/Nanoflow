@@ -36,7 +36,7 @@ class Executor():
                 # print("dep_on_prev_layer", dep_on_prev_layer) if layer == 0 else None
                 if (self.not_this_layer(dep, layer)):
                     continue
-                if dep_on_prev_layer:
+                if dep_on_prev_layer == 1:
                     if layer > 0:
                         prev_op_name = f"{dep.name}_{layer - 1}"
                         # check if the previous layer op exists
@@ -45,13 +45,21 @@ class Executor():
                             op.append_prev_op_layer(G.nodes[prev_op_name]['op'])
                             G.nodes[prev_op_name]['op'].set_is_depended_on(op)
                             # print("op.name", op.name, "prev_op_name", prev_op_name)
-                else:
+                elif dep_on_prev_layer == 0:
                     prev_op_name = f"{dep.name}_{layer}"
                     if G.has_node(prev_op_name):
                         G.add_edge(prev_op_name, f"{op.name}")
                         op.append_prev_op_layer(G.nodes[prev_op_name]['op'])
                         G.nodes[prev_op_name]['op'].set_is_depended_on(op)
                         # print("op.name", op.name, "prev_op_name", prev_op_name)
+                elif dep_on_prev_layer == -1:
+                    if layer < self.layer_list[-1]:
+                        prev_op_name = f"{dep.name}_{layer + 1}"
+                        if G.has_node(prev_op_name):
+                            G.add_edge(prev_op_name, f"{op.name}")
+                            op.append_prev_op_layer(G.nodes[prev_op_name]['op'])
+                            G.nodes[prev_op_name]['op'].set_is_depended_on(op)
+                            # print("op.name", op.name, "prev_op_name", prev_op_name)
 
         self.ordered_operations = list(nx.topological_sort(G))
         # print(self.ordered_operations)

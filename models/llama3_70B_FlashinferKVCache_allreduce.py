@@ -274,7 +274,7 @@ class Pipeline():
         self.allReduce_d.outputs["output"] >> self.copy_d.inputs["input_0"]
 
         self.copy_d.outputs["output_0"] >> self.modelLayerNorm.inputs["input"]
-        self.copy_d.outputs["output_1"] >> (self.copy_embedding.inputs["input_1"], True)
+        self.copy_d.outputs["output_1"] >> (self.copy_embedding.inputs["input_1"], 1)
 
         self.modelLayerNorm.outputs["output"] >> self.getLogits.inputs["A"]
 
@@ -426,8 +426,8 @@ class Pipeline():
     def update_network_ops(self):
         print("Updating network operations with NCCL IDs...")
         # print("original unique_nccl_ids: ", self.unique_nccl_ids)
-        self.allReduce_o.update(self.tp_group, self.rank, self.tp_size, self.unique_nccl_ids[0])
-        self.allReduce_d.update(self.tp_group, self.rank, self.tp_size, self.unique_nccl_ids[1])
+        self.allReduce_o.update(self.tp_group, self.rank, self.tp_size, self.unique_nccl_ids[0:5])
+        self.allReduce_d.update(self.tp_group, self.rank, self.tp_size, self.unique_nccl_ids[5:10])
 
     def nanobatch_split(self):
         op_nanobatch_info_map: dict[str, tuple[NanoOpInfo, ...]] = {}

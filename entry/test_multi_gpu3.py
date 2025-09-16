@@ -253,7 +253,7 @@ if __name__ == '__main__':
 
     from bind_all_reduce import NCCLWrapper
 
-    unique_nccl_ids = [NCCLWrapper.get_nccl_unique_id() for _ in range(2)]
+    unique_nccl_ids = [NCCLWrapper.get_nccl_unique_id() for _ in range(10)]
     assert world_size == TP_size * PP_size * DP_size, f"world size {world_size} is not equal to TP size {TP_size} * PP size {PP_size} * DP size {DP_size}"
 
     if args.load_hf_weight:
