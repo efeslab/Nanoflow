@@ -43,7 +43,7 @@ class Operations():
         self.batch_size = None
 
         self.device = device
-        self.extra_dep: list[tuple[Operations, bool]] = []
+        self.extra_dep: list[tuple[Operations, int]] = []
 
         self.impl_map: dict[str, Type[OperationImpl]] = {}
         self.op_layer: Type[Operation_Layer]
@@ -276,7 +276,7 @@ class Operations():
             self.sm_count = stream[1]
 
 
-    def append_dependency(self, extra_dep: tuple["Operations", bool]): # add extra dependency before the operation
+    def append_dependency(self, extra_dep: tuple["Operations", int]): # add extra dependency before the operation
         if extra_dep not in self.extra_dep:
             self.extra_dep.append(extra_dep)
 
@@ -348,11 +348,11 @@ class Operation_Layer:
 
     @property
     def prerequisites(self):
-        dep: list[tuple[Operations, bool]] = []
+        dep: list[tuple[Operations, int]] = []
         dep.extend(self.parent.extra_dep)
         # print("init dep: ", self.name, "dep: ", [dep[0].name for dep in dep])
         prev: list[IOWrapper] = []
-        depend_on_prev: list[bool] = []
+        depend_on_prev: list[int] = []
         for _, input_wrapper in self.parent.inputs.items():
             prev.extend(input_wrapper.actual_prev)
             depend_on_prev.extend(input_wrapper.actual_prev_depend_on_prev_layer)

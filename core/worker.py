@@ -6,7 +6,6 @@ from utils.prof_marker import prof_marker
 weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
 profile_result_path = "../auto_search/70B_search_result.json"
 
-# def worker(start_time, rank, request_queue: mp.Queue, shared_decode_bts, result_queue: mp.Queue, shared_array, barrier, work_pipeline, command, input_ids): --- Ignore ---
 def worker(start_time, rank, request_queue: mp.Queue, shared_decode_bts, result_queue: mp.Queue, barrier, work_pipeline, use_auto_search, use_nanosplit, use_cuda_graph, command):
     torch.cuda.set_device(rank)
     device = f"cuda:{rank}"

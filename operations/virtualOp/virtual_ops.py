@@ -90,5 +90,5 @@ class Redist(Operations):
             for output_wrapper in self.outputs.values():
                 input_wrapper.nano_dist_next.append(output_wrapper)
                 output_wrapper.nano_dist_prev.append(input_wrapper)
-                output_wrapper.nano_dist_prev_depend_on_prev_layer.append(False)
+                output_wrapper.nano_dist_prev_depend_on_prev_layer.append(0)
 

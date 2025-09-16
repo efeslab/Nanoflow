@@ -22,12 +22,14 @@ class AllReduceTorchImpl(OperationImpl):
     
     def run(self, input, output):
         with torch.cuda.stream(self.stream):
-            self.nccl_wrapper.all_reduce(input, "sum")
-
+            # self.nccl_wrapper.all_reduce_inplace(input, "sum")
+            
             # work = dist.all_reduce(input, op=dist.ReduceOp.SUM, group=self.subgroup, async_op=True)
             # work.wait()
             
-            output.copy_(input)
+            # output.copy_(input)
+            self.nccl_wrapper.all_reduce(input, output, "sum")
+
 
 class AllReduce(Operations):
     def __init__(self, name, device, nano_idx=None):
@@ -53,22 +55,25 @@ class AllReduce(Operations):
         self.inputs["input"].init_shape((0, self.N))
         self.outputs["output"].init_shape((0, self.N))
 
-    def update(self, subgroup, rank, tp_size, unique_nccl_id):
+    def update(self, subgroup, rank, tp_size, unique_nccl_ids):
         self.subgroup = subgroup
         self.rank = rank
         self.tp_size = tp_size
-        self.unique_nccl_id = unique_nccl_id
+        self.unique_nccl_ids = unique_nccl_ids
         # print("unique_nccl_id:", self.unique_nccl_id)
-        if unique_nccl_id is not None:
-            self.nccl_wrapper = NCCLWrapper(self.rank, self.tp_size, self.unique_nccl_id)
+        if unique_nccl_ids is not None:
+            self.nccl_wrapper = NCCLWrapper(self.rank, self.tp_size, self.unique_nccl_ids[0])
 
     def copy_nano(self, index):
         new_op = AllReduce(self.name, self.device, nano_idx=index)
         new_op.set_category(self.category)
         new_op.expand_layer(self.layer_list)
         new_op.setShape(self.N, self.tp_idx, self.tp_size)
-        new_op.update(self.subgroup, self.rank, self.tp_size, None)
-        new_op.nccl_wrapper = self.nccl_wrapper
+        if self.unique_nccl_ids is not None:
+            new_op.update(self.subgroup, self.rank, self.tp_size, self.unique_nccl_ids[index + 1: index + 2])
+        else:
+            new_op.update(self.subgroup, self.rank, self.tp_size, None)
+        # new_op.nccl_wrapper = self.nccl_wrapper
 
         self.nano_ops.append(new_op)
 

@@ -40,7 +40,7 @@ def worker(rank: int, world_size: int, unique_id) -> None:
         with torch.cuda.stream(comm_stream):
             with nvtx.annotate(f"barrier_2_{i}"):
                 nccl_wrapper.barrier()
-            comm_stream.synchronize()
+            # comm_stream.synchronize()
             # torch.distributed.barrier()
             # post_barrier_event.record(comm_stream)
         with torch.cuda.stream(compute_stream):
