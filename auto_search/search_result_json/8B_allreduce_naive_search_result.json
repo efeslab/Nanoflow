@@ -1,0 +1,208 @@
+{
+    "operations": {
+        "LayerNormAttn": {
+            "LayerNormAttn": {
+                "batch_idx": -1,
+                "batch_size": 3072,
+                "start_time": 1.2657209432125087,
+                "end_time": 1.2834371030330654,
+                "duration_time": 0.017716159820556642,
+                "p_value": 132,
+                "algo_tag": "cuda",
+                "extra_dep": [
+                    [
+                        "AllReduceD",
+                        1
+                    ]
+                ]
+            }
+        },
+        "KQV": {
+            "KQV": {
+                "batch_idx": -1,
+                "batch_size": 3072,
+                "start_time": 1.2834371030330656,
+                "end_time": 1.3351801431179044,
+                "duration_time": 0.05174304008483887,
+                "p_value": 132,
+                "algo_tag": "torch:None",
+                "extra_dep": [
+                    [
+                        "LayerNormAttn",
+                        0
+                    ]
+                ]
+            }
+        },
+        "RopeAppend": {
+            "RopeAppend": {
+                "batch_idx": -1,
+                "batch_size": 3072,
+                "start_time": 1.3351801431179044,
+                "end_time": 1.3459398233890532,
+                "duration_time": 0.010759680271148682,
+                "p_value": 132,
+                "algo_tag": "cuda",
+                "extra_dep": [
+                    [
+                        "KQV",
+                        0
+                    ]
+                ]
+            }
+        },
+        "DecAttn": {
+            "DecAttn": {
+                "batch_idx": -1,
+                "batch_size": 1280,
+                "start_time": 1.3459398233890532,
+                "end_time": 1.6704329264163968,
+                "duration_time": 0.32449310302734374,
+                "p_value": 132,
+                "algo_tag": "batched_cuda",
+                "extra_dep": [
+                    [
+                        "RopeAppend",
+                        0
+                    ]
+                ]
+            }
+        },
+        "PFAttn": {
+            "PFAttn": {
+                "batch_idx": -1,
+                "batch_size": 1792,
+                "start_time": 1.6704329264163968,
+                "end_time": 1.704130526781082,
+                "duration_time": 0.03369760036468506,
+                "p_value": 132,
+                "algo_tag": "batched_cuda",
+                "extra_dep": [
+                    [
+                        "DecAttn",
+                        0
+                    ]
+                ]
+            }
+        },
+        "O": {
+            "O": {
+                "batch_idx": -1,
+                "batch_size": 3072,
+                "start_time": 1.704130526781082,
+                "end_time": 1.7617369282245634,
+                "duration_time": 0.05760640144348145,
+                "p_value": 132,
+                "algo_tag": "torch:None",
+                "extra_dep": [
+                    [
+                        "PFAttn",
+                        0
+                    ]
+                ]
+            }
+        },
+        "AllReduceO": {
+            "AllReduceO": {
+                "batch_idx": -1,
+                "batch_size": 3072,
+                "start_time": 1.7617369282245634,
+                "end_time": 1.9200882923603055,
+                "duration_time": 0.1583513641357422,
+                "p_value": 132,
+                "algo_tag": "torch",
+                "extra_dep": [
+                    [
+                        "O",
+                        0
+                    ]
+                ]
+            }
+        },
+        "LayerNormFFN": {
+            "LayerNormFFN": {
+                "batch_idx": -1,
+                "batch_size": 3072,
+                "start_time": 1.9200882923603058,
+                "end_time": 1.9378934121131897,
+                "duration_time": 0.017805119752883913,
+                "p_value": 132,
+                "algo_tag": "cuda",
+                "extra_dep": [
+                    [
+                        "AllReduceO",
+                        0
+                    ]
+                ]
+            }
+        },
+        "UG": {
+            "UG": {
+                "batch_idx": -1,
+                "batch_size": 3072,
+                "start_time": 1.9378934121131894,
+                "end_time": 2.1797158074378964,
+                "duration_time": 0.24182239532470703,
+                "p_value": 132,
+                "algo_tag": "torch:None",
+                "extra_dep": [
+                    [
+                        "LayerNormFFN",
+                        0
+                    ]
+                ]
+            }
+        },
+        "Activation": {
+            "Activation": {
+                "batch_idx": -1,
+                "batch_size": 3072,
+                "start_time": 2.1797158074378964,
+                "end_time": 2.2363212466239926,
+                "duration_time": 0.056605439186096194,
+                "p_value": 132,
+                "algo_tag": "cuda",
+                "extra_dep": [
+                    [
+                        "UG",
+                        0
+                    ]
+                ]
+            }
+        },
+        "D": {
+            "D": {
+                "batch_idx": -1,
+                "batch_size": 3072,
+                "start_time": 2.2363212466239926,
+                "end_time": 2.3742882895469664,
+                "duration_time": 0.13796704292297363,
+                "p_value": 132,
+                "algo_tag": "torch:None",
+                "extra_dep": [
+                    [
+                        "Activation",
+                        0
+                    ]
+                ]
+            }
+        },
+        "AllReduceD": {
+            "AllReduceD": {
+                "batch_idx": -1,
+                "batch_size": 3072,
+                "start_time": 2.374288289546966,
+                "end_time": 2.531441886425018,
+                "duration_time": 0.15715359687805175,
+                "p_value": 132,
+                "algo_tag": "torch",
+                "extra_dep": [
+                    [
+                        "D",
+                        0
+                    ]
+                ]
+            }
+        }
+    }
+}

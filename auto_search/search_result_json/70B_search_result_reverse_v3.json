@@ -1,0 +1,390 @@
+{
+    "operations": {
+        "LayerNormAttn": {
+            "LayerNormAttn0": {
+                "batch_idx": 0,
+                "batch_size": 640,
+                "start_time": 1.8008534213304521,
+                "end_time": 1.8082742210626603,
+                "duration_time": 0.007420799732208252,
+                "p_value": 132,
+                "algo_tag": "cuda",
+                "extra_dep": [
+                    [
+                        "RopeAppend1",
+                        0
+                    ]
+                ]
+            },
+            "LayerNormAttn1": {
+                "batch_idx": 1,
+                "batch_size": 1408,
+                "start_time": 1.6768860646486283,
+                "end_time": 1.6943900641202927,
+                "duration_time": 0.01750399947166443,
+                "p_value": 132,
+                "algo_tag": "cuda",
+                "extra_dep": [
+                    [
+                        "D0",
+                        1
+                    ],
+                    [
+                        "AllReduceD1",
+                        1
+                    ]
+                ]
+            }
+        },
+        "KQV": {
+            "KQV0": {
+                "batch_idx": 0,
+                "batch_size": 640,
+                "start_time": 1.8082742210626603,
+                "end_time": 1.8514908596277238,
+                "duration_time": 0.04321663856506348,
+                "p_value": 132,
+                "algo_tag": "torch:None",
+                "extra_dep": [
+                    [
+                        "LayerNormAttn0",
+                        0
+                    ]
+                ]
+            },
+            "KQV1": {
+                "batch_idx": 1,
+                "batch_size": 1408,
+                "start_time": 1.6943900641202927,
+                "end_time": 1.7915846213102342,
+                "duration_time": 0.09719455718994141,
+                "p_value": 104.0,
+                "algo_tag": "torch:None",
+                "extra_dep": [
+                    [
+                        "LayerNormAttn1",
+                        0
+                    ]
+                ]
+            }
+        },
+        "RopeAppend": {
+            "RopeAppend0": {
+                "batch_idx": 0,
+                "batch_size": 640,
+                "start_time": 1.8514908596277238,
+                "end_time": 1.8572134199142456,
+                "duration_time": 0.005722560286521912,
+                "p_value": 132,
+                "algo_tag": "cuda",
+                "extra_dep": [
+                    [
+                        "KQV0",
+                        0
+                    ]
+                ]
+            },
+            "RopeAppend1": {
+                "batch_idx": 1,
+                "batch_size": 1408,
+                "start_time": 1.7915846213102342,
+                "end_time": 1.8008534213304521,
+                "duration_time": 0.009268800020217896,
+                "p_value": 132,
+                "algo_tag": "cuda",
+                "extra_dep": [
+                    [
+                        "KQV1",
+                        0
+                    ],
+                    [
+                        "AllReduceD0",
+                        1
+                    ]
+                ]
+            }
+        },
+        "DecAttn": {
+            "DecAttn": {
+                "batch_idx": -1,
+                "batch_size": 640,
+                "start_time": 1.9813622179031372,
+                "end_time": 2.1677468576431274,
+                "duration_time": 0.18638463973999023,
+                "p_value": 104.0,
+                "algo_tag": "batched_cuda",
+                "extra_dep": [
+                    [
+                        "O1",
+                        0
+                    ]
+                ]
+            }
+        },
+        "PFAttn": {
+            "PFAttn": {
+                "batch_idx": -1,
+                "batch_size": 1408,
+                "start_time": 1.8572134199142456,
+                "end_time": 1.8932956590652466,
+                "duration_time": 0.03608223915100098,
+                "p_value": 132,
+                "algo_tag": "batched_cuda",
+                "extra_dep": [
+                    [
+                        "RopeAppend0",
+                        0
+                    ]
+                ]
+            }
+        },
+        "O": {
+            "O0": {
+                "batch_idx": 0,
+                "batch_size": 640,
+                "start_time": 2.185078377962112,
+                "end_time": 2.225338859796524,
+                "duration_time": 0.040260481834411624,
+                "p_value": 132,
+                "algo_tag": "torch:None",
+                "extra_dep": [
+                    [
+                        "LayerNormFFN1",
+                        0
+                    ]
+                ]
+            },
+            "O1": {
+                "batch_idx": 1,
+                "batch_size": 1408,
+                "start_time": 1.8932956590652466,
+                "end_time": 1.9813622179031372,
+                "duration_time": 0.08806655883789062,
+                "p_value": 132,
+                "algo_tag": "torch:None",
+                "extra_dep": [
+                    [
+                        "PFAttn",
+                        0
+                    ]
+                ]
+            }
+        },
+        "AllReduceO": {
+            "AllReduceO0": {
+                "batch_idx": 0,
+                "batch_size": 640,
+                "start_time": 2.6969446032047273,
+                "end_time": 2.7827926008701325,
+                "duration_time": 0.08584799766540527,
+                "p_value": 40.0,
+                "algo_tag": "torch",
+                "extra_dep": [
+                    [
+                        "AllReduceO1",
+                        0
+                    ],
+                    [
+                        "UG1",
+                        0
+                    ]
+                ]
+            },
+            "AllReduceO1": {
+                "batch_idx": 1,
+                "batch_size": 1408,
+                "start_time": 1.9813622179031372,
+                "end_time": 2.1406159772872924,
+                "duration_time": 0.15925375938415529,
+                "p_value": 24.0,
+                "algo_tag": "torch",
+                "extra_dep": [
+                    [
+                        "AllReduceD0",
+                        1
+                    ],
+                    [
+                        "O1",
+                        0
+                    ]
+                ]
+            }
+        },
+        "LayerNormFFN": {
+            "LayerNormFFN0": {
+                "batch_idx": 0,
+                "batch_size": 640,
+                "start_time": 2.7827926008701325,
+                "end_time": 2.790276440858841,
+                "duration_time": 0.007483839988708496,
+                "p_value": 132,
+                "algo_tag": "cuda",
+                "extra_dep": [
+                    [
+                        "Activation1",
+                        0
+                    ],
+                    [
+                        "AllReduceO0",
+                        0
+                    ]
+                ]
+            },
+            "LayerNormFFN1": {
+                "batch_idx": 1,
+                "batch_size": 1408,
+                "start_time": 2.1677468576431274,
+                "end_time": 2.185078377962112,
+                "duration_time": 0.017331520318984984,
+                "p_value": 132,
+                "algo_tag": "cuda",
+                "extra_dep": [
+                    [
+                        "DecAttn",
+                        0
+                    ],
+                    [
+                        "AllReduceO1",
+                        0
+                    ]
+                ]
+            }
+        },
+        "UG": {
+            "UG0": {
+                "batch_idx": 0,
+                "batch_size": 640,
+                "start_time": 3.040736283540726,
+                "end_time": 3.2361974041461945,
+                "duration_time": 0.19546112060546875,
+                "p_value": 120.0,
+                "algo_tag": "torch:None",
+                "extra_dep": [
+                    [
+                        "D1",
+                        0
+                    ]
+                ]
+            },
+            "UG1": {
+                "batch_idx": 1,
+                "batch_size": 1408,
+                "start_time": 2.225338859796524,
+                "end_time": 2.697944603204727,
+                "duration_time": 0.4726057434082031,
+                "p_value": 132,
+                "algo_tag": "torch:None",
+                "extra_dep": [
+                    [
+                        "O0",
+                        0
+                    ]
+                ]
+            }
+        },
+        "Activation": {
+            "Activation0": {
+                "batch_idx": 0,
+                "batch_size": 640,
+                "start_time": 3.2361974041461945,
+                "end_time": 3.2529874842166904,
+                "duration_time": 0.016790080070495605,
+                "p_value": 112.0,
+                "algo_tag": "cuda",
+                "extra_dep": [
+                    [
+                        "UG0",
+                        0
+                    ]
+                ]
+            },
+            "Activation1": {
+                "batch_idx": 1,
+                "batch_size": 1408,
+                "start_time": 2.697944603204727,
+                "end_time": 2.7728876450061795,
+                "duration_time": 0.07494304180145264,
+                "p_value": 88.0,
+                "algo_tag": "cuda",
+                "extra_dep": [
+                    [
+                        "UG1",
+                        0
+                    ]
+                ]
+            }
+        },
+        "D": {
+            "D0": {
+                "batch_idx": 0,
+                "batch_size": 640,
+                "start_time": 3.2529874842166904,
+                "end_time": 3.3685433237552647,
+                "duration_time": 0.11555583953857422,
+                "p_value": 120.0,
+                "algo_tag": "torch:None",
+                "extra_dep": [
+                    [
+                        "Activation0",
+                        0
+                    ]
+                ]
+            },
+            "D1": {
+                "batch_idx": 1,
+                "batch_size": 1408,
+                "start_time": 2.790276440858841,
+                "end_time": 3.040736283540726,
+                "duration_time": 0.25045984268188476,
+                "p_value": 132,
+                "algo_tag": "torch:None",
+                "extra_dep": [
+                    [
+                        "LayerNormFFN0",
+                        0
+                    ]
+                ]
+            }
+        },
+        "AllReduceD": {
+            "AllReduceD0": {
+                "batch_idx": 0,
+                "batch_size": 640,
+                "start_time": 3.3960761203765872,
+                "end_time": 3.4842418804168704,
+                "duration_time": 0.0881657600402832,
+                "p_value": 24.0,
+                "algo_tag": "torch",
+                "extra_dep": [
+                    [
+                        "AllReduceD1",
+                        0
+                    ],
+                    [
+                        "LayerNormAttn1",
+                        -1
+                    ]
+                ]
+            },
+            "AllReduceD1": {
+                "batch_idx": 1,
+                "batch_size": 1408,
+                "start_time": 3.0473993341922765,
+                "end_time": 3.3685433237552647,
+                "duration_time": 0.3211439895629883,
+                "p_value": 8.0,
+                "algo_tag": "torch",
+                "extra_dep": [
+                    [
+                        "AllReduceO0",
+                        0
+                    ],
+                    [
+                        "D1",
+                        0
+                    ]
+                ]
+            }
+        }
+    }
+}

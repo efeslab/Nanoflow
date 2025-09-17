@@ -3,16 +3,20 @@ import torch
 import torch.multiprocessing as mp
 from utils.prof_marker import prof_marker
 
+<<<<<<< HEAD
 weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
 profile_result_path = "../auto_search/70B_search_result.json"
 
 def worker(start_time, rank, request_queue: mp.Queue, shared_decode_bts, result_queue: mp.Queue, barrier, work_pipeline, use_auto_search, use_nanosplit, use_cuda_graph, command):
+=======
+def worker(start_time, rank, request_queue: mp.Queue, shared_decode_bts, result_queue: mp.Queue, barrier, work_pipeline, use_auto_search, profile_result_path, use_nanosplit, use_cuda_graph, command):
+>>>>>>> origin/master
     torch.cuda.set_device(rank)
     device = f"cuda:{rank}"
     pipeline = work_pipeline
     pipeline.set_device(rank, device)
 
-    pipeline.init(weight_map_wzr, cached=True)
+    pipeline.init(None, cached=True)
 
     new_tokens = None
     cycle_count = 0
@@ -49,7 +53,12 @@ def worker(start_time, rank, request_queue: mp.Queue, shared_decode_bts, result_
 
                     # test for prefill
                     total_batch_sizes = [128, 256, 384, 512, 640, 768, 896, 1024, 1152, 1280, 1408, 1536, 1664, 1792, 1920, 2048]
+<<<<<<< HEAD
                     # total_batch_sizes = [2048]
+=======
+                    # total_batch_sizes = [640, 1408, 2048]
+                    # total_batch_sizes = [1280, 1792, 3072]
+>>>>>>> origin/master
                     for idx, total_batch_size in enumerate(total_batch_sizes):
                         input = [(idx, input_ids[:total_batch_size].copy())]
 
@@ -60,7 +69,11 @@ def worker(start_time, rank, request_queue: mp.Queue, shared_decode_bts, result_
                     # total_batch_sizes = [128, 256, 384]
                     total_batch_sizes = [128, 256, 384, 512, 640]
                     # total_batch_sizes = [384]
+<<<<<<< HEAD
                     # total_batch_sizes = [640]
+=======
+                    # total_batch_sizes = [1280]
+>>>>>>> origin/master
                     # prepare the decode inputs for a special input_length
                     input_length = 1024
                     # output_length = 0

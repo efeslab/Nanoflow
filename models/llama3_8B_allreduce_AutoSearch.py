@@ -22,10 +22,6 @@ from core.bufferAllocate import BufferAllocator
 from core.executor import Executor
 from core.nanobatchSplit import split_nanobatch
 from core.categoryType import CategoryType
-<<<<<<< HEAD
-
-=======
->>>>>>> origin/master
 
 
 class Pipeline:
@@ -41,18 +37,18 @@ class Pipeline:
     ):
         # Set parameters as instance variables.
         self.pipeline_name = (
-            f"Llama3-70B-with-2-allreduce-TP{TP_size}-PP{PP_size}-DP{DP_size}"
+            f"Llama3-8B-with-2-allreduce-TP{TP_size}-PP{PP_size}-DP{DP_size}"
         )
         self.num_kv_heads = 8
-        self.num_qo_heads = 64
+        self.num_qo_heads = 32
         self.kqv_heads = self.num_qo_heads + 2 * self.num_kv_heads
         self.head_dim = 128
         self.vocab_size = 128256
-        self.hidden_dim = 8192
-        self.intermediate_dim = 28 * 1024
+        self.hidden_dim = 4096
+        self.intermediate_dim = 14 * 1024
         self.global_batch_size: Optional[int] = None
         self.decode_batch_size: Optional[int] = None
-        self.num_layers = 80
+        self.num_layers = 32
         self.layer_list = [i for i in range(self.num_layers)]
         self.page_size = 16
         self.device = "cuda:0"
@@ -65,9 +61,7 @@ class Pipeline:
         self.dp_size = DP_size
 
         # profile related variables
-        self.profile_dir = (
-            f"../profile_data/{self.pipeline_name}_test_allreduce_not_inplace"
-        )
+        self.profile_dir = f"../profile_data/{self.pipeline_name}"
 
     def init(self):
         self.init_streams()
@@ -77,11 +71,7 @@ class Pipeline:
         self.init_set_shape()
         self.update_network_ops()
 
-<<<<<<< HEAD
-    def init_streams(self): # used for dependency
-=======
     def init_streams(self):  # used for dependency
->>>>>>> origin/master
         total_sm = 132
         self.sm_counts = [
             i for i in range(8, 128, 8)  # Assuming SM counts are in increments of 8
@@ -199,18 +189,6 @@ class Pipeline:
 
         # Save operations in an instance variable
         self.original_model_operations: list[Operations] = [
-<<<<<<< HEAD
-            self.global_input, self.gen_embedding, self.layerNormAttn, self.kqv, self.ropeAppend,
-            self.decAttn, self.pfAttn, self.o, self.allReduce_o, self.layerNormFFN, self.ug,
-            self.activation, self.d, self.allReduce_d,
-            self.modelLayerNorm, self.getLogits, self.sample, self.global_output
-        ]
-        self.original_virtual_operations: list[Operations] = [self.copy_embedding, self.copy_o, self.copy_d, self.redist_p, self.redist_a]
-
-        self.model_operations = self.original_model_operations
-        self.virtual_operations = self.original_virtual_operations
-        self.all_operations = self.model_operations + self.virtual_operations # NOTE(Ziren): for further nanosplit or auto search, which should keep the original operations since we need to change the strategy of optimization in the runtime.
-=======
             self.global_input,
             self.gen_embedding,
             self.layerNormAttn,
@@ -243,7 +221,6 @@ class Pipeline:
         self.all_operations = (
             self.model_operations + self.virtual_operations
         )  # NOTE(Ziren): for further nanosplit or auto search, which should keep the original operations since we need to change the strategy of optimization in the runtime.
->>>>>>> origin/master
 
         self.all_layer_operations: list[Operation_Layer] = []
         for operation in self.model_operations:
@@ -291,21 +268,12 @@ class Pipeline:
         self.getLogits.outputs["D"] >> self.sample.inputs["logits"]
 
         self.sample.outputs["tokens"] >> self.global_output.inputs["tokens"]
-<<<<<<< HEAD
-        
-        for operation in self.all_operations:
-            operation.checkConnection()
-
-
-    def init_executor(self):
-=======
 
         for operation in self.all_operations:
             operation.checkConnection()
 
     def init_executor(self):
         print("Initializing executor...")
->>>>>>> origin/master
         self.executor = Executor(self.all_layer_operations, self.layer_list)
         self.executor.plan_layer_ordering()
 
@@ -367,14 +335,14 @@ class Pipeline:
         self.pfAttn.set_category(CategoryType.COMP)
         self.layerNormFFN.set_category(CategoryType.COMP)
         self.o.set_category(CategoryType.COMP)
-        self.allReduce_o.set_category(CategoryType.NET)
+        # self.allReduce_o.set_category(CategoryType.NET)
+        self.allReduce_o.set_category(CategoryType.COMP)
         self.ug.set_category(CategoryType.COMP)
         self.activation.set_category(CategoryType.COMP)
         self.d.set_category(CategoryType.COMP)
-        self.allReduce_d.set_category(CategoryType.NET)
+        # self.allReduce_d.set_category(CategoryType.NET)
+        self.allReduce_d.set_category(CategoryType.COMP)
 
-<<<<<<< HEAD
-=======
     def clear_batch_size(self):
         # init the batchsize to None
         for op in self.all_operations:
@@ -391,6 +359,19 @@ class Pipeline:
         self.decAttn.setBatchSize(self.decode_batch_size)
 
     def config_streams(self):
+        # self.layerNormAttn.set_stream(self.streams[CategoryType.COMP])
+        # self.kqv.set_stream(self.streams[CategoryType.COMP])
+        # self.ropeAppend.set_stream(self.streams[CategoryType.COMP])
+        # self.decAttn.set_stream(self.streams[CategoryType.MEM])
+        # self.pfAttn.set_stream(self.streams[CategoryType.COMP])
+        # self.layerNormFFN.set_stream(self.streams[CategoryType.COMP])
+        # self.o.set_stream(self.streams[CategoryType.COMP])
+        # self.allReduce_o.set_stream(self.streams[CategoryType.NET])
+        # self.ug.set_stream(self.streams[CategoryType.COMP])
+        # self.activation.set_stream(self.streams[CategoryType.COMP])
+        # self.d.set_stream(self.streams[CategoryType.COMP])
+        # self.allReduce_d.set_stream(self.streams[CategoryType.NET])
+
         # Set stream for auto-search case
         self.layerNormAttn.set_stream(
             [self.streams[CategoryType.COMP], self.streams[CategoryType.COMP]]
@@ -424,42 +405,10 @@ class Pipeline:
         self.allReduce_d.set_stream(
             [self.streams[CategoryType.NET], self.streams[CategoryType.NET]]
         )
->>>>>>> origin/master
+
     def update_network_ops(self):
         self.allReduce_o.update(None, None, None, None)
         self.allReduce_d.update(None, None, None, None)
-
-<<<<<<< HEAD
-    def config_batch_size(self):
-        self.global_input.setBatchSize(self.global_batch_size)
-        self.decAttn.setBatchSize(self.decode_batch_size)
-
-    def config_streams(self):
-        # Set stream for auto-search case
-        self.layerNormAttn.set_stream([self.streams[CategoryType.COMP], self.streams[CategoryType.COMP]])
-        self.kqv.set_stream([self.streams[CategoryType.COMP], self.streams[CategoryType.COMP]])
-        self.ropeAppend.set_stream([self.streams[CategoryType.COMP], self.streams[CategoryType.COMP]])
-        self.decAttn.set_stream(self.streams[CategoryType.MEM])
-        self.pfAttn.set_stream(self.streams[CategoryType.COMP])
-        self.layerNormFFN.set_stream([self.streams[CategoryType.COMP], self.streams[CategoryType.COMP]])
-        self.o.set_stream([self.streams[CategoryType.COMP], self.streams[CategoryType.COMP]])
-        self.allReduce_o.set_stream([self.streams[CategoryType.NET], self.streams[CategoryType.NET]])
-        self.ug.set_stream([self.streams[CategoryType.COMP], self.streams[CategoryType.COMP]])
-        self.activation.set_stream([self.streams[CategoryType.COMP], self.streams[CategoryType.COMP]])
-        self.d.set_stream([self.streams[CategoryType.COMP], self.streams[CategoryType.COMP]])
-        self.allReduce_d.set_stream([self.streams[CategoryType.NET], self.streams[CategoryType.NET]])
-
-    def nanobatch_split(self):
-        info = (
-            NanoOpInfo(
-                batch_idx=0,
-                batch_size=self.decode_batch_size
-            ),
-            NanoOpInfo(
-                batch_idx=1,
-                batch_size=self.global_batch_size - self.decode_batch_size
-            )
-=======
 
     def nanobatch_split(self):
         info = (
@@ -467,7 +416,6 @@ class Pipeline:
             NanoOpInfo(
                 batch_idx=1, batch_size=self.global_batch_size - self.decode_batch_size
             ),
->>>>>>> origin/master
         )
         op_nanobatch_info_map: dict[str, tuple[NanoOpInfo, ...]] = {
             "LayerNormAttn": copy.deepcopy(info),
@@ -486,13 +434,9 @@ class Pipeline:
         print("op_nanobatch_info_map", op_nanobatch_info_map)
         print("extra_links", extra_links)
 
-<<<<<<< HEAD
-        model_ops, addtional_virtual_ops = split_nanobatch(self.original_model_operations, op_nanobatch_info_map, extra_links)
-=======
         model_ops, addtional_virtual_ops = split_nanobatch(
             self.original_model_operations, op_nanobatch_info_map, extra_links
         )
->>>>>>> origin/master
         self.model_operations = model_ops
         self.all_operations = []
         self.all_layer_operations = []
@@ -501,11 +445,7 @@ class Pipeline:
             self.all_operations.append(op)
         for operation in model_ops:
             self.all_layer_operations.extend(operation.children)
-<<<<<<< HEAD
-        
-=======
 
->>>>>>> origin/master
     def update_allocate_buffers(self):
         print("Allocating buffers...")
         # Build list of buffers(op_device)
@@ -522,10 +462,6 @@ class Pipeline:
         bufferAllocator.set_all_batchsize_by_linear_programming()
 
         bufferAllocator.allocate_buffer(self.device)
-<<<<<<< HEAD
-        print(f"Total allocated: {bufferAllocator.total_allocated / 1024 / 1024} MB in {self.device}")
-=======
         print(
             f"Total allocated: {bufferAllocator.total_allocated / 1024 / 1024} MB in {self.device}"
         )
->>>>>>> origin/master
