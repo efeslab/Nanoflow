@@ -339,7 +339,7 @@ if __name__ == "__main__":
         tokenizer = AutoTokenizer.from_pretrained(
             "meta-llama/Meta-Llama-3-70B-Instruct"
         )
-        auto_search_path = "../auto_search/70B_search_result_reverse_v3.json"
+        auto_search_path = "../auto_search/search_result_json/70B_search_result_reverse_v3.json"
 
     elif args.model == "8B":
         weight_map = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
@@ -349,7 +349,7 @@ if __name__ == "__main__":
 
         Pipeline = Pipeline_8B
         tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
-        auto_search_path = "../auto_search/8B_allreduce_search_result.json"
+        auto_search_path = "../auto_search/search_result_json/8B_allreduce_search_result.json"
 
     else:
         # from models.llama3_8B_KVCacheFA_TP2 import Pipeline
