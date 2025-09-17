@@ -574,7 +574,7 @@ class Pipeline:
 
                 op_nanobatch_info_map[op_basename] = tuple(split_info_list)
         else:
-            raise ValueError("Auto search is not enabled")
+            raise ValueError("Nanosplit is not enabled when is_auto_search_enabled is False")
         model_ops, addtional_virtual_ops = split_nanobatch(
             self.original_model_operations, op_nanobatch_info_map, extra_links
         )

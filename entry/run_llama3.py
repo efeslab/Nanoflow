@@ -61,7 +61,7 @@ def test_performance():
     decode_batch_size = 640
     prefill_batch_size = global_batch_size - decode_batch_size
 
-    prefill_context_ids = tokenizer.encode(prefill_context) # which length is 1912.
+    prefill_context_ids = tokenizer.encode(prefill_context)
 
     prefill_input_ids = prefill_context_ids[:seq_len]
     output_strings = {}
@@ -80,7 +80,7 @@ def test_performance():
     # prepare for the testing configuration
     output_strings[decode_batch_size] = prefill_context_ids[:prefill_batch_size].copy()
     decode_inputs.extend([(decode_batch_size, prefill_context_ids[:prefill_batch_size].copy())])
-    pipeline.update(decode_inputs, decode_batch_size, profile_result_path="../auto_search/8B_search_result_large_btz.json", use_cuda_graph=True, use_nano_split=True)
+    pipeline.update(decode_inputs, decode_batch_size, profile_result_path="../auto_search/8B_search_result_large_btz.json", use_auto_search=True, use_cuda_graph=True, use_nano_split=True)
     # pipeline.update(decode_inputs, decode_batch_size)
 
     for i in range(decode_batch_size, decode_batch_size + 20):
@@ -100,7 +100,7 @@ def test_performance():
         with prof_marker(f"after_execute_step_7"):
             new_tokens.extend([(next_prefill_idx, prefill_context_ids[:prefill_batch_size].copy())])
         with prof_marker(f"after_execute_step_8"):
-            pipeline.update(new_tokens, decode_batchsize, profile_result_path="../auto_search/8B_search_result_large_btz.json", use_cuda_graph=True, use_nano_split=True)
+            pipeline.update(new_tokens, decode_batchsize, profile_result_path="../auto_search/8B_search_result_large_btz.json", use_auto_search=True, use_cuda_graph=True, use_nano_split=True)
             # pipeline.update(new_tokens, decode_batchsize)
 
     output_text = tokenizer.batch_decode(list(output_strings.values())[:1], skip_special_tokens=True)
