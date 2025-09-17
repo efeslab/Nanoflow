@@ -1,10 +1,12 @@
 import sys
-sys.path.append('../')
-sys.path.append('../pybind/build/')
+
+sys.path.append("../")
+sys.path.append("../pybind/build/")
 import itertools
 from collections import defaultdict
 
 from models.llama3_AutoSearch import Pipeline
+from models.llama3_8B_allreduce_AutoSearch import Pipeline as Pipeline_8B_AllReduce
 from models.llama3_70B_allreduce_AutoSearch import Pipeline as Pipeline_70B_AllReduce
 from core.executor import Executor
 from core.categoryType import CategoryType
@@ -12,8 +14,10 @@ from utils.util_functions import op_name_to_name_idx_layer
 from profileAnalysis import getGemvTimeAndSMCount, getByBatchsizeAndSMCount
 
 
-global_batch_size = 2048
-decode_batch_size = 640
+global_batch_size = 3072
+decode_batch_size = 1280
+# global_batch_size = 2048
+# decode_batch_size = 640
 # global_batch_size = 1024
 # decode_batch_size = 384
 
@@ -30,13 +34,18 @@ seq_len = 1024
 # dump_file = "8B_search_result_large_btz_reverse_v.json"
 
 
-pipeline = Pipeline_70B_AllReduce(TP_idx=0, TP_size=4)
+# pipeline = Pipeline_70B_AllReduce(TP_idx=0, TP_size=4)
 # stage1_figure_path = "70B_stage1_figure.pdf"
 # stage2_figure_path = "70B_stage2_figure.pdf"
 # dump_file = "70B_search_result.json"
-stage1_figure_path = "70B_stage1_figure_reverse_v.pdf"
-stage2_figure_path = "70B_stage2_figure_reverse_v.pdf"
-dump_file = "70B_search_result_reverse_v.json"
+# stage1_figure_path = "70B_stage1_figure_reverse_v3.pdf"
+# stage2_figure_path = "70B_stage2_figure_reverse_v3.pdf"
+# dump_file = "70B_search_result_reverse_v3.json"
+
+pipeline = Pipeline_8B_AllReduce(TP_idx=0, TP_size=4)
+stage1_figure_path = "8B_allreduce_naive_stage1_figure.pdf"
+stage2_figure_path = "8B_allreduce_naive_stage2_figure.pdf"
+dump_file = "8B_allreduce_naive_search_result.json"
 
 profile_dir = pipeline.profile_dir
 
@@ -53,6 +62,7 @@ pipeline.config_streams()
 
 # get layered operation
 from operations.operation_base import Operation_Layer
+
 layer_num = 1
 all_layered_ops: list[Operation_Layer] = []
 for op in pipeline.model_operations:
@@ -82,7 +92,9 @@ for layer_op in all_layered_ops:
         print("batch_size:", batch_size)
         for sm_count in profile_sm_counts:
             print("sm_count:", sm_count)
-            algo_tag, duration = getGemvTimeAndSMCount(profile_dir, batch_size, seq_len, sm_count)
+            algo_tag, duration = getGemvTimeAndSMCount(
+                profile_dir, batch_size, seq_len, sm_count
+            )
             layer_op.duration_map[(batch_size, sm_count)] = duration
             layer_op.algo_tag_map[(batch_size, sm_count)] = algo_tag
     else:
@@ -90,7 +102,9 @@ for layer_op in all_layered_ops:
         print("batch_size:", batch_size)
         for sm_count in profile_sm_counts:
             print("sm_count:", sm_count)
-            algo_tag, duration = getByBatchsizeAndSMCount(profile_dir, layer_op.original_name, batch_size, sm_count)
+            algo_tag, duration = getByBatchsizeAndSMCount(
+                profile_dir, layer_op.original_name, batch_size, sm_count
+            )
             layer_op.duration_map[(batch_size, sm_count)] = duration
             layer_op.algo_tag_map[(batch_size, sm_count)] = algo_tag
 
@@ -108,7 +122,7 @@ from gurobipy import GRB
 
 model_stage_one = gp.Model("pipeline")
 for layer_op in all_layered_ops:
-    layer_op.initVariables(model_stage_one, full_sm_counts) # add start_time, end_time
+    layer_op.initVariables(model_stage_one, full_sm_counts)  # add start_time, end_time
 
 # create sequantial constraints
 sequence_nano = {}
@@ -118,7 +132,9 @@ for layer_op in all_layered_ops:
 
 for nano_ops in category_nano_op_map.values():
     for op_1, op_2 in itertools.combinations(nano_ops, 2):
-        sequence_nano[op_1, op_2] = model_stage_one.addVar(vtype=GRB.BINARY, name=f"{op_1.name}_before_{op_2.name}")
+        sequence_nano[op_1, op_2] = model_stage_one.addVar(
+            vtype=GRB.BINARY, name=f"{op_1.name}_before_{op_2.name}"
+        )
 
 # the completion time of all operations
 C_max = model_stage_one.addVar(vtype=GRB.CONTINUOUS, name="C_max")
@@ -128,37 +144,63 @@ M = 100
 
 for type_name, nano_op_list in category_nano_op_map.items():
     for op1, op2 in itertools.combinations(nano_op_list, 2):
-        model_stage_one.addConstr(op1.end_time <= op2.start_time + M * (1 - sequence_nano[op1, op2]),
-                        name=f"non_overlap_{op1.name}_{op2.name}_when_sequence_nano_1")
-        model_stage_one.addConstr(op2.end_time <= op1.start_time + M * sequence_nano[op1, op2],
-                        name=f"non_overlap_{op1.name}_{op2.name}_when_sequence_nano_2")
-    
+        model_stage_one.addConstr(
+            op1.end_time <= op2.start_time + M * (1 - sequence_nano[op1, op2]),
+            name=f"non_overlap_{op1.name}_{op2.name}_when_sequence_nano_1",
+        )
+        model_stage_one.addConstr(
+            op2.end_time <= op1.start_time + M * sequence_nano[op1, op2],
+            name=f"non_overlap_{op1.name}_{op2.name}_when_sequence_nano_2",
+        )
+
 # dependency constraints
 for layer_op in all_layered_ops:
     for dep_op in layer_op.prev_op_layer:
         print("layer_op:", layer_op.name, "dep_op:", dep_op.name)
-        model_stage_one.addConstr(dep_op.end_time <= layer_op.start_time, 
-                        name=f"dependency_{dep_op.name}_before_{layer_op.name}")
+        model_stage_one.addConstr(
+            dep_op.end_time <= layer_op.start_time,
+            name=f"dependency_{dep_op.name}_before_{layer_op.name}",
+        )
 
 # fusion constraints
 for layer_op in all_layered_ops:
     name = layer_op.original_name
     if name == "KQV":
-        assert len(layer_op.prev_op_layer) == 1, f"Expected only one previous operation for {layer_op.name}, got {len(layer_op.prev_op_layer)}"
+        assert (
+            len(layer_op.prev_op_layer) == 1
+        ), f"Expected only one previous operation for {layer_op.name}, got {len(layer_op.prev_op_layer)}"
         prev_op = layer_op.prev_op_layer[0]
-        model_stage_one.addConstr(prev_op.end_time == layer_op.start_time, name=f"fusion_{prev_op.name}_to_{layer_op.name}")
+        model_stage_one.addConstr(
+            prev_op.end_time == layer_op.start_time,
+            name=f"fusion_{prev_op.name}_to_{layer_op.name}",
+        )
     elif name == "RopeAppend":
-        assert len(layer_op.prev_op_layer) == 1, f"Expected only one previous operation for {layer_op.name}, got {len(layer_op.prev_op_layer)}"
+        assert (
+            len(layer_op.prev_op_layer) == 1
+        ), f"Expected only one previous operation for {layer_op.name}, got {len(layer_op.prev_op_layer)}"
         prev_op = layer_op.prev_op_layer[0]
-        model_stage_one.addConstr(prev_op.end_time == layer_op.start_time, name=f"fusion_{prev_op.name}_to_{layer_op.name}")
+        model_stage_one.addConstr(
+            prev_op.end_time == layer_op.start_time,
+            name=f"fusion_{prev_op.name}_to_{layer_op.name}",
+        )
     elif name == "LayerNormFFN":
-        assert len(layer_op.prev_op_layer) == 1, f"Expected only one previous operation for {layer_op.name}, got {len(layer_op.prev_op_layer)}"
+        assert (
+            len(layer_op.prev_op_layer) == 1
+        ), f"Expected only one previous operation for {layer_op.name}, got {len(layer_op.prev_op_layer)}"
         prev_op = layer_op.prev_op_layer[0]
-        model_stage_one.addConstr(prev_op.end_time == layer_op.start_time, name=f"fusion_{prev_op.name}_to_{layer_op.name}")
+        model_stage_one.addConstr(
+            prev_op.end_time == layer_op.start_time,
+            name=f"fusion_{prev_op.name}_to_{layer_op.name}",
+        )
     elif name == "Activation":
-        assert len(layer_op.prev_op_layer) == 1, f"Expected only one previous operation for {layer_op.name}, got {len(layer_op.prev_op_layer)}"
+        assert (
+            len(layer_op.prev_op_layer) == 1
+        ), f"Expected only one previous operation for {layer_op.name}, got {len(layer_op.prev_op_layer)}"
         prev_op = layer_op.prev_op_layer[0]
-        model_stage_one.addConstr(prev_op.end_time == layer_op.start_time, name=f"fusion_{prev_op.name}_to_{layer_op.name}")
+        model_stage_one.addConstr(
+            prev_op.end_time == layer_op.start_time,
+            name=f"fusion_{prev_op.name}_to_{layer_op.name}",
+        )
 
 
 # C_max constraints
@@ -178,7 +220,9 @@ for layer_op in all_layered_ops:
 for layer_op in all_layered_ops:
     for dep_op in layer_op.prev_op_layer:
         if dep_op.end_time.X > layer_op.start_time.X + 0.001:
-            print(f"Error: {dep_op.name} end time {dep_op.end_time} is greater than {layer_op.name} start time {layer_op.start_time}")
+            print(
+                f"Error: {dep_op.name} end time {dep_op.end_time} is greater than {layer_op.name} start time {layer_op.start_time}"
+            )
         # else:
         #     print(f"Dependency check passed: {dep_op.name} -> {layer_op.name}")
 
@@ -198,18 +242,30 @@ for n in all_layered_ops:
     n_name = n.name
     # Access the optimized values of the variables
     start_time = n.start_time.X
-    duration = n.duration_map[(n.batch_size, full_sm_counts)]  # Assuming duration is stored in a map with batch size as key
+    duration = n.duration_map[
+        (n.batch_size, full_sm_counts)
+    ]  # Assuming duration is stored in a map with batch size as key
     batch_size = n.batch_size
     op_type = str(n.category)
 
     y_position = y_positions[op_type]
-    
+
     # Plot the operation as a horizontal bar
-    ax.barh(y_position, duration, left=start_time, height=0.8, alpha=0.7, edgecolor="black")
-    
+    ax.barh(
+        y_position, duration, left=start_time, height=0.8, alpha=0.7, edgecolor="black"
+    )
+
     # Annotate with operation name and batch size
     label = f"{n.name}\nB={int(batch_size)}"
-    ax.text(start_time + duration / 2, y_position, label, ha="center", va="center", color="black", fontsize=8)
+    ax.text(
+        start_time + duration / 2,
+        y_position,
+        label,
+        ha="center",
+        va="center",
+        color="black",
+        fontsize=8,
+    )
 
 # Set y-ticks and labels
 ax.set_yticks(list(y_positions.values()))
@@ -245,12 +301,17 @@ for op in pipeline.model_operations:
     layered_ops = op.children[:layer_num]
     second_stage_nano_ops.extend(layered_ops)
 print("second_stage_nano_ops:", [op.name for op in second_stage_nano_ops])
-print("second_stage_nano_ops original name:", [op.original_name for op in second_stage_nano_ops])
+print(
+    "second_stage_nano_ops original name:",
+    [op.original_name for op in second_stage_nano_ops],
+)
 
 # Create sequantial constraints for the second stage
 categories = set(op.category for op in second_stage_nano_ops)
 
-category_nano_op_map_stage_two: dict[CategoryType, list[Operation_Layer]] = defaultdict(list)
+category_nano_op_map_stage_two: dict[CategoryType, list[Operation_Layer]] = defaultdict(
+    list
+)
 for layer_op in second_stage_nano_ops:
     category_nano_op_map_stage_two[layer_op.category].append(layer_op)
 
@@ -270,7 +331,9 @@ for layer_op in second_stage_nano_ops:
         # print("batch_size:", batch_size)
         for sm_count in profile_sm_counts:
             # print("sm_count:", sm_count)
-            algo_tag, duration = getGemvTimeAndSMCount(profile_dir, batch_size, seq_len, sm_count)
+            algo_tag, duration = getGemvTimeAndSMCount(
+                profile_dir, batch_size, seq_len, sm_count
+            )
             layer_op.duration_map[(batch_size, sm_count)] = duration
             layer_op.algo_tag_map[(batch_size, sm_count)] = algo_tag
             # print("duration_map:", layer_op.duration_map)
@@ -279,7 +342,9 @@ for layer_op in second_stage_nano_ops:
         # print("batch_size:", batch_size)
         for sm_count in profile_sm_counts:
             # print("sm_count:", sm_count)
-            algo_tag, duration = getByBatchsizeAndSMCount(profile_dir, layer_op.original_name, batch_size, sm_count)
+            algo_tag, duration = getByBatchsizeAndSMCount(
+                profile_dir, layer_op.original_name, batch_size, sm_count
+            )
             layer_op.duration_map[(batch_size, sm_count)] = duration
             layer_op.algo_tag_map[(batch_size, sm_count)] = algo_tag
             # print("duration_map:", layer_op.duration_map)
@@ -300,8 +365,10 @@ for op in second_stage_nano_ops:
 for layer_op in second_stage_nano_ops:
     for dep_op in layer_op.prev_op_layer:
         print("layer_op:", layer_op.name, "dep_op:", dep_op.name)
-        second_stage_model.addConstr(dep_op.end_time <= layer_op.start_time, 
-                        name=f"dependency_{dep_op.name}_before_{layer_op.name}")
+        second_stage_model.addConstr(
+            dep_op.end_time <= layer_op.start_time,
+            name=f"dependency_{dep_op.name}_before_{layer_op.name}",
+        )
 
 
 # prepare overlapping constraints
@@ -309,60 +376,90 @@ M = 10
 epsilon = 1e-3  # A small value to avoid numerical issues
 is_overlapping = {}
 delta_maps = {}
-for (type_1, list_1), (type_2, list_2) in itertools.combinations(category_nano_op_map_stage_two.items(), 2):
+for (type_1, list_1), (type_2, list_2) in itertools.combinations(
+    category_nano_op_map_stage_two.items(), 2
+):
     print(f"Processing overlapping constraints between {type_1} and {type_2}")
     for op_1, op_2 in itertools.product(list_1, list_2):
         print(f"Adding overlapping constraints for {op_1.name} and {op_2.name}")
-        is_overlap = second_stage_model.addVar(vtype=GRB.BINARY, name=f"{op_1.name}_overlap_{op_2.name}")
+        is_overlap = second_stage_model.addVar(
+            vtype=GRB.BINARY, name=f"{op_1.name}_overlap_{op_2.name}"
+        )
         is_overlapping[(op_1.name, op_2.name)] = is_overlap
         is_overlapping[(op_2.name, op_1.name)] = is_overlap  # Ensure symmetry
-        delta1 = second_stage_model.addVar(vtype=GRB.BINARY, name=f"{op_1.name}_{op_2.name}_delta_1")
+        delta1 = second_stage_model.addVar(
+            vtype=GRB.BINARY, name=f"{op_1.name}_{op_2.name}_delta_1"
+        )
         delta1.Start = 1
-        delta2 = second_stage_model.addVar(vtype=GRB.BINARY, name=f"{op_1.name}_{op_2.name}_delta_2")
+        delta2 = second_stage_model.addVar(
+            vtype=GRB.BINARY, name=f"{op_1.name}_{op_2.name}_delta_2"
+        )
         delta2.Start = 1
         delta_maps[(op_1.name, op_2.name)] = (delta1, delta2)
         delta_maps[(op_2.name, op_1.name)] = (delta1, delta2)  # Ensure symmetry
         # Add constraints
-        second_stage_model.addConstr(op_2.end_time <= epsilon + op_1.start_time + M * delta1,
-                                     name=f"overlap_{op_1.name}_{op_2.name}_when_delta1")
-        second_stage_model.addConstr(op_2.end_time >= epsilon + op_1.start_time - M * (1 - delta1),
-                                     name=f"overlap_{op_1.name}_{op_2.name}_when_not_delta1")
-        second_stage_model.addConstr(op_1.end_time <= epsilon + op_2.start_time + M * delta2,
-                                     name=f"overlap_{op_1.name}_{op_2.name}_when_delta2")
-        second_stage_model.addConstr(op_1.end_time >= epsilon + op_2.start_time - M * (1 - delta2),
-                                     name=f"overlap_{op_1.name}_{op_2.name}_when_not_delta2")
-        
+        second_stage_model.addConstr(
+            op_2.end_time <= epsilon + op_1.start_time + M * delta1,
+            name=f"overlap_{op_1.name}_{op_2.name}_when_delta1",
+        )
+        second_stage_model.addConstr(
+            op_2.end_time >= epsilon + op_1.start_time - M * (1 - delta1),
+            name=f"overlap_{op_1.name}_{op_2.name}_when_not_delta1",
+        )
+        second_stage_model.addConstr(
+            op_1.end_time <= epsilon + op_2.start_time + M * delta2,
+            name=f"overlap_{op_1.name}_{op_2.name}_when_delta2",
+        )
+        second_stage_model.addConstr(
+            op_1.end_time >= epsilon + op_2.start_time - M * (1 - delta2),
+            name=f"overlap_{op_1.name}_{op_2.name}_when_not_delta2",
+        )
+
         # add is_overlapping constraints
-        second_stage_model.addConstr(is_overlap <= delta1,
-                                     name=f"is_overlapping_{op_1.name}_{op_2.name}_when_delta1")
-        second_stage_model.addConstr(is_overlap <= delta2,
-                                    name=f"is_overlapping_{op_1.name}_{op_2.name}_when_delta2")
-        second_stage_model.addConstr(is_overlap >= delta1 + delta2 - 1,
-                                        name=f"is_overlapping_{op_1.name}_{op_2.name}_when_not_delta1_and_not_delta2")
-        
+        second_stage_model.addConstr(
+            is_overlap <= delta1,
+            name=f"is_overlapping_{op_1.name}_{op_2.name}_when_delta1",
+        )
+        second_stage_model.addConstr(
+            is_overlap <= delta2,
+            name=f"is_overlapping_{op_1.name}_{op_2.name}_when_delta2",
+        )
+        second_stage_model.addConstr(
+            is_overlap >= delta1 + delta2 - 1,
+            name=f"is_overlapping_{op_1.name}_{op_2.name}_when_not_delta1_and_not_delta2",
+        )
+
 # resource constraints
 category_lists = list(category_nano_op_map_stage_two.values())
 num_categories = len(category_lists)
 print("Number of categories:", num_categories)
 
 for combo in itertools.product(*category_lists):
-    print(f"Processing resource constraints for combination: {[op.name for op in combo]}")
+    print(
+        f"Processing resource constraints for combination: {[op.name for op in combo]}"
+    )
     for idx in range(num_categories):
         op = combo[idx]
-        other_ops = combo[:idx] + combo[idx+1:]
+        other_ops = combo[:idx] + combo[idx + 1 :]
         # print(f"Adding resource constraints for {op.name} in category {idx}")
         # print(f"Other operations in the combination: {[other_op.name for other_op in other_ops]}")
         # Add constraints for each operation in the combination
-        second_stage_model.addConstr(op.p_choice + gp.quicksum(other_op.p_choice * is_overlapping[(op.name, other_op.name)] for other_op in other_ops) <= full_sm_counts,
-                                     name=f"resource_constraint_{op.name}_category_{idx}")
-        
+        second_stage_model.addConstr(
+            op.p_choice
+            + gp.quicksum(
+                other_op.p_choice * is_overlapping[(op.name, other_op.name)]
+                for other_op in other_ops
+            )
+            <= full_sm_counts,
+            name=f"resource_constraint_{op.name}_category_{idx}",
+        )
+
 
 # Makespan constraints
-C_max_stage_two = second_stage_model.addVar(vtype=GRB.CONTINUOUS, name='C_max')
+C_max_stage_two = second_stage_model.addVar(vtype=GRB.CONTINUOUS, name="C_max")
 for op in second_stage_nano_ops:
     second_stage_model.addConstr(
-        C_max_stage_two >= op.end_time,
-        name=f'makespan_constraint_{op.name}'
+        C_max_stage_two >= op.end_time, name=f"makespan_constraint_{op.name}"
     )
 
 # Objective: Minimize makespan
@@ -388,11 +485,16 @@ for list1, list2 in itertools.combinations(category_lists, 2):
     print(f"filtered_list2: {[op.name for op in filtered_list2]}")
     for op1 in filtered_list1:
         # filter the elements in list2 that have smaller end_time.X than op1.start_time.X
-        filtered_list2_for_op1 = [op2 for op2 in list2 if op2.end_time.X < op1.start_time.X + 2*epsilon]
+        filtered_list2_for_op1 = [
+            op2 for op2 in list2 if op2.end_time.X < op1.start_time.X + 2 * epsilon
+        ]
         if filtered_list2_for_op1:
             op2 = filtered_list2_for_op1[-1]
             print(f"Attempting to add dependency from {op2.name} to {op1.name}")
-            if not (op1.is_extra_linked_before_op[op2.category] or op2.is_extra_linked_after_op[op1.category]):
+            if not (
+                op1.is_extra_linked_before_op[op2.category]
+                or op2.is_extra_linked_after_op[op1.category]
+            ):
                 print(f"Adding dependency from {op2.name} to {op1.name}")
                 op2_layer = op_name_to_name_idx_layer(op2.name)[2]
                 prev_layer_flag = 0
@@ -406,11 +508,16 @@ for list1, list2 in itertools.combinations(category_lists, 2):
 
     for op2 in filtered_list2:
         # filter the elements in list1 that have smaller end_time.X than op2.start_time.X
-        filtered_list1_for_op2 = [op1 for op1 in list1 if op1.end_time.X < op2.start_time.X + 2*epsilon]
+        filtered_list1_for_op2 = [
+            op1 for op1 in list1 if op1.end_time.X < op2.start_time.X + 2 * epsilon
+        ]
         if filtered_list1_for_op2:
             op1 = filtered_list1_for_op2[-1]
             print(f"Attempting to add dependency from {op1.name} to {op2.name}")
-            if not (op2.is_extra_linked_before_op[op1.category] or op1.is_extra_linked_after_op[op2.category]):
+            if not (
+                op2.is_extra_linked_before_op[op1.category]
+                or op1.is_extra_linked_after_op[op2.category]
+            ):
                 print(f"Adding dependency from {op1.name} to {op2.name}")
                 op1_layer = op_name_to_name_idx_layer(op1.name)[2]
                 prev_layer_flag = 0
@@ -445,8 +552,16 @@ for n in second_stage_nano_ops:
         label = f"{n.name} L{n.layer} SM {p_value}"
     else:
         label = None
-    ax.text(x, start_time + duration/2, label,
-            ha="center", va="center", rotation=0, fontsize=10, color="black")
+    ax.text(
+        x,
+        start_time + duration / 2,
+        label,
+        ha="center",
+        va="center",
+        rotation=0,
+        fontsize=10,
+        color="black",
+    )
 
 # Axes & labels (now swapped)
 ax.set_xticks(list(x_positions.values()))
@@ -474,14 +589,14 @@ plt.savefig(stage2_figure_path)
 #     op_type = str(n.category)
 
 #     y_position = y_positions[op_type]
-    
+
 #     # Plot the operation as a horizontal bar
 #     ax.barh(y_position, duration, left=start_time, height=0.8, alpha=0.7, edgecolor="black")
-    
+
 #     # Annotate with operation name and batch size
 #     label = f"{n.name}\nL{n.layer}\nP {n.p_choice.X}\n"
 #     ax.text(start_time + duration / 2, y_position, label, ha="center", va="center", color="black", fontsize=12)
-    
+
 # # Set y-ticks and labels
 # ax.set_yticks(list(y_positions.values()))
 # ax.set_yticklabels(list(y_positions.keys()))
@@ -537,22 +652,14 @@ for op in second_stage_nano_ops:
         "extra_dep": str_extra_dep,
     }
 
-    print(f'{op.name} starts {start_time:.3f} end {start_time + duration:.3f} p {p_value}, duration {duration}')
-
+    print(
+        f"{op.name} starts {start_time:.3f} end {start_time + duration:.3f} p {p_value}, duration {duration}"
+    )
 
 
 import json
+
 # Save the output to a JSON file
-output_data = {
-    "operations": output_op_infos
-}
+output_data = {"operations": output_op_infos}
 with open(dump_file, "w") as f:
     json.dump(output_data, f, indent=4)
-
-print("delta_maps of LayerNormAttn0_0 and PFAttn_0:", delta_maps.get(("LayerNormAttn0_0", "PFAttn_0"), None))
-print(is_overlapping.get(("LayerNormAttn0_0", "PFAttn_0"), None))
-D1_0_layer_op = pipeline.d.nano_ops[1].children[0]
-print("D1_0_layer_op:", D1_0_layer_op.name)
-print("D1_0_layer_op start time:", D1_0_layer_op.start_time.X
-      , "end time:", D1_0_layer_op.end_time.X, "p_choice:", D1_0_layer_op.p_choice.X
-      , "duration:", D1_0_layer_op.duration_map[(D1_0_layer_op.batch_size, D1_0_layer_op.p_choice.X)])

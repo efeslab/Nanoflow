@@ -37,18 +37,18 @@ class Pipeline:
     ):
         # Set parameters as instance variables.
         self.pipeline_name = (
-            f"Llama3-70B-with-2-allreduce-TP{TP_size}-PP{PP_size}-DP{DP_size}"
+            f"Llama3-8B-with-2-allreduce-TP{TP_size}-PP{PP_size}-DP{DP_size}"
         )
         self.num_kv_heads = 8
-        self.num_qo_heads = 64
+        self.num_qo_heads = 32
         self.kqv_heads = self.num_qo_heads + 2 * self.num_kv_heads
         self.head_dim = 128
         self.vocab_size = 128256
-        self.hidden_dim = 8192
-        self.intermediate_dim = 28 * 1024
+        self.hidden_dim = 4096
+        self.intermediate_dim = 14 * 1024
         self.global_batch_size: Optional[int] = None
         self.decode_batch_size: Optional[int] = None
-        self.num_layers = 80
+        self.num_layers = 32
         self.layer_list = [i for i in range(self.num_layers)]
         self.page_size = 16
         self.device = "cuda:0"
@@ -61,9 +61,7 @@ class Pipeline:
         self.dp_size = DP_size
 
         # profile related variables
-        self.profile_dir = (
-            f"../profile_data/{self.pipeline_name}_test_allreduce_not_inplace"
-        )
+        self.profile_dir = f"../profile_data/{self.pipeline_name}"
 
     def init(self):
         self.init_streams()
@@ -337,11 +335,13 @@ class Pipeline:
         self.pfAttn.set_category(CategoryType.COMP)
         self.layerNormFFN.set_category(CategoryType.COMP)
         self.o.set_category(CategoryType.COMP)
-        self.allReduce_o.set_category(CategoryType.NET)
+        # self.allReduce_o.set_category(CategoryType.NET)
+        self.allReduce_o.set_category(CategoryType.COMP)
         self.ug.set_category(CategoryType.COMP)
         self.activation.set_category(CategoryType.COMP)
         self.d.set_category(CategoryType.COMP)
-        self.allReduce_d.set_category(CategoryType.NET)
+        # self.allReduce_d.set_category(CategoryType.NET)
+        self.allReduce_d.set_category(CategoryType.COMP)
 
     def clear_batch_size(self):
         # init the batchsize to None
@@ -359,6 +359,19 @@ class Pipeline:
         self.decAttn.setBatchSize(self.decode_batch_size)
 
     def config_streams(self):
+        # self.layerNormAttn.set_stream(self.streams[CategoryType.COMP])
+        # self.kqv.set_stream(self.streams[CategoryType.COMP])
+        # self.ropeAppend.set_stream(self.streams[CategoryType.COMP])
+        # self.decAttn.set_stream(self.streams[CategoryType.MEM])
+        # self.pfAttn.set_stream(self.streams[CategoryType.COMP])
+        # self.layerNormFFN.set_stream(self.streams[CategoryType.COMP])
+        # self.o.set_stream(self.streams[CategoryType.COMP])
+        # self.allReduce_o.set_stream(self.streams[CategoryType.NET])
+        # self.ug.set_stream(self.streams[CategoryType.COMP])
+        # self.activation.set_stream(self.streams[CategoryType.COMP])
+        # self.d.set_stream(self.streams[CategoryType.COMP])
+        # self.allReduce_d.set_stream(self.streams[CategoryType.NET])
+
         # Set stream for auto-search case
         self.layerNormAttn.set_stream(
             [self.streams[CategoryType.COMP], self.streams[CategoryType.COMP]]
@@ -392,10 +405,10 @@ class Pipeline:
         self.allReduce_d.set_stream(
             [self.streams[CategoryType.NET], self.streams[CategoryType.NET]]
         )
+
     def update_network_ops(self):
         self.allReduce_o.update(None, None, None, None)
         self.allReduce_d.update(None, None, None, None)
-
 
     def nanobatch_split(self):
         info = (

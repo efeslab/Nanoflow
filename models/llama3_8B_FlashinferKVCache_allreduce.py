@@ -157,7 +157,7 @@ class Pipeline:
             self.num_layers,
             self.num_kv_heads,
             self.head_dim,
-            2048 * 36,
+            2048 * 36 * 3,
             self.page_size,
             self.tp_size,
             self.device,

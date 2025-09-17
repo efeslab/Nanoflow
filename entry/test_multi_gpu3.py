@@ -1,6 +1,27 @@
 import time
 import torch
+import torch.multiprocessing as mp
 
+
+def worker(T0, rank, affinity_module_path, *rest):
+    # --- Set CPU affinity (import here so parent stays light) ---
+    try:
+        _aff_mod = __import__(affinity_module_path, fromlist=["set_affinity_for_rank", "tune_threads_like", "AFFINITY"])
+        _set_affinity_for_rank = getattr(_aff_mod, "set_affinity_for_rank")
+        _tune_threads_like = getattr(_aff_mod, "tune_threads_like")
+        _AFFINITY = getattr(_aff_mod, "AFFINITY")
+        _cores = _AFFINITY.get(rank, [])
+        if _cores:
+            _set_affinity_for_rank(rank, _cores)
+            _tune_threads_like(_cores)
+        print(f"[rank {rank}] CPU affinity set to cores: {_cores}", flush=True)
+    except Exception as _e:
+        # Affinity is best-effort; don't crash the worker if unavailable
+        print(f"[rank {rank}] CPU affinity setup skipped or failed: {_e}", flush=True)
+
+    from core.worker import worker as real_worker
+
+    return real_worker(T0, rank, *rest)
 
 def test_correctness():
     # Spawn one worker per GPU (or per unit of parallelism).
@@ -21,12 +42,14 @@ def test_correctness():
         args = (
             T0,
             rank,
+            AFFINITY_MODULE_PATH,
             request_queues[rank],
             shared_decode_bts,
             result_queue,
             barrier,
             pipeline_list[rank],
             use_auto_search,
+            None,
             use_nanosplit,
             use_cuda_graph,
             command,
@@ -88,8 +111,10 @@ def test_performance():
     seq_len = 1024
     # global_batch_size = 1024
     global_batch_size = 2048
+    # global_batch_size = 3072
     # decode_batch_size = 128
     decode_batch_size = 640
+    # decode_batch_size = 1280
     prefill_batch_size = global_batch_size - decode_batch_size
 
     prefill_context_ids = tokenizer.encode(prefill_context)  # which length is 1912.
@@ -107,12 +132,14 @@ def test_performance():
         args = (
             T0,
             rank,
+            AFFINITY_MODULE_PATH,
             request_queues[rank],
             shared_decode_bts,
             result_queue,
             barrier,
             pipeline_list[rank],
             use_auto_search,
+            auto_search_path,
             use_nanosplit,
             use_cuda_graph,
             command,
@@ -163,7 +190,7 @@ def test_performance():
     shared_decode_bts.value = decode_batch_size
     use_auto_search.value = 1
     use_nanosplit.value = 1
-    use_cuda_graph.value = 0
+    use_cuda_graph.value = 1
 
     for i in range(decode_batch_size, decode_batch_size + 20):
         print("Cycle: ", i - decode_batch_size)
@@ -222,12 +249,14 @@ def profile():
         args = (
             T0,
             rank,
+            AFFINITY_MODULE_PATH,
             request_queues[rank],
             shared_decode_bts,
             result_queue,
             barrier,
             pipeline_list[rank],
             0,
+            None,
             0,
             0,
             command,
@@ -257,27 +286,22 @@ def profile():
 
 
 if __name__ == "__main__":
-    T0 = time.perf_counter()
-    import torch.multiprocessing as mp
+    mp.set_start_method("spawn")
     import sys
     import argparse
 
     sys.path.append("../")
     sys.path.append("../pybind/build")
 
-    from core.worker import worker
     from utils.util_functions import prepare_weight
     from transformers import AutoTokenizer
     from utils.input_test import prefill_context
+    from bind_all_reduce import NCCLWrapper
 
-    print("import modules1, ", time.perf_counter() - T0)
-    from models.llama3_70B_FlashinferKVCache_allreduce import Pipeline as Pipeline_70B
-    from models.llama3_8B_FlashinferKVCache_allreduce import Pipeline as Pipeline_8B
-
-    # from models.llama3_8B_KVCacheFA_TP2 import Pipeline
+    AFFINITY_MODULE_PATH = "utils.affinity_utils"
+    T0 = time.perf_counter()
 
     print("import modules, ", time.perf_counter() - T0)
-    mp.set_start_method("spawn")
 
     arg_parser = argparse.ArgumentParser()
     arg_parser.add_argument(
@@ -305,8 +329,31 @@ if __name__ == "__main__":
     )
     args = arg_parser.parse_args()
 
-    weight_map_llama_70B = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
-    weight_map_llama_8B = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
+    if args.model == "70B":
+        weight_map = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
+        from models.llama3_70B_FlashinferKVCache_allreduce import (
+            Pipeline as Pipeline_70B,
+        )
+
+        Pipeline = Pipeline_70B
+        tokenizer = AutoTokenizer.from_pretrained(
+            "meta-llama/Meta-Llama-3-70B-Instruct"
+        )
+        auto_search_path = "../auto_search/70B_search_result_reverse_v3.json"
+
+    elif args.model == "8B":
+        weight_map = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
+        from models.llama3_8B_FlashinferKVCache_allreduce import (
+            Pipeline as Pipeline_8B,
+        )
+
+        Pipeline = Pipeline_8B
+        tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
+        auto_search_path = "../auto_search/8B_allreduce_search_result.json"
+
+    else:
+        # from models.llama3_8B_KVCacheFA_TP2 import Pipeline
+        raise ValueError("Unsupported model")
 
     world_size = torch.cuda.device_count()
     print("world size: ", world_size)
@@ -314,26 +361,11 @@ if __name__ == "__main__":
     PP_size = 1
     DP_size = 1
 
-    from bind_all_reduce import NCCLWrapper
-
-    unique_nccl_ids = [NCCLWrapper.get_nccl_unique_id() for _ in range(10)]
     assert (
         world_size == TP_size * PP_size * DP_size
     ), f"world size {world_size} is not equal to TP size {TP_size} * PP size {PP_size} * DP size {DP_size}"
 
-    if args.model == "70B":
-        weight_map = weight_map_llama_70B
-        Pipeline = Pipeline_70B
-        tokenizer = AutoTokenizer.from_pretrained(
-            "meta-llama/Meta-Llama-3-70B-Instruct"
-        )
-
-    elif args.model == "8B":
-        weight_map = weight_map_llama_8B
-        Pipeline = Pipeline_8B
-        tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
-    else:
-        raise ValueError("Unsupported model")
+    unique_nccl_ids = [NCCLWrapper.get_nccl_unique_id() for _ in range(10)]
 
     if args.load_hf_weight:
         pipeline_weight_list = [
@@ -349,16 +381,11 @@ if __name__ == "__main__":
         ]
         prepare_weight(pipeline_weight_list, weight_map)
 
-    # print("finish update pipeline")
-
     pipeline_list = [
         Pipeline(TP_idx=i, TP_size=TP_size, unique_nccl_ids=unique_nccl_ids)
         for i in range(world_size)
     ]
 
-    # print(f"Number of GPUs: {world_size}")
-
-    # print("create pipeline instance, ", time.perf_counter() - T0)
     # Create a shared integer (for the task value) and a shared array to hold each worker's result.
     command = mp.Array("c", 32)  # A character array to hold the command string.
     shared_decode_bts = mp.Value("i", 0)
