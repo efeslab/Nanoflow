@@ -1,60 +1,12 @@
 import sys
 import argparse
+
 sys.path.append("../")
 sys.path.append("../utils")
-sys.path.append('../pybind/build')
+sys.path.append("../pybind/build")
 
 from utils.prof_marker import prof_marker
-from utils.frontend import requestManager
-from utils.util_functions import prepare_weight
-from transformers import AutoTokenizer
-from utils.input_test import prefill_context
 
-
-# from models.llama3_KVCacheTorch import Pipeline
-from models.llama3_FlashinferKVCache import Pipeline
-
-arg_parser = argparse.ArgumentParser()
-arg_parser.add_argument("-l", "--load_hf_weight", action="store_true", help="Load weights from huggingface")
-
-args = arg_parser.parse_args()
-
-tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
-
-# request_queue = []
-# request_manager = requestManager(args.trace_path, "meta-llama/Meta-Llama-3-8B-Instruct")
-# request_manager.read_request()
-# request_manager.release_request()
-# # print(request_manager.available_request_queue)
-
-# new_input_ids = []
-# for req in request_manager.available_request_queue:
-#     print("req.idx: ", req.req_idx)
-#     print("req.prompt: ", req.prompt)
-#     print("req.output_len: ", req.output_len)
-#     new_input_ids.append((req.req_idx, req.prompt))
-# print("new_input_ids: ", new_input_ids)
-
-
-
-weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
-# weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
-# weight_map_amd_kan = "/work1/kasikci/kanzhu/models/llama3-8b"
-# weight_map_yi = "/app/llama3-8b"
-if args.load_hf_weight:
-    pipeline_weight_list = [
-        (i, f"cuda:{i}", Pipeline()) for i in range(1)
-    ]
-    prepare_weight(pipeline_weight_list, weight_map_wzr)
-
-pipeline = Pipeline()
-pipeline.init(weight_map_wzr, cached=True)
-
-# torch.cuda.empty_cache()
-# device = torch.cuda.current_device()
-# reserved_memory = torch.cuda.memory_reserved(device)
-# print(f"Reserved memory: {reserved_memory / 1024 / 1024} MB")
-# pipeline.config()
 def test_performance():
     seq_len = 1024
     global_batch_size = 2048
@@ -79,8 +31,17 @@ def test_performance():
 
     # prepare for the testing configuration
     output_strings[decode_batch_size] = prefill_context_ids[:prefill_batch_size].copy()
-    decode_inputs.extend([(decode_batch_size, prefill_context_ids[:prefill_batch_size].copy())])
-    pipeline.update(decode_inputs, decode_batch_size, profile_result_path="../auto_search/8B_search_result_large_btz.json", use_auto_search=True, use_cuda_graph=True, use_nano_split=True)
+    decode_inputs.extend(
+        [(decode_batch_size, prefill_context_ids[:prefill_batch_size].copy())]
+    )
+    pipeline.update(
+        decode_inputs,
+        decode_batch_size,
+        profile_result_path=auto_search_path,
+        use_auto_search=True,
+        use_cuda_graph=True,
+        use_nano_split=True,
+    )
     # pipeline.update(decode_inputs, decode_batch_size)
 
     for i in range(decode_batch_size, decode_batch_size + 20):
@@ -96,15 +57,29 @@ def test_performance():
             decode_batchsize = len(new_tokens)
             assert decode_batchsize == decode_batch_size
         with prof_marker(f"after_execute_step_6"):
-            output_strings[next_prefill_idx] = prefill_context_ids[:prefill_batch_size].copy()
+            output_strings[next_prefill_idx] = prefill_context_ids[
+                :prefill_batch_size
+            ].copy()
         with prof_marker(f"after_execute_step_7"):
-            new_tokens.extend([(next_prefill_idx, prefill_context_ids[:prefill_batch_size].copy())])
+            new_tokens.extend(
+                [(next_prefill_idx, prefill_context_ids[:prefill_batch_size].copy())]
+            )
         with prof_marker(f"after_execute_step_8"):
-            pipeline.update(new_tokens, decode_batchsize, profile_result_path="../auto_search/8B_search_result_large_btz.json", use_auto_search=True, use_cuda_graph=True, use_nano_split=True)
+            pipeline.update(
+                new_tokens,
+                decode_batchsize,
+                profile_result_path=auto_search_path,
+                use_auto_search=True,
+                use_cuda_graph=True,
+                use_nano_split=True,
+            )
             # pipeline.update(new_tokens, decode_batchsize)
 
-    output_text = tokenizer.batch_decode(list(output_strings.values())[:1], skip_special_tokens=True)
+    output_text = tokenizer.batch_decode(
+        list(output_strings.values())[:1], skip_special_tokens=True
+    )
     print(output_text)
+
 
 def test_correctness(use_kv_cache=True):
     # input_strings = ["Hi, who are you?"]
@@ -128,7 +103,7 @@ def test_correctness(use_kv_cache=True):
         output_strings[req_idx].extend(new_token)
     decode_batchsize = len(new_tokens)
     assert decode_batchsize == 2
-    
+
     # print("new_tokens: ", new_tokens)
     if use_kv_cache:
         new_tokens.extend(special_inputs_1)
@@ -165,8 +140,11 @@ def test_correctness(use_kv_cache=True):
             new_tokens = [(i, output_strings[i]) for i in range(4)]
             pipeline.update(new_tokens, 0)
 
-    output_text = tokenizer.batch_decode(list(output_strings.values()), skip_special_tokens=True)
+    output_text = tokenizer.batch_decode(
+        list(output_strings.values()), skip_special_tokens=True
+    )
     print(output_text)
+
 
 def test_one_cycle():
     input_string = "Hi, who are you?"
@@ -181,22 +159,44 @@ def test_one_cycle():
     new_tokens = pipeline.run()
     for req_idx, new_token in new_tokens:
         output_strings[req_idx].extend(new_token)
-    
-    output_text = tokenizer.batch_decode(list(output_strings.values()), skip_special_tokens=True)
+
+    output_text = tokenizer.batch_decode(
+        list(output_strings.values()), skip_special_tokens=True
+    )
     print(output_text)
 
+
 def profile_one_cycle():
-    prefill_context_ids = tokenizer.encode(prefill_context) # which length is 1912.
-    
+    prefill_context_ids = tokenizer.encode(prefill_context)  # which length is 1912.
+
     pipeline.init_profile_data()
 
-    stream_names = [ f"TEST_{i}" for i in range(len(pipeline.sm_counts)) ] + ["TEST_TOTAL"]
+    stream_names = [f"TEST_{i}" for i in range(len(pipeline.sm_counts))] + [
+        "TEST_TOTAL"
+    ]
     for stream_name in stream_names:
         print(f"Stream: {stream_name}")
         pipeline.reset()
 
         # test for prefill
-        total_batch_sizes = [128, 256, 384, 512, 640, 768, 896, 1024, 1152, 1280, 1408, 1536, 1664, 1792, 1920, 2048]
+        total_batch_sizes = [
+            128,
+            256,
+            384,
+            512,
+            640,
+            768,
+            896,
+            1024,
+            1152,
+            1280,
+            1408,
+            1536,
+            1664,
+            1792,
+            1920,
+            2048,
+        ]
         # total_batch_sizes = [1024]
         for idx, total_batch_size in enumerate(total_batch_sizes):
             input = [(idx, prefill_context_ids[:total_batch_size].copy())]
@@ -226,14 +226,86 @@ def profile_one_cycle():
             # decode profiling from input_length to input_length + output_length
             for i in range(output_length + 1):
                 print("Cycle: ", i)
-                pipeline.update(decode_inputs, total_batch_size, is_profile=True, stream_name=stream_name)
+                pipeline.update(
+                    decode_inputs,
+                    total_batch_size,
+                    is_profile=True,
+                    stream_name=stream_name,
+                )
                 if i % 128 == 0:
                     pipeline.profile_run()
-                    
+
     print("All profiling data has been collected.")
 
-# test_correctness()
-# test_correctness(use_kv_cache=False)
-test_performance()
-# test_one_cycle()
-# profile_one_cycle()
+
+from utils.frontend import requestManager
+from utils.util_functions import prepare_weight
+from transformers import AutoTokenizer
+from utils.input_test import prefill_context
+
+
+arg_parser = argparse.ArgumentParser()
+arg_parser.add_argument(
+    "--load_hf_weight",
+    action="store_true",
+    help="Load weights from huggingface",
+)
+arg_parser.add_argument(
+    "--test",
+    choices=["correctness", "performance", "profile, one_cycle"],
+    default="correctness",
+    help="Which test to run",
+)
+arg_parser.add_argument(
+    "--model",
+    choices=["8B"],
+    default="8B",
+    help="Pick which Pipeline to instantiate",
+)
+args = arg_parser.parse_args()
+
+
+# request_queue = []
+# request_manager = requestManager(args.trace_path, "meta-llama/Meta-Llama-3-8B-Instruct")
+# request_manager.read_request()
+# request_manager.release_request()
+# # print(request_manager.available_request_queue)
+
+# new_input_ids = []
+# for req in request_manager.available_request_queue:
+#     print("req.idx: ", req.req_idx)
+#     print("req.prompt: ", req.prompt)
+#     print("req.output_len: ", req.output_len)
+#     new_input_ids.append((req.req_idx, req.prompt))
+# print("new_input_ids: ", new_input_ids)
+
+if args.model == "8B":
+    from models.llama3_FlashinferKVCache import Pipeline
+    # from models.llama3_KVCacheTorch import Pipeline
+
+    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
+    weight_map = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
+    auto_search_path = "../auto_search/8B_search_result_large_btz.json"
+
+else:
+    raise NotImplementedError(f"Model {args.model} not implemented yet.")
+    # weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
+    # weight_map_amd_kan = "/work1/kasikci/kanzhu/models/llama3-8b"
+    # weight_map_yi = "/app/llama3-8b"
+
+if args.load_hf_weight:
+    pipeline_weight_list = [(i, f"cuda:{i}", Pipeline()) for i in range(1)]
+    prepare_weight(pipeline_weight_list, weight_map)
+
+pipeline = Pipeline()
+pipeline.init(weight_map, cached=True)
+
+if args.test == "correctness":
+    test_correctness()
+    # test_correctness(use_kv_cache=False)
+elif args.test == "performance":
+    test_performance()
+elif args.test == "profile":
+    profile_one_cycle()
+elif args.test == "one_cycle":
+    test_one_cycle()

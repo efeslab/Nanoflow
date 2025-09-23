@@ -62,4 +62,4 @@ python weightSaver.py --config_path=../config_all/llama3-8B/1024.json
 
 # run llama3-8B model
 cd ../entry
-CUDA_VISIBLE_DEVICES=0 python run_llama3.py -l
+CUDA_VISIBLE_DEVICES=0 python run_llama3.py --load_hf_weight

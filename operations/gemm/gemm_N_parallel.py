@@ -6,29 +6,24 @@ from utils.prof_marker import prof_marker
 import platform_config
 from operations.operation_base import Operations, Operation_Layer
 from core.IOWrapper import IOWrapper
-from core.weightWrapper import WeightWrapper    
+from core.weightWrapper import WeightWrapper
 from core.processWeight import process_weight_none, process_weight_layer
 
 from operations.gemm.gemm_impls import GEMMTorchImpl
 
+
 class GEMM_N_Parallel(Operations):
-    def __init__(self, name, device, bias = False, nano_idx=None):
+    def __init__(self, name, device, bias=False, nano_idx=None):
         super().__init__(name, device, nano_idx)
         if bias:
             self.inputs = {
-                "A": IOWrapper(self, 'A', device).is_input(),
-                "C": IOWrapper(self, 'C', device).is_input()
+                "A": IOWrapper(self, "A", device).is_input(),
+                "C": IOWrapper(self, "C", device).is_input(),
             }
         else:
-            self.inputs = {
-                "A": IOWrapper(self, 'A', device).is_input()
-            }
-        self.outputs = {
-            "D": IOWrapper(self, 'D', device).is_output()
-        }
-        self.weights = {
-            "B": WeightWrapper()
-        }
+            self.inputs = {"A": IOWrapper(self, "A", device).is_input()}
+        self.outputs = {"D": IOWrapper(self, "D", device).is_output()}
+        self.weights = {"B": WeightWrapper(self)}
         self.bias = bias
         self.alpha = 1.0
         if self.bias:
@@ -53,7 +48,7 @@ class GEMM_N_Parallel(Operations):
         # if platform_config.PLATFORM_CUDA:
         #     from operations.gemm.gemm_impls import GEMMCudaImpl
         #     self.add_impl(GEMMCudaImpl)
-    
+
     def setShape(self, N, K, tp_idx=0, tp_size=1):
         self.N = N
         self.K = K
@@ -66,24 +61,29 @@ class GEMM_N_Parallel(Operations):
         self.weights["B"].shape = (self.tp_K, self.tp_N)
         self.inputs["A"].init_shape((0, self.tp_K))
         if self.bias:
-            self.inputs["C"].init_shape((0, N)) # bias is a whole buffer, processed in the impl
+            self.inputs["C"].init_shape(
+                (0, N)
+            )  # bias is a whole buffer, processed in the impl
         self.outputs["D"].init_shape((0, self.tp_N))
         return self
-    
+
     def copy_nano(self, index):
         new_op = GEMM_N_Parallel(self.name, self.device, self.bias, nano_idx=index)
         new_op.set_category(self.category)
         new_op.weights = self.weights
         new_op.expand_layer(self.layer_list)
-        new_op.setShape(self.N, self.K, self.tp_idx, self.tp_size).setParameter(self.alpha, self.beta)
-        
+        new_op.setShape(self.N, self.K, self.tp_idx, self.tp_size).setParameter(
+            self.alpha, self.beta
+        )
+
         self.nano_ops.append(new_op)
 
         return new_op
 
     def init_profile_db(self):
         for _, impl in self.impl_map.items():
-            self.cursor.execute(f'''
+            self.cursor.execute(
+                f"""
             CREATE TABLE IF NOT EXISTS "{impl.category_tag}" (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT, 
                 batch_size   INTEGER,
@@ -98,23 +98,45 @@ class GEMM_N_Parallel(Operations):
                 impl_tag TEXT,
                 UNIQUE (batch_size, sm_count, impl_tag)
             );
-            ''')
+            """
+            )
 
     def store_profile_db(self, category_tag, impl_tag, average_elapsed_ms):
         # Calculate the average time
-        print(f"Name: {self.name}, Category: {category_tag}, impl_tag: {impl_tag}, Batch Size: {self.batch_size}, Average Time: {average_elapsed_ms} ms")
-        GFLOPS = (2 * self.batch_size * self.N * self.K) / average_elapsed_ms / 1e6 # in GigaFLOPS
-        self.cursor.execute(f'''
+        print(
+            f"Name: {self.name}, Category: {category_tag}, impl_tag: {impl_tag}, Batch Size: {self.batch_size}, Average Time: {average_elapsed_ms} ms"
+        )
+        GFLOPS = (
+            (2 * self.batch_size * self.N * self.K) / average_elapsed_ms / 1e6
+        )  # in GigaFLOPS
+        self.cursor.execute(
+            f"""
             INSERT OR IGNORE INTO {category_tag} (batch_size, sm_count, N, K, alpha, bias, beta, average_time_ms, GFLOPS, impl_tag)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (self.batch_size, self.sm_count, self.N, self.K, self.alpha, self.bias, self.beta, average_elapsed_ms, GFLOPS, impl_tag))
+            """,
+            (
+                self.batch_size,
+                self.sm_count,
+                self.N,
+                self.K,
+                self.alpha,
+                self.bias,
+                self.beta,
+                average_elapsed_ms,
+                GFLOPS,
+                impl_tag,
+            ),
+        )
 
     def init_impl_configs(self):
         self.impl_configs_map = {}
         for _, impl in self.impl_map.items():
             category_tag = impl.category_tag
             if category_tag == "cuda":
-                from pybind.src.generate_gemm.genGEMM import GetAllH100GemmCanonicalNames
+                from pybind.src.generate_gemm.genGEMM import (
+                    GetAllH100GemmCanonicalNames,
+                )
+
                 names = GetAllH100GemmCanonicalNames()
                 # print(f"GetAllH100GemmCanonicalNames: {names}")
                 self.impl_configs_map[category_tag] = [
@@ -123,9 +145,7 @@ class GEMM_N_Parallel(Operations):
                     # (name, None) for name in names if "RowMajor_RowMajor_RowMajor" in name
                 ]
             else:
-                self.impl_configs_map[category_tag] = [
-                    (None, None)
-                ]
+                self.impl_configs_map[category_tag] = [(None, None)]
 
     def run(self, layer):
         with prof_marker("GEMM_run"):
@@ -133,31 +153,48 @@ class GEMM_N_Parallel(Operations):
                 stride = self.N // self.tp_size
                 offset = self.tp_idx * stride
 
-                C = self.inputs["C"].tensor[:, offset: offset + stride] if self.bias else None
-            self.impl.run(self.inputs["A"].tensor, self.weights["B"].weight_map[layer], C, self.outputs["D"].tensor)
+                if self.bias:
+                    C = self.inputs["C"].tensor[:, offset : offset + stride]
+                else:
+                    C = None
+            self.impl.run(
+                self.inputs["A"].tensor,
+                self.weights["B"].weight_map[layer],
+                C,
+                self.outputs["D"].tensor,
+            )
 
     def profile_run(self):
         self.run(self.layer_list[0])
 
     def processWeight(self, global_weight_map, cached_weight_map, cached, device):
         if not isinstance(self.weight_name, list):
-            self.weight_name = [self.weight_name]
+            self.weight_name: list[str] = [self.weight_name]
         if not cached:
             offset = self.tp_idx % self.tp_size
             for l in self.layer_list:
                 weights_list = []
                 for name in self.weight_name:
-                    stride = global_weight_map[name.format(layer=l)].shape[0] // self.tp_size
+                    stride = (
+                        global_weight_map[name.format(layer=l)].shape[0] // self.tp_size
+                    )
                     scope = (slice(offset * stride, (offset + 1) * stride), slice(None))
-                    weights_list.append(global_weight_map[name.format(layer=l)][scope].t())
-                cached_weight_map[f"{self.name}_layer_{l}"] = torch.cat(weights_list, dim=1).contiguous()
+                    weights_list.append(
+                        global_weight_map[name.format(layer=l)][scope].t()
+                    )
+                cached_weight_map[f"{self.name}_layer_{l}"] = torch.cat(
+                    weights_list, dim=1
+                ).contiguous()
         if cached:
-            self.weights["B"].weight_map = {}
             weight_wrapper = self.weights["B"]
             for l in self.layer_list:
-                weight_wrapper.weight_map[l] = cached_weight_map[f"{self.name}_layer_{l}"].to(device, non_blocking=True)
-                assert weight_wrapper.weight_map[l].shape == weight_wrapper.shape, f"name = {self.weight_name}, expected shape = {weight_wrapper.shape}, layer = {l}, real shape = {weight_wrapper.weight_map[l].shape}"
-            
+                weight_wrapper.weight_map[l] = cached_weight_map[
+                    f"{self.name}_layer_{l}"
+                ].to(device, non_blocking=True)
+                assert (
+                    weight_wrapper.weight_map[l].shape == weight_wrapper.shape
+                ), f"name = {self.weight_name}, expected shape = {weight_wrapper.shape}, layer = {l}, real shape = {weight_wrapper.weight_map[l].shape}"
+
         # torch.cuda.empty_cache()
         # device = torch.cuda.current_device()
         # reserved_memory = torch.cuda.memory_reserved(device)

@@ -52,7 +52,7 @@ if platform_config.PLATFORM_AITER:
 
 
 class LayerNorm(Operations):
-    def __init__(self, name, device, nano_idx=None):
+    def __init__(self, name, device, eps, nano_idx=None):
         super().__init__(name, device, nano_idx)
         self.inputs = {
             "input": IOWrapper(self, 'input', device).is_input(),
@@ -63,6 +63,7 @@ class LayerNorm(Operations):
         self.weights = {
             "weight": WeightWrapper(self),
         }
+        self.epsilon = eps
         self.impl_map = {}
         self.init_impl_map()
         self.op_layer = LayerNorm_Layer
@@ -83,7 +84,7 @@ class LayerNorm(Operations):
         self.outputs["output"].init_shape((0, self.hidden_dim))
     
     def copy_nano(self, index):
-        new_op = LayerNorm(self.name, self.device, nano_idx=index)
+        new_op = LayerNorm(self.name, self.device, self.epsilon, nano_idx=index)
         new_op.set_category(self.category)
         new_op.weights = self.weights
         new_op.expand_layer(self.layer_list)
@@ -113,7 +114,7 @@ class LayerNorm(Operations):
             ''', (self.batch_size, self.sm_count, self.hidden_dim, average_elapsed_ms))
 
     def run(self, layer):
-        self.impl.run(self.inputs["input"].tensor, self.weights["weight"].weight_map[layer], self.outputs["output"].tensor, epsilon = 1e-5)
+        self.impl.run(self.inputs["input"].tensor, self.weights["weight"].weight_map[layer], self.outputs["output"].tensor, epsilon = self.epsilon)
     
     def profile_run(self):
         self.run(self.layer_list[0])

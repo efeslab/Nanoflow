@@ -45,15 +45,13 @@ class RopeAppendFlashinfer(Operations):
         self,
         name,
         device,
-        rope_type="llama3",
-        theta=500000.0,
+        theta,
         factor=1.0,
         nano_idx=None
     ):
         """
         Args:
             name (str): The name of this operator.
-            rope_type (str): The type of RoPE implementation to use. For llama3, pass "llama3".
             theta (float): The base used to compute the inverse frequency (typically set from config.rope_theta).
             factor (float): Scaling factor used in llama3.
         """
@@ -63,7 +61,6 @@ class RopeAppendFlashinfer(Operations):
         self.externals: dict[str, BatchedDistKVCache | KVCacheNone]
         
         # Save RoPE configuration.
-        self.rope_type = rope_type
         self.theta = theta  # typically config.rope_theta
         self.factor = factor
 
@@ -107,7 +104,7 @@ class RopeAppendFlashinfer(Operations):
             bind_ropeappend.updateKVCache(self.kv_indptr, self.kv_indices, self.kv_last_page_len, len(self.kv_last_page_len), self.page_size, self.num_kv_heads // self.tp_size, self.head_dim)
 
     def copy_nano(self, index):
-        new_op = RopeAppendFlashinfer(self.name, self.device, self.rope_type, self.theta, self.factor, nano_idx=index)
+        new_op = RopeAppendFlashinfer(self.name, self.device, self.theta, self.factor, nano_idx=index)
         new_op.set_category(self.category)
         new_op.externals = self.externals
         new_op.expand_layer(self.layer_list)

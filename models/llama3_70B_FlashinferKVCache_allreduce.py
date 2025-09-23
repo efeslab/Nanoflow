@@ -48,17 +48,20 @@ class Pipeline:
         )
         self.num_kv_heads = 8
         self.num_qo_heads = 64
-        self.kqv_heads = self.num_qo_heads + 2 * self.num_kv_heads
         self.head_dim = 128
         self.vocab_size = 128256
         self.hidden_dim = 8192
         self.intermediate_dim = 28 * 1024
+        self.num_layers = 80
+        self.rms_norm_eps = 1e-05
+        self.rope_theta = 500000.0
+        self.page_size = 16
+
+        self.kqv_heads = self.num_qo_heads + 2 * self.num_kv_heads
         self.global_batch_size: Optional[int] = None
         self.decode_batch_size: Optional[int] = None
-        self.num_layers = 80
         self.layer_list = [i for i in range(self.num_layers)]
         self.num_cuda_devices = torch.cuda.device_count()
-        self.page_size = 16
 
         self.tp_idx = TP_idx
         self.tp_size = TP_size
@@ -154,16 +157,24 @@ class Pipeline:
     def init_external_data(self):
         print("Initializing external data...")
         # self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048 * 14, self.page_size, self.tp_size, self.device) # H100 TP4 config
+        # self.kv_pool = DistKVPool(
+        #     self.num_layers,
+        #     self.num_kv_heads,
+        #     self.head_dim,
+        #     2048 * 36,
+        #     self.page_size,
+        #     self.tp_size,
+        #     self.device,
+        # )  # H200 TP4 config
         self.kv_pool = DistKVPool(
             self.num_layers,
             self.num_kv_heads,
             self.head_dim,
-            2048 * 36,
+            2048 * 12,
             self.page_size,
             self.tp_size,
             self.device,
-        )  # H200 TP4 config
-        # self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048*12, self.page_size, self.tp_size, self.device) # H200 TP2 config
+        )  # H200 TP2 config
         self.kv_cache = BatchedDistKVCache(self.kv_pool)
 
     def reset(self):
@@ -186,7 +197,7 @@ class Pipeline:
         )
         self.gen_embedding_layers = self.gen_embedding.expand_layer(self.layer_list)
 
-        self.layerNormAttn = LayerNorm("LayerNormAttn", self.device).setWeightName(
+        self.layerNormAttn = LayerNorm("LayerNormAttn", self.device, eps=self.rms_norm_eps).setWeightName(
             "model.layers.{layer}.input_layernorm.weight"
         )
         self.layerNormAttn_layers = self.layerNormAttn.expand_layer(self.layer_list)
@@ -200,7 +211,7 @@ class Pipeline:
         )
         self.kqv_layers = self.kqv.expand_layer(self.layer_list)
 
-        self.ropeAppend = RopeAppendFlashinfer("RopeAppend", self.device)
+        self.ropeAppend = RopeAppendFlashinfer("RopeAppend", self.device, theta=self.rope_theta)
         self.ropeAppend.externals["KVCache"] = self.kv_cache
         self.ropeAppend_layers = self.ropeAppend.expand_layer(self.layer_list)
 
@@ -220,7 +231,7 @@ class Pipeline:
         self.allReduce_o = AllReduce("AllReduceO", self.device)
         self.allReduce_o_layers = self.allReduce_o.expand_layer(self.layer_list)
 
-        self.layerNormFFN = LayerNorm("LayerNormFFN", self.device).setWeightName(
+        self.layerNormFFN = LayerNorm("LayerNormFFN", device=self.device, eps=self.rms_norm_eps).setWeightName(
             "model.layers.{layer}.post_attention_layernorm.weight"
         )
         self.layerNormFFN_layers = self.layerNormFFN.expand_layer(self.layer_list)
@@ -252,7 +263,7 @@ class Pipeline:
         self.getLogits_layers = self.getLogits.expand_layer(self.layer_list)
 
         self.modelLayerNorm = (
-            LayerNorm("ModelLayerNorm", self.device)
+            LayerNorm("ModelLayerNorm", self.device, eps=self.rms_norm_eps)
             .setWeightName("model.norm.weight")
             .last_only()
         )

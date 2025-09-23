@@ -2,7 +2,6 @@ import time
 import torch
 import torch.multiprocessing as mp
 
-
 def worker(T0, rank, affinity_module_path, *rest):
     # --- Set CPU affinity (import here so parent stays light) ---
     try:
