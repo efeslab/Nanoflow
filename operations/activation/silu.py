@@ -4,8 +4,7 @@ import time
 
 from operations.operation_base import Operations, Operation_Layer
 from core.IOWrapper import IOWrapper
-from core.weightWrapper import WeightWrapper    
-from core.processWeight import process_weight_none
+from core.weightWrapper import WeightWrapper 
 import platform_config as config
 from operations.impl_base import OperationImpl
 

@@ -78,8 +78,8 @@ class Operations():
     def setShape(self, *args, **kwargs):
         return None
 
-    def processWeight(self, global_weight_map, weight_path, cached, device):
-        return process_weight_none(global_weight_map, self.weight_name, None, self.layer_list, weight_path, cached, device)
+    def processWeight(self, global_weight_map, cached_weight_map, cached, device):
+        return process_weight_none(global_weight_map, self.weight_name, None, self.layer_list, cached_weight_map, cached, device)
     
     def first_only(self):
         self.first_layer_only = True

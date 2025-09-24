@@ -3,7 +3,6 @@ from transformers import AutoTokenizer
 from operations.operation_base import Operations, Operation_Layer
 from core.IOWrapper import IOWrapper
 from core.weightWrapper import WeightWrapper    
-from core.processWeight import process_weight_none, process_weight_layer
 
 class GlobalInput(Operations):
     def __init__(self, name, device):

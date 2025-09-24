@@ -7,7 +7,7 @@ import platform_config
 from operations.operation_base import Operations, Operation_Layer
 from core.IOWrapper import IOWrapper
 from core.weightWrapper import WeightWrapper
-from core.processWeight import process_weight_none, process_weight_layer
+from core.processWeight import process_weight_list
 
 from operations.gemm.gemm_impls import GEMMTorchImpl
 
@@ -107,7 +107,7 @@ class GEMM_N_Parallel(Operations):
             f"Name: {self.name}, Category: {category_tag}, impl_tag: {impl_tag}, Batch Size: {self.batch_size}, Average Time: {average_elapsed_ms} ms"
         )
         GFLOPS = (
-            (2 * self.batch_size * self.N * self.K) / average_elapsed_ms / 1e6
+            (2 * self.batch_size * self.tp_N * self.tp_K) / average_elapsed_ms / 1e6
         )  # in GigaFLOPS
         self.cursor.execute(
             f"""
@@ -117,8 +117,8 @@ class GEMM_N_Parallel(Operations):
             (
                 self.batch_size,
                 self.sm_count,
-                self.N,
-                self.K,
+                self.tp_N,
+                self.tp_K,
                 self.alpha,
                 self.bias,
                 self.beta,
@@ -168,32 +168,18 @@ class GEMM_N_Parallel(Operations):
         self.run(self.layer_list[0])
 
     def processWeight(self, global_weight_map, cached_weight_map, cached, device):
-        if not isinstance(self.weight_name, list):
-            self.weight_name: list[str] = [self.weight_name]
-        if not cached:
-            offset = self.tp_idx % self.tp_size
-            for l in self.layer_list:
-                weights_list = []
-                for name in self.weight_name:
-                    stride = (
-                        global_weight_map[name.format(layer=l)].shape[0] // self.tp_size
-                    )
-                    scope = (slice(offset * stride, (offset + 1) * stride), slice(None))
-                    weights_list.append(
-                        global_weight_map[name.format(layer=l)][scope].t()
-                    )
-                cached_weight_map[f"{self.name}_layer_{l}"] = torch.cat(
-                    weights_list, dim=1
-                ).contiguous()
-        if cached:
-            weight_wrapper = self.weights["B"]
-            for l in self.layer_list:
-                weight_wrapper.weight_map[l] = cached_weight_map[
-                    f"{self.name}_layer_{l}"
-                ].to(device, non_blocking=True)
-                assert (
-                    weight_wrapper.weight_map[l].shape == weight_wrapper.shape
-                ), f"name = {self.weight_name}, expected shape = {weight_wrapper.shape}, layer = {l}, real shape = {weight_wrapper.weight_map[l].shape}"
+        process_weight_list(
+            global_weight_map,
+            self.weight_name,
+            self.weights["B"],
+            self.layer_list,
+            cached_weight_map,
+            cached,
+            device,
+            tp_idx=self.tp_idx,
+            tp_size=self.tp_size,
+            tp_split_row=True,
+        )
 
         # torch.cuda.empty_cache()
         # device = torch.cuda.current_device()

@@ -8,7 +8,6 @@ from utils.prof_marker import prof_marker
 import platform_config
 from core.IOWrapper import IOWrapper
 from core.weightWrapper import WeightWrapper    
-from core.processWeight import process_weight_none, process_weight_layer
 from operations.impl_base import OperationImpl
 from kvcache.kv import KVCacheNone, KVCacheTorch, DistKVPool, BatchedDistKVCache
 from utils.util_functions import tensor_offset_to_req_idx

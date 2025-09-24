@@ -6,7 +6,7 @@ import platform_config
 from operations.operation_base import Operations, Operation_Layer
 from core.IOWrapper import IOWrapper
 from core.weightWrapper import WeightWrapper    
-from core.processWeight import process_weight_none, process_weight_layer
+from core.processWeight import process_weight
 
 from operations.impl_base import OperationImpl
 
@@ -119,9 +119,9 @@ class LayerNorm(Operations):
     def profile_run(self):
         self.run(self.layer_list[0])
     
-    def processWeight(self, global_weight_map, weight_path, cached, device):
-        return process_weight_layer(global_weight_map, self.weight_name, self.weights["weight"], self.layer_list, weight_path, cached, device)
-        
+    def processWeight(self, global_weight_map, cached_weight_map, cached, device):
+        return process_weight(global_weight_map, self.weight_name, self.weights["weight"], self.layer_list, cached_weight_map, cached, device)
+
 
 class LayerNorm_Layer(Operation_Layer):
     def __init__(self, layer, base_op):
