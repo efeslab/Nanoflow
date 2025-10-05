@@ -5,10 +5,14 @@ import torch
 
 from utils.green_ctx import split_device_green_ctx_by_sm_count
 from operations.operation_base import NanoOpInfo, Operations, Operation_Layer
+from operations.simple_ops.add import Add
+from operations.simple_ops.scaled_mul import ScaledMul
 from operations.activation.silu import Activation
 from operations.embedding.embedding import GenEmbedding
 from operations.globalOp.globalOp import GlobalInput, GlobalOutput
 from operations.gemm.gemm_N_parallel import GEMM_N_Parallel
+from operations.expand_add.expand_add import ExpandAdd
+from operations.fused_moe.fused_moe import FusedMoE
 from operations.norm.rmsnorm import LayerNorm
 from operations.sampling.max_sampling import Sampling
 from operations.rope.rope_flashinfer import RopeAppendFlashinfer
@@ -29,16 +33,21 @@ from utils.prof_marker import prof_marker
 class Pipeline:
     def __init__(self):
         # Set parameters as instance variables.
-        self.pipeline_name = "Llama3-8B"
-        self.num_kv_heads = 8
-        self.num_qo_heads = 32
+        self.pipeline_name = "Qwen2-MoE"
+        self.num_kv_heads = 16
+        self.num_qo_heads = 16
         self.head_dim = 128
-        self.vocab_size = 128256
-        self.hidden_dim = 4096
-        self.intermediate_dim = 14 * 1024
-        self.num_layers = 32
-        self.rms_norm_eps = 1e-05
-        self.rope_theta = 500000.0
+        self.vocab_size = 151936
+        self.hidden_dim = 2048
+        self.intermediate_dim = 5632
+        self.num_layers = 24
+        self.moe_intermediate_dim = 1408
+        self.shared_expert_intermediate_dim = 5632
+        self.num_experts_per_tok = 4
+        self.num_experts = 60
+        self.num_shared_experts = 1
+        self.rms_norm_eps = 1e-6
+        self.rope_theta = 1000000.0
         self.page_size = 16
 
         self.kqv_heads = self.num_qo_heads + 2 * self.num_kv_heads
@@ -64,7 +73,6 @@ class Pipeline:
         self.init_operations()
         self.init_category()
         self.init_dependency()
-        self.init_set_shape()
         self.init_set_weight(weight_path, cached)
 
     def init_streams(self):
@@ -118,16 +126,24 @@ class Pipeline:
 
     def init_external_data(self):
         print("Initializing external data...")
-        # self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048, self.page_size, 1, self.device)
         self.kv_pool = DistKVPool(
             self.num_layers,
             self.num_kv_heads,
             self.head_dim,
-            2048 * 26,
+            2048,
             self.page_size,
             1,
             self.device,
         )
+        # self.kv_pool = DistKVPool(
+        #     self.num_layers,
+        #     self.num_kv_heads,
+        #     self.head_dim,
+        #     2048 * 10,
+        #     self.page_size,
+        #     1,
+        #     self.device,
+        # )
         self.kv_cache = BatchedDistKVCache(self.kv_pool)
 
     def reset(self):
@@ -140,132 +156,254 @@ class Pipeline:
         self.decode_batch_size = None
 
     def init_operations(self):
-        self.global_input = GlobalInput("GlobalInput", self.device).first_only()
+        self.original_model_operations: list[Operations] = []
+        self.original_virtual_operations: list[Operations] = []
+
+        self.global_input = GlobalInput("GlobalInput", self.device).setShape().first_only()
         self.global_input_layers = self.global_input.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.global_input)
 
         self.gen_embedding = (
             GenEmbedding("GenEmbedding", self.device)
             .setWeightName("model.embed_tokens.weight")
+            .setShape(self.hidden_dim, self.vocab_size)
             .first_only()
         )
         self.gen_embedding_layers = self.gen_embedding.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.gen_embedding)
 
-        self.layerNormAttn = LayerNorm(
-            "LayerNormAttn", self.device, eps=self.rms_norm_eps
-        ).setWeightName("model.layers.{layer}.input_layernorm.weight")
+        self.layerNormAttn = (
+            LayerNorm("LayerNormAttn", self.device, eps=self.rms_norm_eps)
+            .setWeightName("model.layers.{layer}.input_layernorm.weight")
+            .setShape(self.hidden_dim)
+        )
         self.layerNormAttn_layers = self.layerNormAttn.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.layerNormAttn)
 
-        self.kqv = GEMM_N_Parallel("KQV", self.device).setWeightName(
-            [
-                "model.layers.{layer}.self_attn.k_proj.weight",
-                "model.layers.{layer}.self_attn.v_proj.weight",
-                "model.layers.{layer}.self_attn.q_proj.weight",
-            ]
+        self.kqv = (
+            GEMM_N_Parallel("KQV", self.device)
+            .setWeightName(
+                [
+                    "model.layers.{layer}.self_attn.k_proj.weight",
+                    "model.layers.{layer}.self_attn.v_proj.weight",
+                    "model.layers.{layer}.self_attn.q_proj.weight",
+                ]
+            )
+            .setShape(self.kqv_heads * self.head_dim, self.hidden_dim)
+            .setParameter(alpha=1.0, beta=0.0)
         )
         self.kqv_layers = self.kqv.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.kqv)
+
+        self.kqv_bias = (
+            ExpandAdd("KQVBias", self.device)
+            .setWeightName(
+                [
+                    "model.layers.{layer}.self_attn.k_proj.bias",
+                    "model.layers.{layer}.self_attn.v_proj.bias",
+                    "model.layers.{layer}.self_attn.q_proj.bias",
+                ]
+            )
+            .setShape(self.kqv_heads * self.head_dim)
+        )
+        self.kqv_bias_layers = self.kqv_bias.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.kqv_bias)
 
         self.ropeAppend = RopeAppendFlashinfer(
             "RopeAppend", self.device, theta=self.rope_theta
-        )
+        ).setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim)
         self.ropeAppend.externals["KVCache"] = self.kv_cache
         self.ropeAppend_layers = self.ropeAppend.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.ropeAppend)
 
-        self.decAttn = DecAttnFlashinfer("DecAttn", self.device)
+        self.decAttn = DecAttnFlashinfer("DecAttn", self.device).setShape(
+            self.num_kv_heads, self.num_qo_heads, self.head_dim
+        )
         self.decAttn.externals["KVCache"] = self.kv_cache
         self.decAttn_layers = self.decAttn.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.decAttn)
 
-        self.pfAttn = PFAttnFlashinfer("PFAttn", self.device)
+        self.pfAttn = PFAttnFlashinfer("PFAttn", self.device).setShape(
+            self.num_kv_heads, self.num_qo_heads, self.head_dim
+        )
         self.pfAttn.externals["KVCache"] = self.kv_cache
         self.pfAttn_layers = self.pfAttn.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.pfAttn)
 
-        self.o = GEMM_N_Parallel("O", self.device, bias=True).setWeightName(
-            "model.layers.{layer}.self_attn.o_proj.weight"
+        self.o = (
+            GEMM_N_Parallel("O", self.device, bias=True)
+            .setWeightName("model.layers.{layer}.self_attn.o_proj.weight")
+            .setShape(self.hidden_dim, self.hidden_dim)
+            .setParameter(alpha=1.0, beta=1.0)
         )
         self.o_layers = self.o.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.o)
 
-        self.layerNormFFN = LayerNorm(
-            "LayerNormFFN", self.device, eps=self.rms_norm_eps
-        ).setWeightName("model.layers.{layer}.post_attention_layernorm.weight")
+        self.layerNormFFN = (
+            LayerNorm("LayerNormFFN", self.device, eps=self.rms_norm_eps)
+            .setWeightName("model.layers.{layer}.post_attention_layernorm.weight")
+            .setShape(self.hidden_dim)
+        )
         self.layerNormFFN_layers = self.layerNormFFN.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.layerNormFFN)
 
-        self.ug = GEMM_N_Parallel("UG", self.device).setWeightName(
-            [
-                "model.layers.{layer}.mlp.up_proj.weight",
-                "model.layers.{layer}.mlp.gate_proj.weight",
-            ]
+        self.gate = (
+            GEMM_N_Parallel("Gate", self.device)
+            .setWeightName("model.layers.{layer}.mlp.gate.weight")
+            .setShape(N=self.num_experts, K=self.hidden_dim)
+            .setParameter(alpha=1.0, beta=0.0)
         )
-        self.ug_layers = self.ug.expand_layer(self.layer_list)
+        self.gate_layers = self.gate.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.gate)
 
-        self.activation = Activation("Activation", self.device)
-        self.activation_layers = self.activation.expand_layer(self.layer_list)
-
-        self.d = GEMM_N_Parallel("D", self.device, bias=True).setWeightName(
-            "model.layers.{layer}.mlp.down_proj.weight"
+        self.fused_moe = (
+            FusedMoE("FusedMoE", device=self.device)
+            .setShape(
+                num_experts=self.num_experts,
+                moe_intermediate_dim=self.moe_intermediate_dim,
+                hidden_dim=self.hidden_dim,
+                top_k=self.num_experts_per_tok,
+            )
+            .setWeightName(
+                [
+                    [
+                        [
+                            "model.layers.{layer}"
+                            + f".mlp.experts.{expert}.up_proj.weight",
+                            "model.layers.{layer}"
+                            + f".mlp.experts.{expert}.gate_proj.weight",
+                        ]
+                        for expert in range(self.num_experts)
+                    ],
+                    [
+                        "model.layers.{layer}"
+                        + f".mlp.experts.{expert}.down_proj.weight"
+                        for expert in range(self.num_experts)
+                    ],
+                ]
+            )
         )
-        self.d_layers = self.d.expand_layer(self.layer_list)
+        self.fused_moe_layers = self.fused_moe.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.fused_moe)
+
+        self.shared_expert_gate = (
+            GEMM_N_Parallel("SharedExpertGate", self.device)
+            .setWeightName("model.layers.{layer}.mlp.shared_expert_gate.weight")
+            .setShape(N=self.num_shared_experts, K=self.hidden_dim)
+            .setParameter(alpha=1.0, beta=0.0)
+        )
+        self.shared_expert_gate_layers = self.shared_expert_gate.expand_layer(
+            self.layer_list
+        )
+        self.original_model_operations.append(self.shared_expert_gate)
+
+        self.shared_expert_activation = Activation(
+            "SharedExpertActivation", self.device, act_fn="sigmoid"
+        ).setShape(self.num_shared_experts)
+        self.shared_expert_activation_layers = (
+            self.shared_expert_activation.expand_layer(self.layer_list)
+        )
+        self.original_model_operations.append(self.shared_expert_activation)
+
+        self.shared_ug = (
+            GEMM_N_Parallel("SharedUG", self.device)
+            .setWeightName(
+                [
+                    "model.layers.{layer}.mlp.shared_expert.up_proj.weight",
+                    "model.layers.{layer}.mlp.shared_expert.gate_proj.weight",
+                ]
+            )
+            .setShape(N=2 * self.shared_expert_intermediate_dim, K=self.hidden_dim)
+            .setParameter(alpha=1.0, beta=0.0)
+        )
+        self.shared_ug_layers = self.shared_ug.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.shared_ug)
+
+        self.shared_activation = Activation(
+            "SharedActivation", self.device, act_fn="silu_mul"
+        ).setShape(N=self.shared_expert_intermediate_dim)
+        self.shared_activation_layers = self.shared_activation.expand_layer(
+            self.layer_list
+        )
+        self.original_model_operations.append(self.shared_activation)
+
+        self.shared_d = (
+            GEMM_N_Parallel("SharedD", self.device)
+            .setWeightName(
+                "model.layers.{layer}.mlp.shared_expert.down_proj.weight",
+            )
+            .setShape(N=self.hidden_dim, K=self.shared_expert_intermediate_dim)
+            .setParameter(alpha=1.0, beta=0.0)
+        )
+        self.shared_d_layers = self.shared_d.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.shared_d)
+
+        self.shared_mul = ScaledMul("SharedMul", self.device).setShape(self.hidden_dim)
+        self.shared_mul_layers = self.shared_mul.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.shared_mul)
+
+        self.add_experts = Add("AddExperts", self.device).setShape(self.hidden_dim)
+        self.add_experts_layers = self.add_experts.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.add_experts)
+
+        self.add_down_bias = Add("AddDownBias", self.device).setShape(self.hidden_dim)
+        self.add_down_bias_layers = self.add_down_bias.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.add_down_bias)
 
         self.getLogits = (
             GEMM_N_Parallel("GetLogits", self.device)
             .setWeightName("lm_head.weight")
+            .setShape(self.vocab_size, self.hidden_dim)
+            .setParameter(alpha=1.0, beta=0.0)
             .last_only()
         )
         self.getLogits_layers = self.getLogits.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.getLogits)
 
         self.modelLayerNorm = (
             LayerNorm("ModelLayerNorm", self.device, eps=self.rms_norm_eps)
             .setWeightName("model.norm.weight")
+            .setShape(self.hidden_dim)
             .last_only()
         )
         self.modelLayerNorm_layers = self.modelLayerNorm.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.modelLayerNorm)
 
-        self.sample = Sampling("Sampling", self.device).last_only()
+        self.sample = (
+            Sampling("Sampling", self.device).setShape(self.vocab_size).last_only()
+        )
         self.sample_layers = self.sample.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.sample)
 
-        self.global_output = GlobalOutput("GlobalOutput", self.device).last_only()
+        self.global_output = GlobalOutput("GlobalOutput", self.device).setShape().last_only()
         self.global_output_layers = self.global_output.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.global_output)
 
         self.copy_embedding = Copy(
             "CopyEmbedding", self.device, num_inputs=2, num_outputs=2
         )
+        self.original_virtual_operations.append(self.copy_embedding)
 
         self.copy_o = Copy("CopyO", self.device, num_inputs=1, num_outputs=2)
+        self.original_virtual_operations.append(self.copy_o)
+
+        self.copy_layernormffn = Copy(
+            "CopyLayerNormFFN", self.device, num_inputs=1, num_outputs=4
+        )
+        self.original_virtual_operations.append(self.copy_layernormffn)
 
         self.copy_d = Copy("CopyD", self.device, num_inputs=1, num_outputs=2)
+        self.original_virtual_operations.append(self.copy_d)
 
         self.redist_p = Redist(
             "RedistPartition", self.device, num_inputs=1, num_outputs=2
         )
+        self.original_virtual_operations.append(self.redist_p)
 
         self.redist_a = Redist(
             "RedistAggregation", self.device, num_inputs=2, num_outputs=1
         )
-
-        # Save operations in an instance variable
-        self.original_model_operations: list[Operations] = [
-            self.global_input,
-            self.gen_embedding,
-            self.layerNormAttn,
-            self.kqv,
-            self.ropeAppend,
-            self.decAttn,
-            self.pfAttn,
-            self.o,
-            self.layerNormFFN,
-            self.ug,
-            self.activation,
-            self.d,
-            self.modelLayerNorm,
-            self.getLogits,
-            self.sample,
-            self.global_output,
-        ]
-        self.original_virtual_operations: list[Operations] = [
-            self.copy_embedding,
-            self.copy_o,
-            self.copy_d,
-            self.redist_p,
-            self.redist_a,
-        ]
+        self.original_virtual_operations.append(self.redist_a)
 
         self.model_operations = self.original_model_operations
         self.virtual_operations = self.original_virtual_operations
@@ -286,7 +424,9 @@ class Pipeline:
 
         self.layerNormAttn.outputs["output"] >> self.kqv.inputs["A"]
 
-        self.kqv.outputs["D"] >> self.ropeAppend.inputs["kqv"]
+        self.kqv.outputs["D"] >> self.kqv_bias.inputs["input"]
+
+        self.kqv_bias.outputs["output"] >> self.ropeAppend.inputs["kqv"]
 
         self.ropeAppend.outputs["q"] >> self.redist_p.inputs["input_0"]
         self.redist_p.outputs["output_0"] >> self.decAttn.inputs["Q"]
@@ -298,15 +438,40 @@ class Pipeline:
 
         self.o.outputs["D"] >> self.copy_o.inputs["input_0"]
         self.copy_o.outputs["output_0"] >> self.layerNormFFN.inputs["input"]
-        self.copy_o.outputs["output_1"] >> self.d.inputs["C"]
+        self.copy_o.outputs["output_1"] >> self.add_down_bias.inputs["input_0"]
 
-        self.layerNormFFN.outputs["output"] >> self.ug.inputs["A"]
+        self.layerNormFFN.outputs["output"] >> self.copy_layernormffn.inputs["input_0"]
+        self.copy_layernormffn.outputs["output_0"] >> self.gate.inputs["A"]
+        self.copy_layernormffn.outputs["output_1"] >> self.fused_moe.inputs["x"]
+        (
+            self.copy_layernormffn.outputs["output_2"]
+            >> self.shared_expert_gate.inputs["A"]
+        )
+        self.copy_layernormffn.outputs["output_3"] >> self.shared_ug.inputs["A"]
 
-        self.ug.outputs["D"] >> self.activation.inputs["input"]
+        self.gate.outputs["D"] >> self.fused_moe.inputs["router_logits"]
 
-        self.activation.outputs["output"] >> self.d.inputs["A"]
+        self.fused_moe.outputs["output"] >> self.add_experts.inputs["input_0"]
 
-        self.d.outputs["D"] >> self.copy_d.inputs["input_0"]
+        (
+            self.shared_expert_gate.outputs["D"]
+            >> self.shared_expert_activation.inputs["input"]
+        )
+
+        self.shared_ug.outputs["D"] >> self.shared_activation.inputs["input"]
+        self.shared_activation.outputs["output"] >> self.shared_d.inputs["A"]
+
+        (
+            self.shared_expert_activation.outputs["output"]
+            >> self.shared_mul.inputs["input_0"]
+        )
+        self.shared_d.outputs["D"] >> self.shared_mul.inputs["input_1"]
+
+        self.shared_mul.outputs["output"] >> self.add_experts.inputs["input_1"]
+
+        self.add_experts.outputs["output"] >> self.add_down_bias.inputs["input_1"]
+
+        self.add_down_bias.outputs["output"] >> self.copy_d.inputs["input_0"]
         self.copy_d.outputs["output_0"] >> (self.copy_embedding.inputs["input_1"], True)
         self.copy_d.outputs["output_1"] >> self.modelLayerNorm.inputs["input"]
 
@@ -324,32 +489,9 @@ class Pipeline:
         self.executor = Executor(self.all_layer_operations, self.layer_list)
         self.executor.plan_layer_ordering()
 
-    def init_set_shape(self):
-        self.global_input.setShape()
-        self.gen_embedding.setShape(self.hidden_dim, self.vocab_size)
-        self.layerNormAttn.setShape(self.hidden_dim)
-        self.kqv.setShape(self.kqv_heads * self.head_dim, self.hidden_dim).setParameter(
-            1.0, 0.0
-        )
-        self.decAttn.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim)
-        self.pfAttn.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim)
-        self.ropeAppend.setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim)
-        self.o.setShape(self.hidden_dim, self.hidden_dim).setParameter(1.0, 1.0)
-        self.layerNormFFN.setShape(self.hidden_dim)
-        self.ug.setShape(self.intermediate_dim * 2, self.hidden_dim).setParameter(
-            1.0, 0.0
-        )
-        self.d.setShape(self.hidden_dim, self.intermediate_dim).setParameter(1.0, 1.0)
-        self.activation.setShape(self.intermediate_dim)
-        self.modelLayerNorm.setShape(self.hidden_dim)
-        self.getLogits.setShape(self.vocab_size, self.hidden_dim).setParameter(1.0, 0.0)
-        self.sample.setShape(self.vocab_size)
-        self.global_output.setShape()
-
     def init_cached_weight(self, weight_path):
         self.kv_cache = KVCacheNone()
         self.init_operations()
-        self.init_set_shape()
         self.init_set_weight(weight_path, False)
 
     def init_set_weight(self, weight_path, cached):
@@ -367,9 +509,6 @@ class Pipeline:
         self.pfAttn.set_category(CategoryType.COMP)
         self.layerNormFFN.set_category(CategoryType.COMP)
         self.o.set_category(CategoryType.COMP)
-        self.ug.set_category(CategoryType.COMP)
-        self.activation.set_category(CategoryType.COMP)
-        self.d.set_category(CategoryType.COMP)
 
     def clear_batch_size(self):
         # init the batchsize to None
@@ -405,14 +544,22 @@ class Pipeline:
         else:
             self.layerNormAttn.config_tag("cuda", params)
             self.kqv.config_tag("torch", params)
+            self.kqv_bias.config_tag("torch", params)
             self.ropeAppend.config_tag("cuda", params)
             self.decAttn.config_tag("batched_cuda", params)
             self.pfAttn.config_tag("batched_cuda", params)
             self.layerNormFFN.config_tag("cuda", params)
             self.o.config_tag("torch", params)
-            self.ug.config_tag("torch", params)
-            self.activation.config_tag("cuda", params)
-            self.d.config_tag("torch", params)
+            self.gate.config_tag("torch", params)
+            self.fused_moe.config_tag("cutlass", params)
+            self.shared_expert_gate.config_tag("torch", params)
+            self.shared_expert_activation.config_tag("torch", params)
+            self.shared_ug.config_tag("torch", params)
+            self.shared_activation.config_tag("cuda", params)
+            self.shared_d.config_tag("torch", params)
+            self.shared_mul.config_tag("torch", params)
+            self.add_experts.config_tag("torch", params)
+            self.add_down_bias.config_tag("torch", params)
 
         self.getLogits.config_tag("torch", params)
         self.modelLayerNorm.config_tag("cuda", params)

@@ -51,6 +51,8 @@ class Sampling(Operations):
         self.inputs["logits"].init_shape((0, self.vocab_size))
         self.outputs["tokens"].init_shape((0,))
 
+        return self
+
     def init_profile_db(self):
         for _, impl in self.impl_map.items():
             self.cursor.execute(

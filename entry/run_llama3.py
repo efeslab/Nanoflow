@@ -1,11 +1,14 @@
 import sys
+import pprint
 import argparse
 
-sys.path.append("../")
-sys.path.append("../utils")
-sys.path.append("../pybind/build")
+sys.path.append("/code/Nanoflow-python/")
+sys.path.append("/code/Nanoflow-python/pybind/build")
+
+pprint.pprint(sys.path)
 
 from utils.prof_marker import prof_marker
+
 
 def test_performance():
     seq_len = 1024
@@ -258,12 +261,12 @@ arg_parser.add_argument(
 )
 arg_parser.add_argument(
     "--model",
-    choices=["8B"],
+    choices=["8B", "Qwen1.5-MoE-A2.7B"],
     default="8B",
     help="Pick which Pipeline to instantiate",
 )
 args = arg_parser.parse_args()
-
+print("Parse all args: ", args)
 
 # request_queue = []
 # request_manager = requestManager(args.trace_path, "meta-llama/Meta-Llama-3-8B-Instruct")
@@ -281,12 +284,18 @@ args = arg_parser.parse_args()
 
 if args.model == "8B":
     from models.llama3_FlashinferKVCache import Pipeline
+
     # from models.llama3_KVCacheTorch import Pipeline
 
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
     weight_map = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
     auto_search_path = "../auto_search/8B_search_result_large_btz.json"
+elif args.model == "Qwen1.5-MoE-A2.7B":
+    from models.qwen2_moe import Pipeline
 
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen1.5-MoE-A2.7B")
+    weight_map = "/code/hf/hub/models--Qwen--Qwen1.5-MoE-A2.7B/snapshots/1a758c50ecb6350748b9ce0a99d2352fd9fc11c9"
+    auto_search_path = None
 else:
     raise NotImplementedError(f"Model {args.model} not implemented yet.")
     # weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
@@ -299,6 +308,8 @@ if args.load_hf_weight:
 
 pipeline = Pipeline()
 pipeline.init(weight_map, cached=True)
+
+print("Finish initializing the pipeline.")
 
 if args.test == "correctness":
     test_correctness()

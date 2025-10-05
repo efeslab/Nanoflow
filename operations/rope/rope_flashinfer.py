@@ -84,6 +84,8 @@ class RopeAppendFlashinfer(Operations):
         # The output "q" has shape [batch_size, num_qo_heads * head_dim]
         self.outputs["q"].init_shape((0, self.num_qo_heads * self.head_dim // self.tp_size))
 
+        return self
+
     def update(self, qo_indicies, decode_batchsize):
         if self.isNanoSplit:
             for nano_op in self.nano_ops:

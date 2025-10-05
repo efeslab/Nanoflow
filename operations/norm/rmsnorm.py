@@ -82,6 +82,8 @@ class LayerNorm(Operations):
         self.weights["weight"].shape = (self.hidden_dim,)
         self.inputs["input"].init_shape((0, self.hidden_dim))
         self.outputs["output"].init_shape((0, self.hidden_dim))
+
+        return self
     
     def copy_nano(self, index):
         new_op = LayerNorm(self.name, self.device, self.epsilon, nano_idx=index)

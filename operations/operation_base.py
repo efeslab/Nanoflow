@@ -5,7 +5,7 @@ from operations.impl_base import OperationImpl
 import torch
 import sqlite3
 from core.IOWrapper import IOWrapper
-from core.weightWrapper import WeightWrapper    
+from core.weightWrapper import WeightWrapper
 from core.processWeight import process_weight_none
 from core.categoryType import CategoryType
 from utils.prof_marker import prof_marker
@@ -13,7 +13,8 @@ from utils.prof_marker import prof_marker
 import gurobipy as gp
 from gurobipy import GRB
 
-class Operations():
+
+class Operations:
     def __init__(self, name: str, device: str, nano_idx=None):
         # should be initialized in the device class
         self.inputs: dict[str, IOWrapper] = {}
@@ -28,7 +29,7 @@ class Operations():
             self.name = f"{name}{nano_idx}"
         else:
             self.name = name
-        
+
         self.first_layer_only = False
         self.last_layer_only = False
         self.weight_name = None
@@ -47,48 +48,62 @@ class Operations():
 
         self.impl_map: dict[str, Type[OperationImpl]] = {}
         self.op_layer: Type[Operation_Layer]
-        
+
     def init_impl_map(self):
-        self.impl_map = {} 
-    
+        self.impl_map = {}
+
     def add_impl(self, impl: Type[OperationImpl]):
         self.impl_map[impl.category_tag] = impl
-        
+
     def print_available_impl(self):
         print(self.impl_map.keys())
-    
+
     def checkConsistencyBetweenImpl(self, outputs):
         if self.impl_map.keys() == 0:
             raise Exception("No implementation found")
         for i in range(len(outputs)):
             for j in range(i + 1, len(outputs)):
-                print(f"Checking consistency between outputs {i} and {j} for operation {self.name}")
-                close_elements = torch.isclose(outputs[i], outputs[j], rtol=1e-01, atol=1e-03)
-                assert torch.all(close_elements), f"Outputs from different implementations are not close: {outputs[i]} and {outputs[j]}"
+                print(
+                    f"Checking consistency between outputs {i} and {j} for operation {self.name}"
+                )
+                close_elements = torch.isclose(
+                    outputs[i], outputs[j], rtol=1e-01, atol=1e-03
+                )
+                assert torch.all(
+                    close_elements
+                ), f"Outputs from different implementations are not close: {outputs[i]} and {outputs[j]}"
 
     def checkConnection(self):
         for name, IOwrapper in self.inputs.items():
             if IOwrapper.prev is None:
                 raise Exception(f"Operation {self.name}, Input {name} is not connected")
-    
+
     def setWeightName(self, name):
         self.weight_name = name
         return self
 
-    def setShape(self, *args, **kwargs):
-        return None
+    def setShape(self, *args, **kwargs) -> Optional["Operations"]:
+        return self
 
     def processWeight(self, global_weight_map, cached_weight_map, cached, device):
-        return process_weight_none(global_weight_map, self.weight_name, None, self.layer_list, cached_weight_map, cached, device)
-    
+        return process_weight_none(
+            global_weight_map,
+            self.weight_name,
+            None,
+            self.layer_list,
+            cached_weight_map,
+            cached,
+            device,
+        )
+
     def first_only(self):
         self.first_layer_only = True
         return self
-    
+
     def last_only(self):
         self.last_layer_only = True
         return self
-    
+
     # profile related methods
     def init_profile_db(self):
         """
@@ -105,13 +120,18 @@ class Operations():
         raise NotImplementedError("This method should be implemented in the subclass.")
 
     def is_profiled_in_db(self, category_tag):
-        self.cursor.execute(f'''
+        self.cursor.execute(
+            f"""
             SELECT * FROM {category_tag}
             WHERE batch_size = ? AND sm_count = ?
-        ''', (self.batch_size, self.sm_count))
+        """,
+            (self.batch_size, self.sm_count),
+        )
         row = self.cursor.fetchone()
         if row is not None:
-            print(f"Name: {self.name}, Category: {category_tag}, Batch Size: {self.batch_size}, SM Count: {self.sm_count} already profiled.")
+            print(
+                f"Name: {self.name}, Category: {category_tag}, Batch Size: {self.batch_size}, SM Count: {self.sm_count} already profiled."
+            )
             return True
         return False
 
@@ -119,10 +139,8 @@ class Operations():
         self.impl_configs_map = {}
         for _, impl in self.impl_map.items():
             category_tag = impl.category_tag
-            self.impl_configs_map[category_tag] = [
-                (None, None)
-            ]
-    
+            self.impl_configs_map[category_tag] = [(None, None)]
+
     def setup_profile_custom(self):
         self.init_impl_configs()
 
@@ -136,13 +154,16 @@ class Operations():
         if self.is_save_db:
             if not append_mode:
                 for _, impl in self.impl_map.items():
-                    self.cursor.execute(f'''
+                    self.cursor.execute(
+                        f"""
                         DROP TABLE IF EXISTS "{impl.category_tag}";
-                    ''')
-            print(f"Setting up profile database for operation {self.name} with append mode: {append_mode}")
+                    """
+                    )
+            print(
+                f"Setting up profile database for operation {self.name} with append mode: {append_mode}"
+            )
             self.init_profile_db()
             self.conn.commit()
-
 
     def profile_update(self):
         pass
@@ -193,12 +214,16 @@ class Operations():
                     average_elapsed_ms = elapsed_ms / rounds
                     # Store to results
                     if self.is_save_db:
-                        self.store_profile_db(category_tag, impl_tag, average_elapsed_ms)
+                        self.store_profile_db(
+                            category_tag, impl_tag, average_elapsed_ms
+                        )
             self.conn.commit()
 
     def print_profile(self):
-        if not hasattr(self, 'cursor'):
-            print(f"Profiling has not been run yet for operation {self.name}. Please call profile() first.")
+        if not hasattr(self, "cursor"):
+            print(
+                f"Profiling has not been run yet for operation {self.name}. Please call profile() first."
+            )
             return
         # assert hasattr(self, 'cursor'), "Profiling has not been run yet. Please call profile() first."
         # print the profiling results
@@ -206,25 +231,31 @@ class Operations():
         for _, impl in self.impl_map.items():
             category_tag = impl.category_tag
             # if category_tag not in self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table';").fetchall():
-            if not self.cursor.execute(f'''
+            if not self.cursor.execute(
+                f"""
                 SELECT name FROM sqlite_master WHERE type='table' AND name="{category_tag}";
-            ''').fetchone():
+            """
+            ).fetchone():
                 print(f"No profiling results found for category: {category_tag}")
                 continue
-            self.cursor.execute(f'''
+            self.cursor.execute(
+                f"""
                 SELECT * FROM {category_tag}
-            ''')
+            """
+            )
             cols = [col_desc[0] for col_desc in self.cursor.description]
             rows = self.cursor.fetchall()
             print(f"Profiling results for {category_tag}:")
-            print(" | ".join(cols))            # header line
+            print(" | ".join(cols))  # header line
             for row in rows:
                 print(" | ".join(str(val) for val in row))
         # self.conn.close()
-            
-    def config_tag(self, tag, parameter_map = {}):
+
+    def config_tag(self, tag, parameter_map={}):
         if self.isNanoSplit:
-            assert len(tag) == len(self.nano_ops), f"Operation {self.name} has {len(self.nano_ops)} nano ops, but {len(tag)} tags were provided."
+            assert len(tag) == len(
+                self.nano_ops
+            ), f"Operation {self.name} has {len(self.nano_ops)} nano ops, but {len(tag)} tags were provided."
             for i, nano_op in enumerate(self.nano_ops):
                 nano_op.config_tag(tag[i], parameter_map)
             return self
@@ -240,14 +271,14 @@ class Operations():
                 category_tag = parts[0]
                 impl_tag = parts[1]
             # self.impl  = self.impl_map[category_tag](self.inputs, self.outputs, self.weights, device)
-            self.impl  = self.impl_map[category_tag](self, self.stream, self.device)
+            self.impl = self.impl_map[category_tag](self, self.stream, self.device)
             self.config_impl(impl_tag, parameter_map)
             # print("name: ", self.name, "category_tag: ", category_tag, "impl_tag: ", impl_tag, "impl: ", self.impl)
             return self
-    
+
     def config_impl(self, impl_tag, parameter_map):
         self.impl.config(impl_tag, parameter_map)
-        
+
     def get_all_tags(self):
         tag_list = []
         for key in self.impl_map.keys():
@@ -260,11 +291,16 @@ class Operations():
                     tag_list.append(category_tag)
         return tag_list
 
-
     def set_category(self, category: Optional[CategoryType]) -> None:
         self.category = category
 
-    def set_stream(self, stream: tuple[torch._C.Stream, int | None] | list[tuple[torch._C.Stream, int | None]]) -> None:
+    def set_stream(
+        self,
+        stream: (
+            tuple[torch._C.Stream, int | None]
+            | list[tuple[torch._C.Stream, int | None]]
+        ),
+    ) -> None:
         if self.isNanoSplit:
             assert isinstance(stream, list), "Stream must be a list of streams"
             for i, nano_op in enumerate(self.nano_ops):
@@ -275,8 +311,9 @@ class Operations():
             self.stream = stream[0]
             self.sm_count = stream[1]
 
-
-    def append_dependency(self, extra_dep: tuple["Operations", int]): # add extra dependency before the operation
+    def append_dependency(
+        self, extra_dep: tuple["Operations", int]
+    ):  # add extra dependency before the operation
         if extra_dep not in self.extra_dep:
             self.extra_dep.append(extra_dep)
 
@@ -290,9 +327,9 @@ class Operations():
 
         for layer_idx in self.layer_list:
             self.children.append(self.op_layer(layer_idx, self))
-        
+
         return self.children
-    
+
     def setBatchSize(self, batch_size):
         self.batch_size = batch_size
         for _, input_wrapper in self.inputs.items():
@@ -305,7 +342,8 @@ class Operations():
 
     def __str__(self):
         return self.name
-    
+
+
 class Operation_Layer:
     def __init__(self, layer, base_op: Operations):
         self.layer = layer
@@ -317,7 +355,7 @@ class Operation_Layer:
         self.parent = base_op
         self.device = base_op.device
         self.prev_op_layer: list[Operation_Layer] = []
-        self.cuda_event = torch.cuda.Event(enable_timing=True) 
+        self.cuda_event = torch.cuda.Event(enable_timing=True)
         self.is_depended_on = False
 
         # for auto search
@@ -325,7 +363,7 @@ class Operation_Layer:
         self.algo_tag_map = {}
         self.start_time: gp.Var
         self.end_time: gp.Var
-    
+
     @property
     def impl(self):
         return self.parent.impl
@@ -357,10 +395,12 @@ class Operation_Layer:
             prev.extend(input_wrapper.actual_prev)
             depend_on_prev.extend(input_wrapper.actual_prev_depend_on_prev_layer)
         while len(prev) > 0:
-            assert len(prev) == len(depend_on_prev), f"Operation '{self.name}' has different number of prev and depend_on_prev connections!\n"
+            assert len(prev) == len(
+                depend_on_prev
+            ), f"Operation '{self.name}' has different number of prev and depend_on_prev connections!\n"
             dep_wrapper = prev.pop()
             prev_layer = depend_on_prev.pop()
-            # if "Rope" in self.name:  
+            # if "Rope" in self.name:
             #     print("dep_wrapper.owner.name: ", dep_wrapper.owner.name)
             #     print("dep_wrapper.name: ", dep_wrapper.name)
             if dep_wrapper.owner.isVirtual == False:
@@ -374,16 +414,22 @@ class Operation_Layer:
             elif dep_wrapper.owner.isCopy:
                 for idx, wrapper in enumerate(dep_wrapper.prev):
                     prev.append(wrapper)
-                    depend_on_prev.append(prev_layer or dep_wrapper.prev_depend_on_prev_layer[idx])
+                    depend_on_prev.append(
+                        prev_layer or dep_wrapper.prev_depend_on_prev_layer[idx]
+                    )
             elif dep_wrapper.owner.isRedist:
                 if dep_wrapper.is_input_wrapper:
                     for idx, wrapper in enumerate(dep_wrapper.prev):
                         prev.append(wrapper)
-                        depend_on_prev.append(prev_layer or dep_wrapper.prev_depend_on_prev_layer[idx])
+                        depend_on_prev.append(
+                            prev_layer or dep_wrapper.prev_depend_on_prev_layer[idx]
+                        )
                 elif dep_wrapper.is_output_wrapper:
-                    for idx, input_wrapper in enumerate(dep_wrapper.owner.inputs.values()):
+                    for idx, input_wrapper in enumerate(
+                        dep_wrapper.owner.inputs.values()
+                    ):
                         if input_wrapper.is_intersect(dep_wrapper):
-                            # if "Rope" in self.name: 
+                            # if "Rope" in self.name:
                             #     print("added")
                             prev.append(input_wrapper)
                             depend_on_prev.append(prev_layer)
@@ -391,14 +437,14 @@ class Operation_Layer:
         # unique dep
         dep = list(set(dep))
         return dep
-    
+
     def reset_op_cuda_status(self):
         self.prev_op_layer = []
         self.is_depended_on = False
 
     def append_prev_op_layer(self, op_layer):
         self.prev_op_layer.append(op_layer)
-    
+
     def set_is_depended_on(self, op_layer):
         if self.stream != op_layer.stream:
             self.is_depended_on = True
@@ -407,7 +453,7 @@ class Operation_Layer:
         if self.is_depended_on:
             self.cuda_event.record(self.stream)
             # print("record_cuda_event: ", self.name, "cuda_event: ", self.cuda_event)
-    
+
     def wait_cuda_event(self):
         events = []
         for op_layer in self.prev_op_layer:
@@ -422,9 +468,15 @@ class Operation_Layer:
         self.start_time = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_start")
         self.end_time = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_end")
         # print(f"init_Variables: {self.name}, start_time: {self.start_time}, end_time: {self.end_time}")
-        model.addConstr(self.end_time == self.start_time + self.duration_map[(self.batch_size, full_sm_count)], name=f"{self.name}_end_time")
+        model.addConstr(
+            self.end_time
+            == self.start_time + self.duration_map[(self.batch_size, full_sm_count)],
+            name=f"{self.name}_end_time",
+        )
 
-    def initVariablesStageTwo(self, model: gp.Model, sm_counts: list[int], categories: set[CategoryType]):
+    def initVariablesStageTwo(
+        self, model: gp.Model, sm_counts: list[int], categories: set[CategoryType]
+    ):
         self.start_time = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_start")
         self.end_time = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_end")
         self.p_vars: dict[int, gp.Var] = {}  # Variables for p choices
@@ -439,7 +491,9 @@ class Operation_Layer:
                 self.is_extra_linked_after_op[category] = False
 
         for sm_count in sm_counts:
-            self.p_vars[sm_count] = model.addVar(vtype=GRB.BINARY, name=f"{self.name}_p_{sm_count}")
+            self.p_vars[sm_count] = model.addVar(
+                vtype=GRB.BINARY, name=f"{self.name}_p_{sm_count}"
+            )
             if sm_count == 76:
                 self.p_vars[sm_count].Start = 1  # Force p_56 to be chosen
             else:
@@ -449,24 +503,27 @@ class Operation_Layer:
 
     def addInternalConstraintsStageTwo(self, model: gp.Model):
         model.addConstr(
-            gp.quicksum(self.p_vars.values()) == 1,
-            name=f"{self.name}_p_choice_sum"
+            gp.quicksum(self.p_vars.values()) == 1, name=f"{self.name}_p_choice_sum"
         )
 
         model.addConstr(
-            self.end_time == self.start_time + gp.quicksum(
-                self.p_vars[sm_count] * self.durations[sm_count] for sm_count in self.p_vars
+            self.end_time
+            == self.start_time
+            + gp.quicksum(
+                self.p_vars[sm_count] * self.durations[sm_count]
+                for sm_count in self.p_vars
             ),
-            name=f"{self.name}_end_time"
+            name=f"{self.name}_end_time",
         )
-        
+
         model.addConstr(
-            self.p_choice == gp.quicksum(
+            self.p_choice
+            == gp.quicksum(
                 sm_count * self.p_vars[sm_count] for sm_count in self.p_vars
             ),
-            name=f"{self.name}_p_choice_value"
+            name=f"{self.name}_p_choice_value",
         )
-    
+
     def __str__(self) -> str:
         # Color codes for terminal output
         COLOR_YELLOW = "\033[33m"
@@ -475,6 +532,7 @@ class Operation_Layer:
         COLOR_RESET = "\033[0m"
         s = f"{COLOR_BLUE}{self.name}{COLOR_RESET} start: {self.start_time.X:.3f} end: {self.end_time.X:.3f} batch_size: {round(self.batch_size)}"
         return s
+
 
 @dataclass
 class NanoOpInfo:

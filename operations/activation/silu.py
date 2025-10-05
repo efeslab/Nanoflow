@@ -10,17 +10,24 @@ from operations.impl_base import OperationImpl
 
 class SiluMultiplyTorchImpl(OperationImpl):
     category_tag = "torch"
-    def run(self, x, output):
+    def run(self, x, output, act_fn):
         with torch.cuda.stream(self.stream):
-            A, B = torch.split(x, x.shape[-1] // 2, dim=-1)
-            output.copy_(A * torch.nn.functional.silu(B))
-
+            if act_fn == "silu_mul":
+                A, B = torch.split(x, x.shape[-1] // 2, dim=-1)
+                output.copy_(A * torch.nn.functional.silu(B))
+            elif act_fn == "silu":
+                output.copy_(torch.nn.functional.silu(x))
+            elif act_fn == "sigmoid":
+                output.copy_(torch.sigmoid(x))
+            else:
+                raise ValueError(f"Unsupported activation function: {act_fn}")
 
 if config.PLATFORM_AITER:
     from aiter.ops.activation import silu_and_mul as aiter_silu_multiply
     class SiluMultiplyAiterImpl(OperationImpl):
         category_tag = "aiter"
-        def run(self, x, output):
+        def run(self, x, output, act_fn):
+            assert act_fn == "silu_mul", "Aiter implementation only supports silu_mul"
             with torch.cuda.stream(self.stream):
                 aiter_silu_multiply(output, x)
 
@@ -29,12 +36,13 @@ if config.PLATFORM_CUDA:
     import bind_silu_multiply
     class SiluMultiplyCudaImpl(OperationImpl):
         category_tag = "cuda"
-        def run(self, x, output):
+        def run(self, x, output, act_fn):
+            assert act_fn == "silu_mul", "CUDA implementation only supports silu_mul"
             if self.batch_size > 0:
                 bind_silu_multiply.silu_multiply(x, output, self.stream_handle)
 
 class Activation(Operations):
-    def __init__(self, name, device, nano_idx=None):
+    def __init__(self, name, device, act_fn="silu_mul", nano_idx=None):
         super().__init__(name, device, nano_idx)
         self.inputs = {
             "input": IOWrapper(self, 'input', device).is_input(),
@@ -42,7 +50,7 @@ class Activation(Operations):
         self.outputs = {
             "output": IOWrapper(self, 'output', device).is_output(),
         }
-        self.act_fn = torch.nn.SiLU()
+        self.act_fn = act_fn
         self.impl_map = {}
         self.init_impl_map()
         self.op_layer = Activation_Layer
@@ -60,8 +68,13 @@ class Activation(Operations):
         self.tp_idx = tp_idx
         self.tp_size = tp_size
         self.tp_N = N // tp_size
-        self.inputs["input"].init_shape((0, self.tp_N * 2))
+        if self.act_fn == "silu_mul":
+            self.inputs["input"].init_shape((0, self.tp_N * 2))
+        else:
+            self.inputs["input"].init_shape((0, self.tp_N))
         self.outputs["output"].init_shape((0, self.tp_N))
+
+        return self
     
     def copy_nano(self, index):
         new_op = Activation(self.name, self.device, nano_idx=index)
@@ -93,7 +106,7 @@ class Activation(Operations):
         ''', (self.batch_size, self.sm_count, self.tp_N, average_elapsed_ms))
 
     def run(self):
-        self.impl.run(self.inputs["input"].tensor, self.outputs["output"].tensor)
+        self.impl.run(self.inputs["input"].tensor, self.outputs["output"].tensor, act_fn=self.act_fn)
 
     def profile_run(self):
         self.run()

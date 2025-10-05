@@ -1,5 +1,5 @@
 from collections import deque
-from offload import offloadData, offloadMetaData
+from .offload import offloadData, offloadMetaData
 import torch
 
 class NewRequestInfo:

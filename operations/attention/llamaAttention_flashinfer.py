@@ -90,6 +90,8 @@ class DecAttnFlashinfer(Operations):
         q_dim = num_qo_heads * head_dim // tp_size
         self.inputs["Q"].init_shape((0, q_dim))
         self.outputs["output"].init_shape((0, q_dim))
+
+        return self
     
     def update(self, qo_indicies):
         self.qo_indicies = qo_indicies
@@ -256,6 +258,8 @@ class PFAttnFlashinfer(Operations):
         q_dim = num_qo_heads * head_dim // tp_size
         self.inputs["Q"].init_shape((0, q_dim))
         self.outputs["output"].init_shape((0, q_dim))
+
+        return self
     
     def update(self, qo_indicies,
              causal=True, logits_soft_cap=0.0, pos_encoding_mode="NONE"):

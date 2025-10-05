@@ -297,7 +297,8 @@ if __name__ == "__main__":
     from utils.input_test import prefill_context
     from bind_all_reduce import NCCLWrapper
 
-    AFFINITY_MODULE_PATH = "utils.affinity_utils"
+    AFFINITY_MODULE_PATH = None
+    # AFFINITY_MODULE_PATH = "utils.affinity_utils"
     T0 = time.perf_counter()
 
     print("import modules, ", time.perf_counter() - T0)

@@ -1,6 +1,6 @@
 import sys
 
-from request_info import NewRequestInfo, NewRequestQueue, FlyRequestInfo
+from .request_info import NewRequestInfo, NewRequestQueue, FlyRequestInfo
 from transformers import AutoTokenizer
 from loguru import logger
 

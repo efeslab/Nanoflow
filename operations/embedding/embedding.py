@@ -37,11 +37,11 @@ class GenEmbedding(Operations):
         self.weights = {
             "embedding": WeightWrapper(self)
         }
-        self.impl_map = {}
         self.init_impl_map()
         self.op_layer = GenEmbedding_Layer
     
     def init_impl_map(self):
+        self.impl_map = {}
         self.add_impl(GenEmbeddingTorchImpl)
         if platform_config.PLATFORM_CUDA:
             self.add_impl(GenEmbeddingCudaImpl)
@@ -52,6 +52,8 @@ class GenEmbedding(Operations):
         self.weights["embedding"].shape = (self.vocab_size, self.N)
         self.inputs["token"].init_shape((0,))
         self.outputs["output"].init_shape((0, self.N))
+
+        return self
 
     def init_profile_db(self):
         for _, impl in self.impl_map.items():
