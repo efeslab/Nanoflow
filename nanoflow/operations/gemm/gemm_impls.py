@@ -5,12 +5,15 @@ from nanoflow.operations import OperationImpl
 if platform_config.PLATFORM_CUDA:
     from nanoflow.utils.green_ctx import set_sm_count_target
 else:
+
     def set_sm_count_target(sm_count):
         pass
+
 
 class GEMMTorchImpl(OperationImpl):
     category_tag = "torch"
     impl_tag_profile = "torch"
+
     def config(self, impl_tag, parameter_map):
         self.alpha = self.op_base.alpha
         self.bias = self.op_base.bias
@@ -20,7 +23,7 @@ class GEMMTorchImpl(OperationImpl):
 
         # if self.op_base.sm_count is not None:
         #     set_sm_count_target(self.op_base.sm_count)
-    
+
     def run(self, A, B, C, D):
         with torch.cuda.stream(self.stream):
             if self.op_base.sm_count is not None:
@@ -29,33 +32,31 @@ class GEMMTorchImpl(OperationImpl):
                 torch.addmm(C, A, B, beta=self.beta, alpha=self.alpha, out=D)
             else:
                 torch.matmul(A, B, out=D)
-        
-        # if self.op_base.name == "O":
-        #     torch.cuda.synchronize()  # for debug
-        #     print("GEMM O output:", D)
-
 
 
 if platform_config.PLATFORM_AITER:
+
     class GEMMAiterImpl(OperationImpl):
         category_tag = "aiter"
+
         def config(self, impl_tag, parameter_map):
             self.alpha = self.op_base.alpha
             self.bias = self.op_base.bias
             self.beta = 0.0
             if self.bias:
                 self.beta = self.op_base.beta
-        
+
         def run(self, B):
             with torch.cuda.stream(self.stream):
                 D = self.outputs["D"].tensor
                 A = self.inputs["A"].tensor
-                
+
                 if self.bias:
                     C = self.inputs["C"].tensor
                     D.copy_(A.matmul(B) * self.alpha + C * self.beta)
                 else:
                     D.copy_(A.matmul(B) * self.alpha)
+
 
 # if platform_config.PLATFORM_CUDA:
 #     import bind_gemm

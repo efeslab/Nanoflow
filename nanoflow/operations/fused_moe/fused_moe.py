@@ -13,7 +13,7 @@ from flashinfer.fused_moe import cutlass_fused_moe
 
 
 def compute_routing(
-    router_logits: torch.Tensor, top_k: int
+    router_logits: torch.Tensor, top_k: int, norm_topk_prob: bool
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute routing weights and selected experts from router logits.
@@ -29,17 +29,59 @@ def compute_routing(
     """
     routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
     routing_weights, selected_experts = torch.topk(routing_weights, top_k, dim=-1)
-    routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+    if norm_topk_prob:
+        routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
     routing_weights = routing_weights.float()
     return routing_weights, selected_experts
+
+
+class FusedMoETorchImpl(OperationImpl):
+    category_tag = "torch"
+
+    def run(
+        self,
+        x,
+        router_logits,
+        w31_weight,
+        w2_weight,
+        out,
+        num_experts,
+        top_k,
+        norm_topk_prob,
+    ):
+        with torch.cuda.stream(self.stream):
+            routing_weights, selected_experts = compute_routing(router_logits, top_k, norm_topk_prob)
+            results = torch.zeros_like(x)
+            for expert_id in range(num_experts):
+                mask = selected_experts == expert_id
+                if not mask.sum():
+                    continue
+                batch_idx, nth_expert = torch.where(mask)
+                w31_expert = w31_weight[
+                    expert_id
+                ]  # [2 * intermediate_size, hidden_size]
+                w2_expert = w2_weight[expert_id]  # [hidden_size, intermediate_size]
+
+                # Split w13 into w1 and w3
+                w3_expert, w1_expert = torch.chunk(w31_expert, 2, dim=0)
+
+                expert_inputs = x[batch_idx]
+                inter = F.silu(expert_inputs @ w1_expert.t()) * (
+                    expert_inputs @ w3_expert.t()
+                )
+                output = inter @ w2_expert.t()
+                results[batch_idx] += (
+                    routing_weights[batch_idx, nth_expert, None] * output
+                )
+            out.copy_(results)
 
 
 class FusedMoEImpl(OperationImpl):
     category_tag = "cutlass"
 
-    def run(self, x, router_logits, W31, W2, output, top_k):
+    def run(self, x, router_logits, W31, W2, output, num_experts, top_k, norm_topk_prob):
         with torch.cuda.stream(self.stream):
-            routing_weights, selected_experts = compute_routing(router_logits, top_k)
+            routing_weights, selected_experts = compute_routing(router_logits, top_k, norm_topk_prob)
             flash_output = cutlass_fused_moe(
                 x,
                 selected_experts.to(torch.int),
@@ -72,13 +114,17 @@ class FusedMoE(Operations):
 
     def init_impl_map(self):
         self.impl_map = {}
+        self.add_impl(FusedMoETorchImpl)
         self.add_impl(FusedMoEImpl)
 
-    def setShape(self, num_experts, moe_intermediate_dim, hidden_dim, top_k):
+    def setShape(
+        self, num_experts, moe_intermediate_dim, hidden_dim, top_k, norm_topk_prob
+    ):
         self.num_experts = num_experts
         self.moe_intermediate_dim = moe_intermediate_dim
         self.hidden_dim = hidden_dim
         self.top_k = top_k
+        self.norm_topk_prob = norm_topk_prob
         self.inputs["x"].init_shape((0, hidden_dim))
         self.inputs["router_logits"].init_shape((0, num_experts))
         self.outputs["output"].init_shape((0, hidden_dim))
@@ -94,7 +140,9 @@ class FusedMoE(Operations):
             self.weights["W31"].weight_map[layer],
             self.weights["W2"].weight_map[layer],
             self.outputs["output"].tensor,
+            self.num_experts,
             top_k=self.top_k,
+            norm_topk_prob=self.norm_topk_prob,
         )
 
     def processWeight(self, global_weight_map, cached_weight_map, cached, device):

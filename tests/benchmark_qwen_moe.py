@@ -34,7 +34,7 @@ model = Qwen2MoeForCausalLM.from_pretrained(
 
 gen_cfg = GenerationConfig.from_pretrained(MODEL_ID)
 gen_cfg.do_sample = False
-gen_cfg.max_new_tokens = 1
+gen_cfg.max_new_tokens = 20
 
 print(model)
 

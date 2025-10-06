@@ -48,6 +48,7 @@ class Pipeline:
         self.shared_expert_intermediate_dim = 5632
         self.num_experts_per_tok = 4
         self.num_experts = 60
+        self.norm_topk_prob = False
         self.num_shared_experts = 1
         self.rms_norm_eps = 1e-6
         self.rope_theta = 1000000.0
@@ -290,6 +291,7 @@ class Pipeline:
                 moe_intermediate_dim=self.moe_intermediate_dim,
                 hidden_dim=self.hidden_dim,
                 top_k=self.num_experts_per_tok,
+                norm_topk_prob=self.norm_topk_prob,
             )
             .setWeightName(
                 [

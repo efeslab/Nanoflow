@@ -326,7 +326,7 @@ class PFAttnFlashinfer(Operations):
 
     def run(self, kv_tuple):
         self.impl.run(self.inputs["Q"].tensor, kv_tuple, self.outputs["output"].tensor)
-    
+
     def profile_run(self):
         self.run(self.kv_tuple)
 
