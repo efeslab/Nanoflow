@@ -1,7 +1,7 @@
 import time
 import torch
 import torch.multiprocessing as mp
-from utils.prof_marker import prof_marker
+from nanoflow.utils.prof_marker import prof_marker
 
 def worker(start_time, rank, request_queue: mp.Queue, shared_decode_bts, result_queue: mp.Queue, barrier, work_pipeline, use_auto_search, profile_result_path, use_nanosplit, use_cuda_graph, command):
     torch.cuda.set_device(rank)

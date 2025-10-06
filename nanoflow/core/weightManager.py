@@ -15,10 +15,10 @@ except ImportError:
     import numpy as np
 
 class WeightManager():
-    def __init__(self, pipeline_name, weight_path, cached, device):
+    def __init__(self, pipeline_name, cached_weight_path, weight_path, cached, device):
         self.pipeline_name = pipeline_name
         self.cached = cached
-        self.cached_weight_path = f"../cached_weights/{pipeline_name}"
+        self.cached_weight_path = cached_weight_path
         self.weight_map = {}
         self.processed_weight_map = {}
         self.processed_weight_metadata = {}

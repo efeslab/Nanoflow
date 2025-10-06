@@ -1,37 +1,45 @@
 import copy
 import json
+from pathlib import Path
 from typing import Any, Optional
 import torch
 import torch.distributed as dist
-from bind_all_reduce import NCCLWrapper
 
 
-from utils.green_ctx import split_device_green_ctx_by_sm_count
-from operations.operation_base import NanoOpInfo, Operations, Operation_Layer
-from operations.activation.silu import Activation
-from operations.allreduce.allreduce import AllReduce
-from operations.embedding.embedding import GenEmbedding
-from operations.globalOp.globalOp import GlobalInput, GlobalOutput
-from operations.gemm.gemm_N_parallel import GEMM_N_Parallel
-from operations.gemm.gemm_K_parallel import GEMM_K_Parallel
-from operations.norm.rmsnorm import LayerNorm
-from operations.sampling.max_sampling import Sampling
-from operations.rope.rope_flashinfer import RopeAppendFlashinfer
-from operations.attention.llamaAttention_flashinfer import (
+from nanoflow.operations import NanoOpInfo, Operations, Operation_Layer
+
+from nanoflow.operations import (
+    GlobalInput,
+    GlobalOutput,
+    GenEmbedding,
+    LayerNorm,
+    GEMM_N_Parallel,
+    GEMM_K_Parallel,
+    RopeAppendFlashinfer,
     DecAttnFlashinfer,
     PFAttnFlashinfer,
+    Activation,
+    AllReduce,
+    Sampling,
+    Copy,
+    Redist,
 )
-from operations.virtualOp.virtual_ops import Copy, Redist
-from kvcache.kv import KVCacheNone, DistKVPool, BatchedDistKVCache
-from core.weightManager import WeightManager
-from core.bufferAllocate import BufferAllocator
-from core.executor import Executor
-from core.nanobatchSplit import split_nanobatch
-from core.categoryType import CategoryType
-from utils.prof_marker import prof_marker
+
+from nanoflow.kvcache.kv import KVCacheNone, DistKVPool, BatchedDistKVCache
+from nanoflow.core import WeightManager, CategoryType
+from nanoflow.core.bufferAllocate import BufferAllocator
+from nanoflow.core.executor import Executor
+from nanoflow.core.nanobatchSplit import split_nanobatch
+
+from nanoflow.utils.prof_marker import prof_marker
+from nanoflow.utils.green_ctx import split_device_green_ctx_by_sm_count
+
+from nanoflow.pybind.build.bind_all_reduce import NCCLWrapper
 
 
 class Pipeline:
+    pipeline_name_prefix = "Llama3-70B-with-2-allreduce"
+
     def __init__(
         self,
         TP_idx: int,
@@ -44,7 +52,7 @@ class Pipeline:
     ):
         # Set parameters as instance variables.
         self.pipeline_name = (
-            f"Llama3-70B-with-2-allreduce-TP{TP_size}-PP{PP_size}-DP{DP_size}"
+            f"{self.pipeline_name_prefix}-TP{TP_size}-PP{PP_size}-DP{DP_size}"
         )
         self.num_kv_heads = 8
         self.num_qo_heads = 64
@@ -71,14 +79,7 @@ class Pipeline:
         self.dp_size = DP_size
         self.unique_nccl_ids = unique_nccl_ids
 
-        assert (
-            self.pp_size * self.dp_size * self.tp_size == self.num_cuda_devices
-        ), f"num_cuda_devices {self.num_cuda_devices} should be equal to pp_size * dp_size * tp_size {self.pp_size * self.dp_size * self.tp_size}"
-        # create torch.distributed group
-        assert (
-            self.num_cuda_devices % self.tp_size == 0
-        ), f"num_cuda_devices {self.num_cuda_devices} should be divisible by tp_size {self.tp_size}"
-
+        self.cached_weight_path = f"../cached_weights/{self.pipeline_name}"
         # profile related variables
         self.profile_dir = f"../profile_data/{self.pipeline_name}"
         self.profile_result: dict[str, Any] | None = None
@@ -89,6 +90,22 @@ class Pipeline:
         self.is_auto_search_enabled: bool = False
         self.is_cuda_graph_enabled: bool = False
         self.plan_cuda_graph: bool = False
+
+        assert (
+            self.pp_size * self.dp_size * self.tp_size == self.num_cuda_devices
+        ), f"num_cuda_devices {self.num_cuda_devices} should be equal to pp_size * dp_size * tp_size {self.pp_size * self.dp_size * self.tp_size}"
+        # create torch.distributed group
+        assert (
+            self.num_cuda_devices % self.tp_size == 0
+        ), f"num_cuda_devices {self.num_cuda_devices} should be divisible by tp_size {self.tp_size}"
+
+    @staticmethod
+    def has_cached_weight(tp_size, pp_size, dp_size) -> bool:
+        pipeline_name = (
+            f"{Pipeline.pipeline_name_prefix}-TP{tp_size}-PP{pp_size}-DP{dp_size}"
+        )
+        cached_weight_path = f"../cached_weights/{pipeline_name}"
+        return Path(cached_weight_path).exists()
 
     def set_device(self, rank, device):
         self.rank = rank
@@ -104,6 +121,22 @@ class Pipeline:
         self.init_set_weight(weight_path, cached)
         self.config_network(self.rank)
         self.update_network_ops()
+
+    def init_set_weight(self, weight_path, cached):
+        weight_manager = WeightManager(
+            self.pipeline_name,
+            self.cached_weight_path,
+            weight_path,
+            cached,
+            self.device,
+        )
+        weight_manager.set_weight(self.model_operations, self.device)
+
+    def init_cached_weight(self, weight_path):
+        self.kv_cache = KVCacheNone()
+        self.init_operations()
+        self.init_set_shape()
+        self.init_set_weight(weight_path, False)
 
     def init_streams(self):
         self.main_stream = torch.cuda.Stream()
@@ -197,9 +230,9 @@ class Pipeline:
         )
         self.gen_embedding_layers = self.gen_embedding.expand_layer(self.layer_list)
 
-        self.layerNormAttn = LayerNorm("LayerNormAttn", self.device, eps=self.rms_norm_eps).setWeightName(
-            "model.layers.{layer}.input_layernorm.weight"
-        )
+        self.layerNormAttn = LayerNorm(
+            "LayerNormAttn", self.device, eps=self.rms_norm_eps
+        ).setWeightName("model.layers.{layer}.input_layernorm.weight")
         self.layerNormAttn_layers = self.layerNormAttn.expand_layer(self.layer_list)
 
         self.kqv = GEMM_N_Parallel("KQV", self.device).setWeightName(
@@ -211,7 +244,9 @@ class Pipeline:
         )
         self.kqv_layers = self.kqv.expand_layer(self.layer_list)
 
-        self.ropeAppend = RopeAppendFlashinfer("RopeAppend", self.device, theta=self.rope_theta)
+        self.ropeAppend = RopeAppendFlashinfer(
+            "RopeAppend", self.device, theta=self.rope_theta
+        )
         self.ropeAppend.externals["KVCache"] = self.kv_cache
         self.ropeAppend_layers = self.ropeAppend.expand_layer(self.layer_list)
 
@@ -231,9 +266,9 @@ class Pipeline:
         self.allReduce_o = AllReduce("AllReduceO", self.device)
         self.allReduce_o_layers = self.allReduce_o.expand_layer(self.layer_list)
 
-        self.layerNormFFN = LayerNorm("LayerNormFFN", device=self.device, eps=self.rms_norm_eps).setWeightName(
-            "model.layers.{layer}.post_attention_layernorm.weight"
-        )
+        self.layerNormFFN = LayerNorm(
+            "LayerNormFFN", device=self.device, eps=self.rms_norm_eps
+        ).setWeightName("model.layers.{layer}.post_attention_layernorm.weight")
         self.layerNormFFN_layers = self.layerNormFFN.expand_layer(self.layer_list)
 
         self.ug = GEMM_N_Parallel("UG", self.device).setWeightName(
@@ -429,18 +464,6 @@ class Pipeline:
         self.getLogits.setShape(self.vocab_size, self.hidden_dim).setParameter(1.0, 0.0)
         self.sample.setShape(self.vocab_size)
         self.global_output.setShape()
-
-    def init_cached_weight(self, weight_path):
-        self.kv_cache = KVCacheNone()
-        self.init_operations()
-        self.init_set_shape()
-        self.init_set_weight(weight_path, False)
-
-    def init_set_weight(self, weight_path, cached):
-        weight_manager = WeightManager(
-            self.pipeline_name, weight_path, cached, self.device
-        )
-        weight_manager.set_weight(self.model_operations, self.device)
 
     def init_category(self):
         # set category for loop operations

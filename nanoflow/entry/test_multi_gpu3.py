@@ -18,7 +18,7 @@ def worker(T0, rank, affinity_module_path, *rest):
         # Affinity is best-effort; don't crash the worker if unavailable
         print(f"[rank {rank}] CPU affinity setup skipped or failed: {_e}", flush=True)
 
-    from core.worker import worker as real_worker
+    from nanoflow.core.worker import worker as real_worker
 
     return real_worker(T0, rank, *rest)
 
@@ -286,16 +286,13 @@ def profile():
 
 if __name__ == "__main__":
     mp.set_start_method("spawn")
-    import sys
     import argparse
 
-    sys.path.append("../")
-    sys.path.append("../pybind/build")
-
-    from utils.util_functions import prepare_weight
     from transformers import AutoTokenizer
-    from utils.input_test import prefill_context
-    from bind_all_reduce import NCCLWrapper
+
+    from nanoflow.utils.util_functions import prepare_weight
+    from nanoflow.utils.input_test import prefill_context
+    from nanoflow.pybind.build.bind_all_reduce import NCCLWrapper
 
     AFFINITY_MODULE_PATH = None
     # AFFINITY_MODULE_PATH = "utils.affinity_utils"
@@ -304,11 +301,6 @@ if __name__ == "__main__":
     print("import modules, ", time.perf_counter() - T0)
 
     arg_parser = argparse.ArgumentParser()
-    arg_parser.add_argument(
-        "--load_hf_weight",
-        action="store_true",
-        help="Load weights from huggingface",
-    )
     arg_parser.add_argument(
         "--tensor_parallel_size",
         type=int,
@@ -331,7 +323,7 @@ if __name__ == "__main__":
 
     if args.model == "70B":
         weight_map = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
-        from models.llama3_70B_FlashinferKVCache_allreduce import (
+        from nanoflow.models.llama3_70B_FlashinferKVCache_allreduce import (
             Pipeline as Pipeline_70B,
         )
 
@@ -343,7 +335,7 @@ if __name__ == "__main__":
 
     elif args.model == "8B":
         weight_map = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
-        from models.llama3_8B_FlashinferKVCache_allreduce import (
+        from nanoflow.models.llama3_8B_FlashinferKVCache_allreduce import (
             Pipeline as Pipeline_8B,
         )
 
@@ -367,7 +359,12 @@ if __name__ == "__main__":
 
     unique_nccl_ids = [NCCLWrapper.get_nccl_unique_id() for _ in range(10)]
 
-    if args.load_hf_weight:
+    if not hasattr(Pipeline, "has_cached_weight"):
+        raise ValueError("Pipeline class must have has_cached_weight staticmethod")
+    HAS_CACHED_WEIGHT = Pipeline.has_cached_weight(TP_size, PP_size, DP_size)
+    print("HAS_CACHED_WEIGHT: ", HAS_CACHED_WEIGHT)
+
+    if not HAS_CACHED_WEIGHT:
         pipeline_weight_list = [
             (
                 i,

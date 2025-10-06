@@ -1,5 +1,6 @@
 import copy
 import json
+from pathlib import Path
 from typing import Any, Optional
 import torch
 
@@ -34,9 +35,10 @@ from nanoflow.utils.prof_marker import prof_marker
 
 
 class Pipeline:
+    pipeline_name = "Llama3-8B"
+
     def __init__(self):
         # Set parameters as instance variables.
-        self.pipeline_name = "Llama3-8B"
         self.num_kv_heads = 8
         self.num_qo_heads = 32
         self.head_dim = 128
@@ -53,6 +55,8 @@ class Pipeline:
         self.decode_batch_size: Optional[int] = None
         self.layer_list = [i for i in range(self.num_layers)]
         self.device = "cuda:0"
+
+        self.cached_weight_path = f"../cached_weights/{self.pipeline_name}"
         self.profile_dir = f"../profile_data/{self.pipeline_name}"
         self.profile_result: dict[str, Any] | None = None
         self.categories = [CategoryType.COMP, CategoryType.MEM]
@@ -61,6 +65,11 @@ class Pipeline:
         self.is_auto_search_enabled: bool = False
         self.is_cuda_graph_enabled: bool = False
         self.plan_cuda_graph: bool = False
+
+    @staticmethod
+    def has_cached_weight() -> bool:
+        cached_weight_path = f"../cached_weights/{Pipeline.pipeline_name}"
+        return Path(cached_weight_path).exists()
 
     def set_device(self, rank, device):
         pass
@@ -73,6 +82,22 @@ class Pipeline:
         self.init_dependency()
         self.init_set_shape()
         self.init_set_weight(weight_path, cached)
+
+    def init_set_weight(self, weight_path, cached):
+        weight_manager = WeightManager(
+            self.pipeline_name,
+            self.cached_weight_path,
+            weight_path,
+            cached,
+            self.device,
+        )
+        weight_manager.set_weight(self.model_operations, self.device)
+
+    def init_cached_weight(self, weight_path):
+        self.kv_cache = KVCacheNone()
+        self.init_operations()
+        self.init_set_shape()
+        self.init_set_weight(weight_path, False)
 
     def init_streams(self):
         self.main_stream = torch.cuda.Stream()
@@ -352,18 +377,6 @@ class Pipeline:
         self.getLogits.setShape(self.vocab_size, self.hidden_dim).setParameter(1.0, 0.0)
         self.sample.setShape(self.vocab_size)
         self.global_output.setShape()
-
-    def init_cached_weight(self, weight_path):
-        self.kv_cache = KVCacheNone()
-        self.init_operations()
-        self.init_set_shape()
-        self.init_set_weight(weight_path, False)
-
-    def init_set_weight(self, weight_path, cached):
-        weight_manager = WeightManager(
-            self.pipeline_name, weight_path, cached, self.device
-        )
-        weight_manager.set_weight(self.model_operations, self.device)
 
     def init_category(self):
         # set category for loop operations

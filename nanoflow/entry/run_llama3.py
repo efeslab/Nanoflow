@@ -240,11 +240,6 @@ from nanoflow.utils.input_test import prefill_context
 
 arg_parser = argparse.ArgumentParser()
 arg_parser.add_argument(
-    "--load_hf_weight",
-    action="store_true",
-    help="Load weights from huggingface",
-)
-arg_parser.add_argument(
     "--test",
     choices=["correctness", "performance", "profile", "one_cycle"],
     default="correctness",
@@ -293,7 +288,12 @@ else:
     # weight_map_amd_kan = "/work1/kasikci/kanzhu/models/llama3-8b"
     # weight_map_yi = "/app/llama3-8b"
 
-if args.load_hf_weight:
+if not hasattr(Pipeline, "has_cached_weight"):
+    raise ValueError("Pipeline class must have has_cached_weight staticmethod")
+HAS_CACHED_WEIGHT = Pipeline.has_cached_weight()
+print("HAS_CACHED_WEIGHT: ", HAS_CACHED_WEIGHT)
+
+if not HAS_CACHED_WEIGHT:
     pipeline_weight_list = [(i, f"cuda:{i}", Pipeline()) for i in range(1)]
     prepare_weight(pipeline_weight_list, weight_map)
 

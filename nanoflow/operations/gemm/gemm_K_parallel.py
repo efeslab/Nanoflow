@@ -2,14 +2,13 @@ from numpy import isin
 import torch
 import time
 import sqlite3
-from utils.prof_marker import prof_marker
-import platform_config
-from operations.operation_base import Operations, Operation_Layer
-from core.IOWrapper import IOWrapper
-from core.weightWrapper import WeightWrapper
-from core.processWeight import process_weight_list
 
-from operations.gemm.gemm_impls import GEMMTorchImpl
+from nanoflow.utils.prof_marker import prof_marker
+import nanoflow.platform_config as platform_config
+from nanoflow.operations.operation_base import Operations, Operation_Layer
+from nanoflow.operations.gemm.gemm_impls import GEMMTorchImpl
+
+from nanoflow.core import IOWrapper, WeightWrapper, process_weight_list
 
 
 class GEMM_K_Parallel(Operations):
