@@ -6,8 +6,10 @@ pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cu128
 pip install nvtx
 pip install loguru
 pip install transformers
+pip install accelerate
 pip install matplotlib
 pip install nvmath-python
+pip install flashinfer-python
 
 
 cd ..
@@ -27,16 +29,17 @@ fi
 ./$CMAKE_INSTALLER --prefix=/usr/local --exclude-subdir
 
 cd Nanoflow-python
+pip install -e . -v
 
 # cd 3rdparty/cutlass
 # git checkout main
 # cd ../..
 
-# build flashinfer
-cd 3rdparty/flashinfer
-python -m pip install -v .
-# FLASHINFER_ENABLE_AOT=1 python -m pip install -v .
-cd ../..
+# # build flashinfer
+# cd 3rdparty/flashinfer
+# python -m pip install -e . -v
+# # FLASHINFER_ENABLE_AOT=1 python -m pip install -v .
+# cd ../..
 
 # build mscclpp
 cd 3rdparty/mscclpp
@@ -47,6 +50,8 @@ cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local/mscclpp -DBUI
 make -j mscclpp mscclpp_static
 make install/fast
 cd ../../../
+
+cd nanoflow
 
 # build kernels
 cd pybind

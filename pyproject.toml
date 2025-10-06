@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nanoflow"              # <= publishable name, no hyphen
+version = "0.1.0"
+requires-python = ">=3.9"
+dependencies = []              # <= add runtime dependencies here
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["nanoflow*"]

@@ -16,7 +16,7 @@ from transformers import (
     GenerationConfig,
 )
 
-from utils.input_test import prefill_context
+from nanoflow.utils.input_test import prefill_context
 
 MODEL_ID = "Qwen/Qwen1.5-MoE-A2.7B"
 # MODEL_ID = "Qwen/Qwen2-57B-A14B-Instruct"
@@ -27,20 +27,20 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 # 2) Load model (BF16/FP16, spread across all visible GPUs; falls back to CPU)
 model = Qwen2MoeForCausalLM.from_pretrained(
     MODEL_ID,
-    torch_dtype=torch.float16,  # or torch.float16 if GPUs lack BF16
+    dtype=torch.float16,  # or torch.float16 if GPUs lack BF16
     device_map="auto",  # split layers across GPUs automatically
     use_safetensors=True,
 )
 
 gen_cfg = GenerationConfig.from_pretrained(MODEL_ID)
 gen_cfg.do_sample = False
-gen_cfg.max_new_tokens = 2
+gen_cfg.max_new_tokens = 1
 
 print(model)
 
 # 3) Encode the prompt
-# prompt = "Hi, who are you?"
-prompt = prefill_context
+prompt = "Hi, who are you?"
+# prompt = prefill_context
 # prompts = [
 #     "Hi, who are you?",
 #     prefill_context
