@@ -116,7 +116,12 @@ class Executor():
             for outputs in op.outputs.values():
                 tensor_pool[f"{op.name}_{outputs.name}"] = outputs.tensor
                 tensor_list.append((f"{op.name}_{outputs.name}", outputs.tensor))
-            
+
+            # with open(file, "a") as f:
+            #     f.write(f"{op.name}\n")
+            #     f.write(f"{op.inputs}\n")
+            #     f.write(f"{op.outputs}\n")
+
             # if "AllGatherD" in op.name:
             #     torch.cuda.synchronize()
             #     print("Execution finished, saving tensors...")
@@ -132,7 +137,7 @@ class Executor():
 
         torch.cuda.synchronize()
         print("Execution finished, saving tensors...")
-        with open(file, "a") as f:
-            for name, tensor in tensor_list:
-                f.write(f"[{name}]\n{tensor}\n{tensor.shape}\n")
+        # with open(file, "a") as f:
+        #     for name, tensor in tensor_list:
+        #         f.write(f"[{name}]\n{tensor}\n{tensor.shape}\n")
         # torch.save(tensor_pool, f"{filefolder_name}/output.pt")

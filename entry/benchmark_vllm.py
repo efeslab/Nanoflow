@@ -205,34 +205,16 @@ def run_vllm(
     if engine_args.enable_lora:
         lora_requests = [request.lora_request for request in requests]
 
-    use_beam_search = False
 
     with torch.profiler.profile(
         activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
     ) as prof:
-        if not use_beam_search:
-            start = time.perf_counter()
-            llm.generate(prompts,
+        start = time.perf_counter()
+        llm.generate(prompts,
                         sampling_params,
                         lora_request=lora_requests,
                         use_tqdm=True)
-            end = time.perf_counter()
-        else:
-            assert lora_requests is None, "BeamSearch API does not support LoRA"
-            prompts = [request.prompt for request in requests]
-            # output_len should be the same for all requests.
-            output_len = requests[0][2]
-            for request in requests:
-                assert request.expected_output_len == output_len
-            start = time.perf_counter()
-            llm.beam_search(
-                prompts,
-                BeamSearchParams(
-                    beam_width=n,
-                    max_tokens=output_len,
-                    ignore_eos=True,
-                ))
-            end = time.perf_counter()
+        end = time.perf_counter()
     prof.export_chrome_trace(args.output_trace)
     return end - start
 

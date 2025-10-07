@@ -17,6 +17,10 @@ def worker(start_time, rank, request_queue: mp.Queue, shared_decode_bts, result_
 
     new_tokens = None
     cycle_count = 0
+    profiler = torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+        with_stack=False,
+    )
 
     while True:
         # First barrier: wait until the main process writes a new task.
@@ -53,6 +57,7 @@ def worker(start_time, rank, request_queue: mp.Queue, shared_decode_bts, result_
             #             shared_array[req_idx] = new_token[0]
             
             case "Execute":
+                profiler.__enter__()
                 time.sleep(0.01)
                 with prof_marker(f"Worker {rank} Execute S1", color="blue"):
                     input = request_queue.get(timeout=1)
@@ -65,6 +70,8 @@ def worker(start_time, rank, request_queue: mp.Queue, shared_decode_bts, result_
                 with prof_marker(f"Worker {rank} Execute S4", color="blue"):
                     if rank == 0:
                         result_queue.put_nowait(new_tokens)
+                profiler.__exit__(None, None, None)
+                profiler.export_chrome_trace(f"profile_data/worker_{rank}.json")
 
             case "Profile":
                 input_ids = request_queue.get(timeout=1)
@@ -120,5 +127,4 @@ def worker(start_time, rank, request_queue: mp.Queue, shared_decode_bts, result_
         # Second barrier: wait until all workers finish computation.
         cycle_count += 1
         barrier.wait()
-    
     # Worker exits gracefully.

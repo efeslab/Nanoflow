@@ -63,15 +63,21 @@ def test_correctness_new():
     input1 = [(i, input_ids.copy()) for i in range(2, 4)]
     request_queues = [mp.Queue(maxsize=100) for _ in range(world_size)]
     result_queue = mp.Queue(maxsize=100)
+    use_auto_search = mp.Value('i', 0)
+    use_nanosplit = mp.Value('i', 0)
+    use_cuda_graph = mp.Value('i', 0)
 
     output_strings = {}
     for idx in range(4):
         output_strings[idx] = input_ids.copy()
     processes = []
+    use_auto_search.value = 0
+    use_nanosplit.value = 1
+    use_cuda_graph.value = 0
     for rank in range(world_size):
         start_time = time.perf_counter()
         # print(f"Starting process {rank} on GPU {rank}")
-        args = (T0, rank, request_queues[rank], shared_decode_bts, result_queue, barrier, pipeline_list[rank], command, input_ids)
+        args = (T0, rank, request_queues[rank], shared_decode_bts, result_queue, barrier, pipeline_list[rank], use_auto_search, use_nanosplit, use_cuda_graph, command)
         p = mp.Process(target=worker, args=args)
 
         p.start()
@@ -151,7 +157,7 @@ def test_performance():
     command.value = b"Execute"
     shared_decode_bts.value = 0
     use_auto_search.value = 0
-    use_nanosplit.value = 0
+    use_nanosplit.value = 1
     use_cuda_graph.value = 0
 
     group_prefill_size = 16
@@ -280,8 +286,8 @@ if __name__ == '__main__':
     # from models.llama3_70B_KVCacheTorch_allgather import Pipeline
     # from models.llama3_70B_FlashinferKVCache_allgather import Pipeline
     # from models.llama3_70B_KVCacheTorch_allreduce import Pipeline
-    from models.llama3_70B_FlashinferKVCache_allreduce import Pipeline
-    # from models.llama3_8B_KVCacheFA_TP2 import Pipeline
+    # from models.llama3_70B_FlashinferKVCache_allreduce import Pipeline
+    from models.llama3_8B_KVCacheFA_allreduce import Pipeline
 
     print("import modules, ", time.perf_counter() - T0)
     mp.set_start_method('spawn')
@@ -292,15 +298,15 @@ if __name__ == '__main__':
     args = arg_parser.parse_args()
 
     # print("initializing the modules and start mode setting, ", time.perf_counter() - T0)
-    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-70B-Instruct")
+    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
 
     # print("tokenize the inputs, initialize the output dict, ", time.perf_counter() - T0)
 
-    weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
+    weight_map_wzr = "/app/llama3-8b"
 
     world_size = torch.cuda.device_count()
     print("world size: ", world_size)
-    TP_size = 4
+    TP_size = 2
     PP_size = 1
     DP_size = 1
 

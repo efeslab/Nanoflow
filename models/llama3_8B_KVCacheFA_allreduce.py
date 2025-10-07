@@ -380,17 +380,17 @@ class Pipeline:
         self.gen_embedding.config_tag(gemm_tag)
         self.decAttn.config_tag("vllm")
         self.pfAttn.config_tag("flash_attn_batched")
-        self.layerNormAttn.config_tag(["torch", "torch"])
-        self.activation.config_tag(["torch", "torch"])
+        self.layerNormAttn.config_tag(["aiter", "aiter"])
+        self.activation.config_tag(["aiter", "aiter"])
         self.kqv.config_tag([gemm_tag, gemm_tag])
         self.ropeAppend.config_tag(["flash_attn_batched", "flash_attn_batched"])
-        self.layerNormFFN.config_tag(["torch", "torch"])
+        self.layerNormFFN.config_tag(["aiter", "aiter"])
         self.o.config_tag([gemm_tag, gemm_tag])
-        self.allReduce_o.config_tag("torch")
+        self.allReduce_o.config_tag(["torch", "torch"])
         self.ug.config_tag([gemm_tag, gemm_tag])
         self.d.config_tag([gemm_tag, gemm_tag])
-        self.allReduce_d.config_tag("torch")
-        self.modelLayerNorm.config_tag("torch")
+        self.allReduce_d.config_tag(["torch", "torch"])
+        self.modelLayerNorm.config_tag("aiter")
         self.sample.config_tag(gemm_tag)
         self.getLogits.config_tag(gemm_tag)
 
@@ -424,7 +424,7 @@ class Pipeline:
         self.decAttn.set_stream(self.streams["DC_ATTN"])
         self.pfAttn.set_stream(self.streams["PF_ATTN"])
         self.o.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
-        self.allReduce_o.set_stream(self.streams["NETWORK"])
+        self.allReduce_o.set_stream([self.streams["NETWORK"], self.streams["NETWORK"]])
         self.layerNormFFN.set_stream(
             [self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]]
         )
@@ -433,7 +433,7 @@ class Pipeline:
             [self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]]
         )
         self.d.set_stream([self.streams["GEMM_WITH_PF"], self.streams["GEMM_WITH_DC"]])
-        self.allReduce_d.set_stream(self.streams["NETWORK"])
+        self.allReduce_d.set_stream([self.streams["NETWORK"], self.streams["NETWORK"]])
         self.modelLayerNorm.set_stream(self.streams["GEMM"])
         self.sample.set_stream(self.streams["GEMM"])
         self.getLogits.set_stream(self.streams["GEMM"])
@@ -457,10 +457,12 @@ class Pipeline:
             "KQV": copy.deepcopy(info),
             "RopeAppend": copy.deepcopy(info),
             "O": copy.deepcopy(info),
+            "AllReduceO": copy.deepcopy(info),
             "LayerNormFFN": copy.deepcopy(info),
             "UG": copy.deepcopy(info),
             "Activation": copy.deepcopy(info),
             "D": copy.deepcopy(info),
+            "AllReduceD": copy.deepcopy(info),
         }
 
         new_operation_list, addtional_virtual_ops = split_nanobatch(
@@ -567,7 +569,7 @@ class Pipeline:
         temp_out = torch.zeros(self.batch_size, dtype=torch.int32, device="cuda")
 
         self.executor.execute(temp_out, self.main_stream)
-        # self.executor.print_debug(temp_out, f"{file_name}_{self.rank}", filefolder_name=f"{filefolder_name}_{self.rank}")
+        self.executor.print_debug(temp_out, f"{file_name}_{self.rank}", filefolder_name=f"{filefolder_name}_{self.rank}")
 
         with prof_marker("after_execute_before_return"):
             temp_out = temp_out.cpu()
