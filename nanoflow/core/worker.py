@@ -45,9 +45,9 @@ def worker(start_time, rank, request_queue: mp.Queue, shared_decode_bts, result_
                     print(f"Stream: {stream_name}")
 
                     # test for prefill
-                    total_batch_sizes = [128, 256, 384, 512, 640, 768, 896, 1024, 1152, 1280, 1408, 1536, 1664, 1792, 1920, 2048]
+                    # total_batch_sizes = [128, 256, 384, 512, 640, 768, 896, 1024, 1152, 1280, 1408, 1536, 1664, 1792, 1920, 2048]
                     # total_batch_sizes = [640, 1408, 2048]
-                    # total_batch_sizes = [1280, 1792, 3072]
+                    total_batch_sizes = [1280, 1792, 3072]
                     for idx, total_batch_size in enumerate(total_batch_sizes):
                         input = [(idx, input_ids[:total_batch_size].copy())]
 
@@ -56,9 +56,9 @@ def worker(start_time, rank, request_queue: mp.Queue, shared_decode_bts, result_
                 
                     # test for decode
                     # total_batch_sizes = [128, 256, 384]
-                    total_batch_sizes = [128, 256, 384, 512, 640]
+                    # total_batch_sizes = [128, 256, 384, 512, 640]
                     # total_batch_sizes = [384]
-                    # total_batch_sizes = [1280]
+                    total_batch_sizes = [1280]
                     # prepare the decode inputs for a special input_length
                     input_length = 1024
                     # output_length = 0

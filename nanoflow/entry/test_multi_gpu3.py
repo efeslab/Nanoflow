@@ -108,6 +108,7 @@ def test_correctness():
 
 def test_performance():
     seq_len = 1024
+    # seq_len = 2048
     # global_batch_size = 1024
     global_batch_size = 2048
     # global_batch_size = 3072
@@ -116,7 +117,8 @@ def test_performance():
     # decode_batch_size = 1280
     prefill_batch_size = global_batch_size - decode_batch_size
 
-    prefill_context_ids = tokenizer.encode(prefill_context)  # which length is 1912.
+    prefill_context_ids = tokenizer.encode(prefill_context)
+    assert seq_len <= len(prefill_context_ids), f"seq_len {seq_len} should be less than {len(prefill_context_ids)}"
     prefill_input_ids = prefill_context_ids[:seq_len]
     request_queues = [mp.Queue(maxsize=1000) for _ in range(world_size)]
     result_queue = mp.Queue(maxsize=1000)
@@ -154,10 +156,11 @@ def test_performance():
     use_nanosplit.value = 0
     use_cuda_graph.value = 0
 
-    group_prefill_size = 16
+    group_prefill_size = 8
     cycles = (decode_batch_size + group_prefill_size - 1) // group_prefill_size
 
     for i in range(cycles):
+        print(f"Cycle {i + 1}/{cycles}")
         prefill_inputs = []
         if i == cycles - 1:
             for j in range(i * group_prefill_size, decode_batch_size):
@@ -180,6 +183,7 @@ def test_performance():
         # print("new_tokens: ", new_tokens)
 
     # prepare for the testing configuration
+    assert prefill_batch_size <= len(prefill_context_ids), f"prefill_batch_size {prefill_batch_size} should be less than {len(prefill_context_ids)}"
     output_strings[decode_batch_size] = prefill_context_ids[:prefill_batch_size].copy()
     decode_inputs.extend(
         [(decode_batch_size, prefill_context_ids[:prefill_batch_size].copy())]
@@ -187,9 +191,9 @@ def test_performance():
     for queue in request_queues:
         queue.put_nowait(decode_inputs)
     shared_decode_bts.value = decode_batch_size
-    use_auto_search.value = 1
-    use_nanosplit.value = 1
-    use_cuda_graph.value = 1
+    use_auto_search.value = 0
+    use_nanosplit.value = 0
+    use_cuda_graph.value = 0
 
     for i in range(decode_batch_size, decode_batch_size + 20):
         print("Cycle: ", i - decode_batch_size)
@@ -364,6 +368,7 @@ if __name__ == "__main__":
     HAS_CACHED_WEIGHT = Pipeline.has_cached_weight(TP_size, PP_size, DP_size)
     print("HAS_CACHED_WEIGHT: ", HAS_CACHED_WEIGHT)
 
+    # process weights
     if not HAS_CACHED_WEIGHT:
         pipeline_weight_list = [
             (
@@ -378,6 +383,15 @@ if __name__ == "__main__":
         ]
         prepare_weight(pipeline_weight_list, weight_map)
 
+    # mkdir for profiler
+    if args.test == "profile":
+        if not hasattr(Pipeline, "profile_data_path"):
+            raise ValueError("Pipeline class must have profile_data_path staticmethod")
+        profile_data_path = Pipeline.profile_data_path(TP_size, PP_size, DP_size)
+        import os
+        os.makedirs(profile_data_path, exist_ok=True)
+
+    # create pipeline instances
     pipeline_list = [
         Pipeline(TP_idx=i, TP_size=TP_size, unique_nccl_ids=unique_nccl_ids)
         for i in range(world_size)

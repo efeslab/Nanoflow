@@ -124,7 +124,7 @@ class BufferAllocator():
             model = gp.Model("linear_program")
             model.setParam("OutputFlag", 0)
             variables = {}
-            print("component: ", comp)
+            # print("component: ", comp)
             # Create a subgraph for the component:
             comp = self.full_graph.subgraph(comp)
             if nx.is_directed_acyclic_graph(comp):
@@ -148,7 +148,7 @@ class BufferAllocator():
                 # print("No copy or redist operations found in the component.")
                 shape = wrappers[0].shape
                 dtype = wrappers[0].dtype
-                print(f"Allocated shape: {shape}, dtype: {dtype}")
+                # print(f"Allocated shape: {shape}, dtype: {dtype}")
                 whole_buffer = torch.empty(shape, dtype=dtype).to(device)
                 self.total_allocated += whole_buffer.numel() * whole_buffer.element_size()
                 for wrapper in wrappers:

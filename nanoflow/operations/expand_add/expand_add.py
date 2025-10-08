@@ -14,9 +14,6 @@ class ExpandAddTorchImpl(OperationImpl):
         with torch.cuda.stream(self.stream):
             output.copy_(input + weight)
 
-        torch.cuda.synchronize()  # for debug
-        print("ExpandAdd output:", output)
-
 
 class ExpandAdd(Operations):
     def __init__(self, name, device, nano_idx=None):

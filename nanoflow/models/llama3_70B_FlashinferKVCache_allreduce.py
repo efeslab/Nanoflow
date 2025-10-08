@@ -106,6 +106,13 @@ class Pipeline:
         )
         cached_weight_path = f"../cached_weights/{pipeline_name}"
         return Path(cached_weight_path).exists()
+    
+    @staticmethod
+    def profile_data_path(tp_size, pp_size, dp_size) -> str:
+        pipeline_name = (
+            f"{Pipeline.pipeline_name_prefix}-TP{tp_size}-PP{pp_size}-DP{dp_size}"
+        )
+        return f"../profile_data/{pipeline_name}"
 
     def set_device(self, rank, device):
         self.rank = rank
@@ -189,25 +196,19 @@ class Pipeline:
 
     def init_external_data(self):
         print("Initializing external data...")
-        # self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048 * 14, self.page_size, self.tp_size, self.device) # H100 TP4 config
-        # self.kv_pool = DistKVPool(
-        #     self.num_layers,
-        #     self.num_kv_heads,
-        #     self.head_dim,
-        #     2048 * 36,
-        #     self.page_size,
-        #     self.tp_size,
-        #     self.device,
-        # )  # H200 TP4 config
+        H100_TP4_num_pages = 2048 * 14
+        H200_TP2_num_pages = 2048 * 12
+        H200_TP4_num_pages = 2048 * 36
+        H200_TP8_num_pages = 2048 * 84
         self.kv_pool = DistKVPool(
             self.num_layers,
             self.num_kv_heads,
             self.head_dim,
-            2048 * 12,
+            H200_TP2_num_pages,
             self.page_size,
             self.tp_size,
             self.device,
-        )  # H200 TP2 config
+        )
         self.kv_cache = BatchedDistKVCache(self.kv_pool)
 
     def reset(self):
@@ -547,8 +548,8 @@ class Pipeline:
 
     def config_streams(self):
         print("Configuring streams...")
-        self.global_input.set_stream((self.main_stream, self.total_sm))
-        self.gen_embedding.set_stream((self.main_stream, self.total_sm))
+        for operation in self.original_model_operations:
+            operation.set_stream((self.main_stream, self.total_sm))
 
         if self.is_auto_search_enabled:
             for op in self.model_operations:
@@ -558,26 +559,6 @@ class Pipeline:
                         op.name
                     ]["p_value"]
                     op.set_stream(self.streams[op.category][sm_count])
-        else:
-            self.layerNormAttn.set_stream((self.main_stream, self.total_sm))
-            self.kqv.set_stream((self.main_stream, self.total_sm))
-            self.ropeAppend.set_stream((self.main_stream, self.total_sm))
-            self.decAttn.set_stream((self.main_stream, self.total_sm))
-            self.pfAttn.set_stream((self.main_stream, self.total_sm))
-            self.layerNormFFN.set_stream((self.main_stream, self.total_sm))
-            self.o.set_stream((self.main_stream, self.total_sm))
-            # self.allReduce_o.set_stream(self.streams[CategoryType.NET][self.total_sm])
-            self.allReduce_o.set_stream((self.main_stream, self.total_sm))
-            self.ug.set_stream((self.main_stream, self.total_sm))
-            self.activation.set_stream((self.main_stream, self.total_sm))
-            self.d.set_stream((self.main_stream, self.total_sm))
-            # self.allReduce_d.set_stream(self.streams[CategoryType.NET][self.total_sm])
-            self.allReduce_d.set_stream((self.main_stream, self.total_sm))
-
-        self.getLogits.set_stream((self.main_stream, self.total_sm))
-        self.modelLayerNorm.set_stream((self.main_stream, self.total_sm))
-        self.sample.set_stream((self.main_stream, self.total_sm))
-        self.global_output.set_stream((self.main_stream, self.total_sm))
 
     def profile_config_streams(self, stream_tuple):
         for operation in self.model_operations:

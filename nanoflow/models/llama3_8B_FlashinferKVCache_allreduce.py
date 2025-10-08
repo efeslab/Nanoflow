@@ -106,6 +106,13 @@ class Pipeline:
         cached_weight_path = f"../cached_weights/{pipeline_name}"
         return Path(cached_weight_path).exists()
 
+    @staticmethod
+    def profile_data_path(tp_size, pp_size, dp_size) -> str:
+        pipeline_name = (
+            f"{Pipeline.pipeline_name_prefix}-TP{tp_size}-PP{pp_size}-DP{dp_size}"
+        )
+        return f"../profile_data/{pipeline_name}"
+
     def set_device(self, rank, device):
         self.rank = rank
         self.device = device
@@ -539,8 +546,8 @@ class Pipeline:
 
     def config_streams(self):
         print("Configuring streams...")
-        self.global_input.set_stream((self.main_stream, self.total_sm))
-        self.gen_embedding.set_stream((self.main_stream, self.total_sm))
+        for operation in self.original_model_operations:
+            operation.set_stream((self.main_stream, self.total_sm))
 
         if self.is_auto_search_enabled:
             for op in self.model_operations:
@@ -550,24 +557,6 @@ class Pipeline:
                         op.name
                     ]["p_value"]
                     op.set_stream(self.streams[op.category][sm_count])
-        else:
-            self.layerNormAttn.set_stream((self.main_stream, self.total_sm))
-            self.kqv.set_stream((self.main_stream, self.total_sm))
-            self.ropeAppend.set_stream((self.main_stream, self.total_sm))
-            self.decAttn.set_stream((self.main_stream, self.total_sm))
-            self.pfAttn.set_stream((self.main_stream, self.total_sm))
-            self.layerNormFFN.set_stream((self.main_stream, self.total_sm))
-            self.o.set_stream((self.main_stream, self.total_sm))
-            self.allReduce_o.set_stream((self.main_stream, self.total_sm))
-            self.ug.set_stream((self.main_stream, self.total_sm))
-            self.activation.set_stream((self.main_stream, self.total_sm))
-            self.d.set_stream((self.main_stream, self.total_sm))
-            self.allReduce_d.set_stream((self.main_stream, self.total_sm))
-
-        self.getLogits.set_stream((self.main_stream, self.total_sm))
-        self.modelLayerNorm.set_stream((self.main_stream, self.total_sm))
-        self.sample.set_stream((self.main_stream, self.total_sm))
-        self.global_output.set_stream((self.main_stream, self.total_sm))
 
     def profile_config_streams(self, stream_tuple):
         for operation in self.model_operations:

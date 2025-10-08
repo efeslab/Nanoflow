@@ -1,7 +1,7 @@
 def test_performance():
     seq_len = 1024
     global_batch_size = 2048
-    decode_batch_size = 640
+    decode_batch_size = 480
     prefill_batch_size = global_batch_size - decode_batch_size
 
     prefill_context_ids = tokenizer.encode(prefill_context)
@@ -29,9 +29,9 @@ def test_performance():
         decode_inputs,
         decode_batch_size,
         profile_result_path=auto_search_path,
-        use_auto_search=True,
-        use_cuda_graph=True,
-        use_nano_split=True,
+        use_auto_search=False,
+        use_cuda_graph=False,
+        use_nano_split=False,
     )
     # pipeline.update(decode_inputs, decode_batch_size)
 
@@ -60,9 +60,9 @@ def test_performance():
                 new_tokens,
                 decode_batchsize,
                 profile_result_path=auto_search_path,
-                use_auto_search=True,
-                use_cuda_graph=True,
-                use_nano_split=True,
+                use_auto_search=False,
+                use_cuda_graph=False,
+                use_nano_split=False,
             )
             # pipeline.update(new_tokens, decode_batchsize)
 

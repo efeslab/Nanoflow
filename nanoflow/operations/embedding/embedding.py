@@ -13,8 +13,6 @@ class GenEmbeddingTorchImpl(OperationImpl):
         with torch.cuda.stream(self.stream):
             # print("using torch")
             output.copy_(embedding[tokens])
-        
-
 
 
 if platform_config.PLATFORM_CUDA:
@@ -29,9 +27,7 @@ if platform_config.PLATFORM_CUDA:
                 bind_genEmbedding.genEmbedding(
                     tokens, embedding, output, self.stream_handle
                 )
-                
-            torch.cuda.synchronize()  # for debug
-            print("GenEmbedding output:", output)
+
 
 class GenEmbedding(Operations):
     def __init__(self, name, device):
