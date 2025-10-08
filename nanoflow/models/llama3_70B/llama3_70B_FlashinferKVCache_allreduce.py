@@ -88,21 +88,6 @@ class Pipeline:
             self.pp_size * self.dp_size * self.tp_size == self.num_cuda_devices
         ), f"num_cuda_devices {self.num_cuda_devices} should be equal to pp_size * dp_size * tp_size {self.pp_size * self.dp_size * self.tp_size}"
 
-    @staticmethod
-    def has_cached_weight(tp_size, pp_size, dp_size) -> bool:
-        pipeline_name = (
-            f"{Pipeline.pipeline_name_prefix}-TP{tp_size}-PP{pp_size}-DP{dp_size}"
-        )
-        cached_weight_dir = f"../cached_weights/{pipeline_name}"
-        return Path(cached_weight_dir).exists()
-
-    @staticmethod
-    def profile_data_path(tp_size, pp_size, dp_size) -> str:
-        pipeline_name = (
-            f"{Pipeline.pipeline_name_prefix}-TP{tp_size}-PP{pp_size}-DP{dp_size}"
-        )
-        return f"../profile_data/{pipeline_name}"
-
     def set_device(self, rank, device):
         self.rank = rank
         self.device = device

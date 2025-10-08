@@ -38,6 +38,7 @@ from nanoflow.pybind.build.bind_all_reduce import NCCLWrapper
 
 from .config_llama3_8B import Llama3_8B_Config
 
+
 class Pipeline:
     def __init__(
         self,
@@ -47,7 +48,7 @@ class Pipeline:
         self.pipeline_name = cfg.pipeline_name
         self.cached_weight_dir = cfg.cached_weight_dir
         self.profile_dir = cfg.profile_dir
-            
+
         self.num_kv_heads = cfg.num_kv_heads
         self.num_qo_heads = cfg.num_qo_heads
         self.head_dim = cfg.head_dim
@@ -58,15 +59,14 @@ class Pipeline:
         self.rms_norm_eps = cfg.rms_norm_eps
         self.rope_theta = cfg.rope_theta
         self.page_size = cfg.page_size
-        self.tp_rank = cfg.tp_rank
         self.tp_size = cfg.tp_size
-        self.pp_rank = cfg.pp_rank
+        self.tp_rank = cfg.tp_rank
         self.pp_size = cfg.pp_size
-        self.dp_rank = cfg.dp_rank
+        self.pp_rank = cfg.pp_rank
         self.dp_size = cfg.dp_size
+        self.dp_rank = cfg.dp_rank
         self.kv_cache_type = cfg.kv_cache_type
         self.unique_nccl_ids = cfg.unique_nccl_ids
-
 
         self.kqv_heads = self.num_qo_heads + 2 * self.num_kv_heads
         self.global_batch_size: Optional[int] = None
@@ -75,7 +75,8 @@ class Pipeline:
         self.num_cuda_devices = torch.cuda.device_count()
 
         self.profile_result: dict[str, Any] | None = None
-        self.categories = [CategoryType.COMP, CategoryType.MEM, CategoryType.NET]
+        self.categories = [CategoryType.COMP,
+                           CategoryType.MEM, CategoryType.NET]
 
         self.buffer_fixed: bool = False
         self.is_auto_search_enabled: bool = False
@@ -96,7 +97,6 @@ class Pipeline:
         self.init_operations()
         self.init_category()
         self.init_dependency()
-        self.init_set_shape()
         self.init_set_weight(weight_path, cached)
         self.config_network(self.rank)
         self.update_network_ops()
@@ -114,14 +114,14 @@ class Pipeline:
     def init_cached_weight(self, weight_path):
         self.kv_cache = KVCacheNone()
         self.init_operations()
-        self.init_set_shape()
         self.init_set_weight(weight_path, False)
 
     def init_streams(self):
         self.main_stream = torch.cuda.Stream()
         self.total_sm = 132
         self.sm_counts = [
-            i for i in range(8, 128, 8)  # Assuming SM counts are in increments of 8
+            # Assuming SM counts are in increments of 8
+            i for i in range(8, 128, 8)
         ]
         # [8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120]
         num_sm_counts = len(self.sm_counts)
@@ -129,7 +129,8 @@ class Pipeline:
             "GEMM_Test": (torch.cuda.Stream(), self.total_sm),
         }
 
-        self.streams: dict[CategoryType, dict[int, tuple[torch._C.Stream, int]]] = {}
+        self.streams: dict[CategoryType,
+                           dict[int, tuple[torch._C.Stream, int]]] = {}
         for category in self.categories:
             self.streams[category] = {}
 
@@ -145,7 +146,8 @@ class Pipeline:
                 )
                 self.streams[category][sm_count_1] = (stream_1, sm_count_1)
                 self.streams[category][sm_count_2] = (stream_2, sm_count_2)
-            self.streams[category][self.total_sm] = (torch.cuda.Stream(), self.total_sm)
+            self.streams[category][self.total_sm] = (
+                torch.cuda.Stream(), self.total_sm)
 
         # Create green context streams for testing
         self.profile_streams: dict[str, tuple[torch._C.Stream, int]] = {}
@@ -164,11 +166,13 @@ class Pipeline:
                 stream_2,
                 sm_count_2,
             )
-        self.profile_streams[f"TEST_TOTAL"] = (torch.cuda.Stream(), self.total_sm)
+        self.profile_streams[f"TEST_TOTAL"] = (
+            torch.cuda.Stream(), self.total_sm)
 
     def init_external_data(self):
         print("Initializing external data...")
-        self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048, self.page_size, self.tp_size, self.device) # H100 TP4 config
+        self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim,
+                                  2048, self.page_size, self.tp_size, self.device)  # H100 TP4 config
         # self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048 * 14, self.page_size, self.tp_size, self.device) # H100 TP4 config
         # self.kv_pool = DistKVPool(
         #     self.num_layers,
@@ -192,20 +196,31 @@ class Pipeline:
         self.decode_batch_size = None
 
     def init_operations(self):
-        self.global_input = GlobalInput("GlobalInput", self.device).first_only()
-        self.global_input_layers = self.global_input.expand_layer(self.layer_list)
+        self.original_model_operations: list[Operations] = []
+        self.original_virtual_operations: list[Operations] = []
+
+        self.global_input = GlobalInput(
+            "GlobalInput", self.device).setShape().first_only()
+        self.global_input_layers = self.global_input.expand_layer(
+            self.layer_list)
+        self.original_model_operations.append(self.global_input)
 
         self.gen_embedding = (
             GenEmbedding("GenEmbedding", self.device)
             .setWeightName("model.embed_tokens.weight")
+            .setShape(self.hidden_dim, self.vocab_size)
             .first_only()
         )
-        self.gen_embedding_layers = self.gen_embedding.expand_layer(self.layer_list)
+        self.gen_embedding_layers = self.gen_embedding.expand_layer(
+            self.layer_list)
+        self.original_model_operations.append(self.gen_embedding)
 
         self.layerNormAttn = LayerNorm(
             "LayerNormAttn", self.device, eps=self.rms_norm_eps
-        ).setWeightName("model.layers.{layer}.input_layernorm.weight")
-        self.layerNormAttn_layers = self.layerNormAttn.expand_layer(self.layer_list)
+        ).setWeightName("model.layers.{layer}.input_layernorm.weight").setShape(self.hidden_dim)
+        self.layerNormAttn_layers = self.layerNormAttn.expand_layer(
+            self.layer_list)
+        self.original_model_operations.append(self.layerNormAttn)
 
         self.kqv = GEMM_N_Parallel("KQV", self.device).setWeightName(
             [
@@ -213,125 +228,156 @@ class Pipeline:
                 "model.layers.{layer}.self_attn.v_proj.weight",
                 "model.layers.{layer}.self_attn.q_proj.weight",
             ]
-        )
+        ).setShape(
+            self.kqv_heads * self.head_dim,
+            self.hidden_dim,
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
+        ).setParameter(1.0, 0.0)
         self.kqv_layers = self.kqv.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.kqv)
 
         self.ropeAppend = RopeAppendFlashinfer(
             "RopeAppend", self.device, theta=self.rope_theta
+        ).setShape(
+            self.num_kv_heads, self.num_qo_heads, self.head_dim, tp_size=self.tp_size
         )
         self.ropeAppend.externals["KVCache"] = self.kv_cache
         self.ropeAppend_layers = self.ropeAppend.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.ropeAppend)
 
-        self.decAttn = DecAttnFlashinfer("DecAttn", self.device)
+        self.decAttn = DecAttnFlashinfer("DecAttn", self.device).setShape(
+            self.num_kv_heads, self.num_qo_heads, self.head_dim, tp_size=self.tp_size
+        )
         self.decAttn.externals["KVCache"] = self.kv_cache
         self.decAttn_layers = self.decAttn.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.decAttn)
 
-        self.pfAttn = PFAttnFlashinfer("PFAttn", self.device)
+        self.pfAttn = PFAttnFlashinfer("PFAttn", self.device).setShape(
+            self.num_kv_heads, self.num_qo_heads, self.head_dim, tp_size=self.tp_size
+        )
         self.pfAttn.externals["KVCache"] = self.kv_cache
         self.pfAttn_layers = self.pfAttn.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.pfAttn)
 
         self.o = GEMM_K_Parallel("O", self.device, bias=True).setWeightName(
             "model.layers.{layer}.self_attn.o_proj.weight"
-        )
+        ).setShape(
+            self.hidden_dim, self.hidden_dim, tp_rank=self.tp_rank, tp_size=self.tp_size
+        ).setParameter(1.0, 1.0 / self.tp_size)
         self.o_layers = self.o.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.o)
 
-        self.allReduce_o = AllReduce("AllReduceO", self.device)
-        self.allReduce_o_layers = self.allReduce_o.expand_layer(self.layer_list)
+        self.allReduce_o = AllReduce("AllReduceO", self.device).setShape(
+            self.hidden_dim, rank=self.tp_rank, world_size=self.tp_size
+        )
+        self.allReduce_o_layers = self.allReduce_o.expand_layer(
+            self.layer_list)
+        self.original_model_operations.append(self.allReduce_o)
 
         self.layerNormFFN = LayerNorm(
             "LayerNormFFN", device=self.device, eps=self.rms_norm_eps
-        ).setWeightName("model.layers.{layer}.post_attention_layernorm.weight")
-        self.layerNormFFN_layers = self.layerNormFFN.expand_layer(self.layer_list)
+        ).setWeightName("model.layers.{layer}.post_attention_layernorm.weight").setShape(self.hidden_dim)
+        self.layerNormFFN_layers = self.layerNormFFN.expand_layer(
+            self.layer_list)
+        self.original_model_operations.append(self.layerNormFFN)
 
         self.ug = GEMM_N_Parallel("UG", self.device).setWeightName(
             [
                 "model.layers.{layer}.mlp.up_proj.weight",
                 "model.layers.{layer}.mlp.gate_proj.weight",
             ]
-        )
+        ).setShape(
+            self.intermediate_dim * 2,
+            self.hidden_dim,
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
+        ).setParameter(1.0, 0.0)
         self.ug_layers = self.ug.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.ug)
 
-        self.activation = Activation("Activation", self.device)
+        self.activation = Activation("Activation", self.device).setShape(
+            self.intermediate_dim, tp_rank=self.tp_rank, tp_size=self.tp_size
+        )
         self.activation_layers = self.activation.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.activation)
 
         self.d = GEMM_K_Parallel("D", self.device, bias=True).setWeightName(
             "model.layers.{layer}.mlp.down_proj.weight"
-        )
+        ).setShape(
+            self.hidden_dim,
+            self.intermediate_dim,
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
+        ).setParameter(1.0, 1.0 / self.tp_size)
         self.d_layers = self.d.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.d)
 
-        self.allReduce_d = AllReduce("AllReduceD", self.device)
-        self.allReduce_d_layers = self.allReduce_d.expand_layer(self.layer_list)
+        self.allReduce_d = AllReduce("AllReduceD", self.device).setShape(
+            self.hidden_dim, rank=self.tp_rank, world_size=self.tp_size
+        )
+        self.allReduce_d_layers = self.allReduce_d.expand_layer(
+            self.layer_list)
+        self.original_model_operations.append(self.allReduce_d)
 
         self.getLogits = (
             GEMM_N_Parallel("GetLogits", self.device)
             .setWeightName("lm_head.weight")
+            .setShape(self.vocab_size, self.hidden_dim)
+            .setParameter(1.0, 0.0)
             .last_only()
         )
         self.getLogits_layers = self.getLogits.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.getLogits)
 
         self.modelLayerNorm = (
             LayerNorm("ModelLayerNorm", self.device, eps=self.rms_norm_eps)
             .setWeightName("model.norm.weight")
+            .setShape(self.hidden_dim)
             .last_only()
         )
-        self.modelLayerNorm_layers = self.modelLayerNorm.expand_layer(self.layer_list)
+        self.modelLayerNorm_layers = self.modelLayerNorm.expand_layer(
+            self.layer_list)
+        self.original_model_operations.append(self.modelLayerNorm)
 
-        self.sample = Sampling("Sampling", self.device).last_only()
+        self.sample = Sampling("Sampling", self.device).setShape(
+            self.vocab_size).last_only()
         self.sample_layers = self.sample.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.sample)
 
-        self.global_output = GlobalOutput("GlobalOutput", self.device).last_only()
-        self.global_output_layers = self.global_output.expand_layer(self.layer_list)
+        self.global_output = GlobalOutput(
+            "GlobalOutput", self.device).setShape().last_only()
+        self.global_output_layers = self.global_output.expand_layer(
+            self.layer_list)
+        self.original_model_operations.append(self.global_output)
 
         self.copy_embedding = Copy(
             "CopyEmbedding", self.device, num_inputs=2, num_outputs=2
         )
+        self.original_virtual_operations.append(self.copy_embedding)
 
         self.copy_o = Copy("CopyO", self.device, num_inputs=1, num_outputs=2)
+        self.original_virtual_operations.append(self.copy_o)
 
         self.copy_d = Copy("CopyD", self.device, num_inputs=1, num_outputs=2)
+        self.original_virtual_operations.append(self.copy_d)
 
         self.redist_p = Redist(
             "RedistPartition", self.device, num_inputs=1, num_outputs=2
         )
+        self.original_virtual_operations.append(self.redist_p)
 
         self.redist_a = Redist(
             "RedistAggregation", self.device, num_inputs=2, num_outputs=1
         )
-
-        # Save operations in an instance variable
-        self.original_model_operations: list[Operations] = [
-            self.global_input,
-            self.gen_embedding,
-            self.layerNormAttn,
-            self.kqv,
-            self.ropeAppend,
-            self.decAttn,
-            self.pfAttn,
-            self.o,
-            self.allReduce_o,
-            self.layerNormFFN,
-            self.ug,
-            self.activation,
-            self.d,
-            self.allReduce_d,
-            self.modelLayerNorm,
-            self.getLogits,
-            self.sample,
-            self.global_output,
-        ]
-        self.original_virtual_operations: list[Operations] = [
-            self.copy_embedding,
-            self.copy_o,
-            self.copy_d,
-            self.redist_p,
-            self.redist_a,
-        ]
+        self.original_virtual_operations.append(self.redist_a)
 
         self.model_operations = self.original_model_operations
         self.virtual_operations = self.original_virtual_operations
         self.all_operations = (
             self.model_operations + self.virtual_operations
-        )  # NOTE(Ziren): for further nanosplit or auto search, which should keep the original operations since we need to change the strategy of optimization in the runtime.
+            # NOTE(Ziren): for further nanosplit or auto search, which should keep the original operations since we need to change the strategy of optimization in the runtime.
+        )
 
         self.all_layer_operations: list[Operation_Layer] = []
         for operation in self.model_operations:
@@ -372,7 +418,8 @@ class Pipeline:
         self.allReduce_d.outputs["output"] >> self.copy_d.inputs["input_0"]
 
         self.copy_d.outputs["output_0"] >> self.modelLayerNorm.inputs["input"]
-        self.copy_d.outputs["output_1"] >> (self.copy_embedding.inputs["input_1"], 1)
+        self.copy_d.outputs["output_1"] >> (
+            self.copy_embedding.inputs["input_1"], 1)
 
         self.modelLayerNorm.outputs["output"] >> self.getLogits.inputs["A"]
 
@@ -387,55 +434,6 @@ class Pipeline:
         print("Initializing executor...")
         self.executor = Executor(self.all_layer_operations, self.layer_list)
         self.executor.plan_layer_ordering()
-
-    def init_set_shape(self):
-        self.global_input.setShape()
-        self.gen_embedding.setShape(self.hidden_dim, self.vocab_size)
-        self.layerNormAttn.setShape(self.hidden_dim)
-        self.kqv.setShape(
-            self.kqv_heads * self.head_dim,
-            self.hidden_dim,
-            tp_rank=self.tp_rank,
-            tp_size=self.tp_size,
-        ).setParameter(1.0, 0.0)
-        self.ropeAppend.setShape(
-            self.num_kv_heads, self.num_qo_heads, self.head_dim, tp_size=self.tp_size
-        )
-        self.decAttn.setShape(
-            self.num_kv_heads, self.num_qo_heads, self.head_dim, tp_size=self.tp_size
-        )
-        self.pfAttn.setShape(
-            self.num_kv_heads, self.num_qo_heads, self.head_dim, tp_size=self.tp_size
-        )
-        self.o.setShape(
-            self.hidden_dim, self.hidden_dim, tp_rank=self.tp_rank, tp_size=self.tp_size
-        ).setParameter(1.0, 1.0 / self.tp_size)
-        self.allReduce_o.setShape(
-            self.hidden_dim, rank=self.tp_rank, world_size=self.tp_size
-        )
-        self.layerNormFFN.setShape(self.hidden_dim)
-        self.ug.setShape(
-            self.intermediate_dim * 2,
-            self.hidden_dim,
-            tp_rank=self.tp_rank,
-            tp_size=self.tp_size,
-        ).setParameter(1.0, 0.0)
-        self.d.setShape(
-            self.hidden_dim,
-            self.intermediate_dim,
-            tp_rank=self.tp_rank,
-            tp_size=self.tp_size,
-        ).setParameter(1.0, 1.0 / self.tp_size)
-        self.allReduce_d.setShape(
-            self.hidden_dim, rank=self.tp_rank, world_size=self.tp_size
-        )
-        self.activation.setShape(
-            self.intermediate_dim, tp_rank=self.tp_rank, tp_size=self.tp_size
-        )
-        self.modelLayerNorm.setShape(self.hidden_dim)
-        self.getLogits.setShape(self.vocab_size, self.hidden_dim).setParameter(1.0, 0.0)
-        self.sample.setShape(self.vocab_size)
-        self.global_output.setShape()
 
     def init_category(self):
         # set category for loop operations
@@ -477,7 +475,8 @@ class Pipeline:
 
         if self.is_auto_search_enabled:
             for op in self.model_operations:
-                print(f"op.name: {op.name}, op.original_name: {op.original_name}")
+                print(
+                    f"op.name: {op.name}, op.original_name: {op.original_name}")
                 if op.original_name in self.profile_result["operations"]:
                     algo_tag = self.profile_result["operations"][op.original_name][
                         op.name
@@ -491,31 +490,15 @@ class Pipeline:
             self.pfAttn.config_tag("batched_cuda", params)
             self.layerNormFFN.config_tag("cuda", params)
             self.o.config_tag("torch", params)
-            self.allReduce_o.config_tag("torch", params)
+            self.allReduce_o.config_tag("nccl", params)
             self.ug.config_tag("torch", params)
             self.activation.config_tag("cuda", params)
             self.d.config_tag("torch", params)
-            self.allReduce_d.config_tag("torch", params)
+            self.allReduce_d.config_tag("nccl", params)
 
         self.getLogits.config_tag("torch", params)
         self.modelLayerNorm.config_tag("cuda", params)
         self.sample.config_tag("cuda", params)
-
-    def config_network(self, rank=0):
-        dist.init_process_group(
-            backend="nccl", rank=rank, world_size=self.num_cuda_devices
-        )
-        tp_group_idx = self.tp_rank // self.tp_size
-        print("tp_group_idx: ", tp_group_idx, "tp_size: ", self.tp_size)
-        self.tp_group = dist.new_group(
-            ranks=[
-                i
-                for i in range(
-                    tp_group_idx * self.tp_size, (tp_group_idx + 1) * self.tp_size
-                )
-            ]
-        )
-        # print("tp_group in main: ", self.tp_group)
 
     def config_streams(self):
         print("Configuring streams...")
@@ -524,7 +507,8 @@ class Pipeline:
 
         if self.is_auto_search_enabled:
             for op in self.model_operations:
-                print(f"op.name: {op.name}, op.original_name: {op.original_name}")
+                print(
+                    f"op.name: {op.name}, op.original_name: {op.original_name}")
                 if op.original_name in self.profile_result["operations"]:
                     sm_count = self.profile_result["operations"][op.original_name][
                         op.name
@@ -534,6 +518,23 @@ class Pipeline:
     def config_profile_streams(self, stream_tuple):
         for operation in self.model_operations:
             operation.set_stream(stream_tuple)
+
+    def config_network(self, rank):
+        dist.init_process_group(
+            backend="nccl", rank=rank, world_size=self.num_cuda_devices
+        )
+        tp_group_idx = self.tp_rank // self.tp_size
+        print("tp_group_idx: ", tp_group_idx, "tp_size: ", self.tp_size)
+        self.tp_group = dist.new_group(
+            ranks=[
+                i
+                for i in range(
+                    tp_group_idx *
+                    self.tp_size, (tp_group_idx + 1) * self.tp_size
+                )
+            ]
+        )
+        # print("tp_group in main: ", self.tp_group)
 
     def update_network_ops(self):
         print("Updating network operations with NCCL IDs...")
@@ -619,7 +620,8 @@ class Pipeline:
                 self.input_ids.append(item[1])
         with prof_marker("update_step_1"):
             # concatenate input_ids into a single tensor
-            flattened = [item for sublist in self.input_ids for item in sublist]
+            flattened = [
+                item for sublist in self.input_ids for item in sublist]
             global_batch_size = len(flattened)
         with prof_marker("update_step_3"):
             input_tensor = torch.tensor(
@@ -670,7 +672,8 @@ class Pipeline:
                 self.update_allocate_buffers()
                 # print("finish update_allocate_buffers")
                 if is_profile:
-                    self.config_profile_streams(self.profile_streams[stream_name])
+                    self.config_profile_streams(
+                        self.profile_streams[stream_name])
                 else:
                     self.config_streams()
                 self.config_algorithm()
@@ -710,7 +713,8 @@ class Pipeline:
 
     def run(self, file_name="out-tp-test", filefolder_name="llama3-kv-out-tp-test"):
 
-        temp_out = torch.zeros(self.global_batch_size, dtype=torch.int32, device="cuda")
+        temp_out = torch.zeros(self.global_batch_size,
+                               dtype=torch.int32, device="cuda")
 
         # os.makedirs(f"./{filefolder_name}", exist_ok=True)
 
@@ -729,7 +733,8 @@ class Pipeline:
         with prof_marker("after_execute_before_return"):
             temp_out = temp_out.cpu()
         with prof_marker("after_execute_step_1"):
-            new_tokens = [[temp_out[idx - 1].item()] for idx in self.cumsum_input[1:]]
+            new_tokens = [[temp_out[idx - 1].item()]
+                          for idx in self.cumsum_input[1:]]
         with prof_marker("after_execute_step_2"):
             output = []
         with prof_marker("after_execute_step_3"):
@@ -756,7 +761,7 @@ class Pipeline:
         )
         for operation in self.model_operations:
             operation.setup_profile(
-                self.profile_dir, append_mode, is_save_db=is_save_db
+                self.profile_dir, append_mode=append_mode, is_save_db=is_save_db
             )
 
     def profile_run(self):
