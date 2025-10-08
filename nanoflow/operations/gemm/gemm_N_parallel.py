@@ -47,12 +47,12 @@ class GEMM_N_Parallel(Operations):
         #     from operations.gemm.gemm_impls import GEMMCudaImpl
         #     self.add_impl(GEMMCudaImpl)
 
-    def setShape(self, N, K, tp_idx=0, tp_size=1):
+    def setShape(self, N, K, tp_rank=0, tp_size=1):
         self.N = N
         self.K = K
-        self.tp_idx = tp_idx
+        self.tp_rank = tp_rank
         self.tp_size = tp_size
-        # print("tp_idx", self.tp_idx, "tp_size", self.tp_size)
+        # print("tp_rank", self.tp_rank, "tp_size", self.tp_size)
         self.tp_N = N // tp_size
         self.tp_K = K
         # print("name", self.name, "N:", self.tp_N, "K:", self.tp_K)
@@ -70,7 +70,7 @@ class GEMM_N_Parallel(Operations):
         new_op.set_category(self.category)
         new_op.weights = self.weights
         new_op.expand_layer(self.layer_list)
-        new_op.setShape(self.N, self.K, self.tp_idx, self.tp_size).setParameter(
+        new_op.setShape(self.N, self.K, self.tp_rank, self.tp_size).setParameter(
             self.alpha, self.beta
         )
 
@@ -149,7 +149,7 @@ class GEMM_N_Parallel(Operations):
         with prof_marker("GEMM_run"):
             with prof_marker(f"GEMM_run_prepare"):
                 stride = self.N // self.tp_size
-                offset = self.tp_idx * stride
+                offset = self.tp_rank * stride
 
                 if self.bias:
                     C = self.inputs["C"].tensor[:, offset : offset + stride]
@@ -174,7 +174,7 @@ class GEMM_N_Parallel(Operations):
             cached_weight_map,
             cached,
             device,
-            tp_idx=self.tp_idx,
+            tp_rank=self.tp_rank,
             tp_size=self.tp_size,
             tp_split_row=True,
         )

@@ -269,15 +269,18 @@ print("Parse all args: ", args)
 # print("new_input_ids: ", new_input_ids)
 
 if args.model == "8B":
-    from nanoflow.models.llama3_FlashinferKVCache import Pipeline
-
+    from nanoflow.models.llama3_8B.llama3_FlashinferKVCache import Pipeline
+    from nanoflow.models.llama3_8B.config_llama3_8B import Llama3_8B_Config as Config
+    cfg = Config()
     # from nanoflow.models.llama3_KVCacheTorch import Pipeline
 
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
     weight_map = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
     auto_search_path = "../auto_search/8B_search_result_large_btz.json"
 elif args.model == "Qwen1.5-MoE-A2.7B":
-    from nanoflow.models.qwen2_moe import Pipeline
+    from nanoflow.models.qwen2_moe.qwen2_moe import Pipeline
+    from nanoflow.models.qwen2_moe.config_qwen2_moe import Qwen2MoEConfig as Config
+    cfg = Config()
 
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen1.5-MoE-A2.7B")
     weight_map = "/code/hf/hub/models--Qwen--Qwen1.5-MoE-A2.7B/snapshots/1a758c50ecb6350748b9ce0a99d2352fd9fc11c9"
@@ -288,16 +291,14 @@ else:
     # weight_map_amd_kan = "/work1/kasikci/kanzhu/models/llama3-8b"
     # weight_map_yi = "/app/llama3-8b"
 
-if not hasattr(Pipeline, "has_cached_weight"):
-    raise ValueError("Pipeline class must have has_cached_weight staticmethod")
-HAS_CACHED_WEIGHT = Pipeline.has_cached_weight()
+HAS_CACHED_WEIGHT = cfg.has_cached_weight()
 print("HAS_CACHED_WEIGHT: ", HAS_CACHED_WEIGHT)
 
 if not HAS_CACHED_WEIGHT:
-    pipeline_weight_list = [(i, f"cuda:{i}", Pipeline()) for i in range(1)]
+    pipeline_weight_list = [(i, f"cuda:{i}", Pipeline(cfg=cfg)) for i in range(1)]
     prepare_weight(pipeline_weight_list, weight_map)
 
-pipeline = Pipeline()
+pipeline = Pipeline(cfg=cfg)
 pipeline.init(weight_map, cached=True)
 
 print("Finish initializing the pipeline.")

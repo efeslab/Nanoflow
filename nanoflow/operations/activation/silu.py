@@ -62,9 +62,9 @@ class Activation(Operations):
         if config.PLATFORM_CUDA:
             self.add_impl(SiluMultiplyCudaImpl)
         
-    def setShape(self, N, tp_idx=0, tp_size=1):
+    def setShape(self, N, tp_rank=0, tp_size=1):
         self.N = N
-        self.tp_idx = tp_idx
+        self.tp_rank = tp_rank
         self.tp_size = tp_size
         self.tp_N = N // tp_size
         if self.act_fn == "silu_mul":
@@ -79,7 +79,7 @@ class Activation(Operations):
         new_op = Activation(self.name, self.device, nano_idx=index)
         new_op.set_category(self.category)
         new_op.expand_layer(self.layer_list)
-        new_op.setShape(self.N, self.tp_idx, self.tp_size)
+        new_op.setShape(self.N, self.tp_rank, self.tp_size)
 
         self.nano_ops.append(new_op)
 

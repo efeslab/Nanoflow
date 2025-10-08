@@ -48,19 +48,29 @@ class FusedMoETorchImpl(OperationImpl):
         num_experts,
         top_k,
         norm_topk_prob,
+        ep_size,
+        ep_rank,
     ):
         with torch.cuda.stream(self.stream):
-            routing_weights, selected_experts = compute_routing(router_logits, top_k, norm_topk_prob)
+            routing_weights, selected_experts = compute_routing(
+                router_logits, top_k, norm_topk_prob
+            )
             results = torch.zeros_like(x)
-            for expert_id in range(num_experts):
+
+            experts_per_rank = num_experts // ep_size
+            expert_start = ep_rank * experts_per_rank
+            expert_end = expert_start + experts_per_rank
+            experts_range = range(expert_start, expert_end)
+
+            for idx, expert_id in enumerate(experts_range):
                 mask = selected_experts == expert_id
                 if not mask.sum():
                     continue
                 batch_idx, nth_expert = torch.where(mask)
                 w31_expert = w31_weight[
-                    expert_id
+                    idx
                 ]  # [2 * intermediate_size, hidden_size]
-                w2_expert = w2_weight[expert_id]  # [hidden_size, intermediate_size]
+                w2_expert = w2_weight[idx]  # [hidden_size, intermediate_size]
 
                 # Split w13 into w1 and w3
                 w3_expert, w1_expert = torch.chunk(w31_expert, 2, dim=0)
@@ -79,9 +89,13 @@ class FusedMoETorchImpl(OperationImpl):
 class FusedMoEImpl(OperationImpl):
     category_tag = "cutlass"
 
-    def run(self, x, router_logits, W31, W2, output, num_experts, top_k, norm_topk_prob):
+    def run(
+        self, x, router_logits, W31, W2, output, num_experts, top_k, norm_topk_prob, ep_size, ep_rank
+    ):
         with torch.cuda.stream(self.stream):
-            routing_weights, selected_experts = compute_routing(router_logits, top_k, norm_topk_prob)
+            routing_weights, selected_experts = compute_routing(
+                router_logits, top_k, norm_topk_prob
+            )
             flash_output = cutlass_fused_moe(
                 x,
                 selected_experts.to(torch.int),
@@ -89,6 +103,8 @@ class FusedMoEImpl(OperationImpl):
                 W31,
                 W2,
                 output.dtype,
+                ep_size=ep_size,
+                ep_rank=ep_rank,
                 output=output,
                 quant_scales=None,
             )
@@ -118,13 +134,29 @@ class FusedMoE(Operations):
         self.add_impl(FusedMoEImpl)
 
     def setShape(
-        self, num_experts, moe_intermediate_dim, hidden_dim, top_k, norm_topk_prob
+        self,
+        num_experts,
+        moe_intermediate_dim,
+        hidden_dim,
+        top_k,
+        norm_topk_prob,
+        ep_size=1,
+        ep_rank=0,
     ):
         self.num_experts = num_experts
         self.moe_intermediate_dim = moe_intermediate_dim
         self.hidden_dim = hidden_dim
         self.top_k = top_k
         self.norm_topk_prob = norm_topk_prob
+        self.ep_size = ep_size
+        self.ep_rank = ep_rank
+
+        # for expert parallel
+        self.experts_per_rank = self.num_experts // self.ep_size
+        self.exper_start = self.ep_rank * self.experts_per_rank
+        self.exper_end = self.exper_start + self.experts_per_rank
+        self.experts_range = range(self.exper_start, self.exper_end)
+
         self.inputs["x"].init_shape((0, hidden_dim))
         self.inputs["router_logits"].init_shape((0, num_experts))
         self.outputs["output"].init_shape((0, hidden_dim))
@@ -137,12 +169,14 @@ class FusedMoE(Operations):
         self.impl.run(
             self.inputs["x"].tensor,
             self.inputs["router_logits"].tensor,
-            self.weights["W31"].weight_map[layer],
-            self.weights["W2"].weight_map[layer],
+            self.weights["W31"].weight_map[layer][self.experts_range, :],
+            self.weights["W2"].weight_map[layer][self.experts_range, :],
             self.outputs["output"].tensor,
             self.num_experts,
             top_k=self.top_k,
             norm_topk_prob=self.norm_topk_prob,
+            ep_size=self.ep_size,
+            ep_rank=self.ep_rank,
         )
 
     def processWeight(self, global_weight_map, cached_weight_map, cached, device):

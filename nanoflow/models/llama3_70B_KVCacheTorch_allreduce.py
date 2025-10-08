@@ -50,8 +50,6 @@ class Pipeline():
         self.dp_size = DP_size
 
         assert self.pp_size * self.dp_size * self.tp_size == self.num_cuda_devices, f"num_cuda_devices {self.num_cuda_devices} should be equal to pp_size * dp_size * tp_size {self.pp_size * self.dp_size * self.tp_size}"
-        # create torch.distributed group
-        assert self.num_cuda_devices % self.tp_size == 0, f"num_cuda_devices {self.num_cuda_devices} should be divisible by tp_size {self.tp_size}"
 
     def set_device(self, device):
         self.device = device

@@ -36,34 +36,37 @@ from nanoflow.utils.green_ctx import split_device_green_ctx_by_sm_count
 
 from nanoflow.pybind.build.bind_all_reduce import NCCLWrapper
 
+from .config_llama3_8B import Llama3_8B_Config
 
 class Pipeline:
-    pipeline_name_prefix = "Llama3-8B-with-2-allreduce"
-
     def __init__(
         self,
-        TP_idx: int,
-        TP_size: int,
-        PP_idx=0,
-        PP_size=1,
-        DP_idx=0,
-        DP_size=1,
-        unique_nccl_ids=[],
+        cfg: Llama3_8B_Config,
     ):
         # Set parameters as instance variables.
-        self.pipeline_name = (
-            f"{self.pipeline_name_prefix}-TP{TP_size}-PP{PP_size}-DP{DP_size}"
-        )
-        self.num_kv_heads = 8
-        self.num_qo_heads = 32
-        self.head_dim = 128
-        self.vocab_size = 128256
-        self.hidden_dim = 4096
-        self.intermediate_dim = 14 * 1024
-        self.num_layers = 32
-        self.rms_norm_eps = 1e-05
-        self.rope_theta = 500000.0
-        self.page_size = 16
+        self.pipeline_name = cfg.pipeline_name
+        self.cached_weight_dir = cfg.cached_weight_dir
+        self.profile_dir = cfg.profile_dir
+            
+        self.num_kv_heads = cfg.num_kv_heads
+        self.num_qo_heads = cfg.num_qo_heads
+        self.head_dim = cfg.head_dim
+        self.vocab_size = cfg.vocab_size
+        self.hidden_dim = cfg.hidden_dim
+        self.intermediate_dim = cfg.intermediate_dim
+        self.num_layers = cfg.num_layers
+        self.rms_norm_eps = cfg.rms_norm_eps
+        self.rope_theta = cfg.rope_theta
+        self.page_size = cfg.page_size
+        self.tp_rank = cfg.tp_rank
+        self.tp_size = cfg.tp_size
+        self.pp_rank = cfg.pp_rank
+        self.pp_size = cfg.pp_size
+        self.dp_rank = cfg.dp_rank
+        self.dp_size = cfg.dp_size
+        self.kv_cache_type = cfg.kv_cache_type
+        self.unique_nccl_ids = cfg.unique_nccl_ids
+
 
         self.kqv_heads = self.num_qo_heads + 2 * self.num_kv_heads
         self.global_batch_size: Optional[int] = None
@@ -71,17 +74,6 @@ class Pipeline:
         self.layer_list = [i for i in range(self.num_layers)]
         self.num_cuda_devices = torch.cuda.device_count()
 
-        self.tp_idx = TP_idx
-        self.tp_size = TP_size
-        self.pp_idx = PP_idx
-        self.pp_size = PP_size
-        self.dp_idx = DP_idx
-        self.dp_size = DP_size
-        self.unique_nccl_ids = unique_nccl_ids
-
-        self.cached_weight_path = f"../cached_weights/{self.pipeline_name}"
-        # profile related variables
-        self.profile_dir = f"../profile_data/{self.pipeline_name}"
         self.profile_result: dict[str, Any] | None = None
         self.categories = [CategoryType.COMP, CategoryType.MEM, CategoryType.NET]
 
@@ -93,25 +85,6 @@ class Pipeline:
         assert (
             self.pp_size * self.dp_size * self.tp_size == self.num_cuda_devices
         ), f"num_cuda_devices {self.num_cuda_devices} should be equal to pp_size * dp_size * tp_size {self.pp_size * self.dp_size * self.tp_size}"
-        # create torch.distributed group
-        assert (
-            self.num_cuda_devices % self.tp_size == 0
-        ), f"num_cuda_devices {self.num_cuda_devices} should be divisible by tp_size {self.tp_size}"
-
-    @staticmethod
-    def has_cached_weight(tp_size, pp_size, dp_size) -> bool:
-        pipeline_name = (
-            f"{Pipeline.pipeline_name_prefix}-TP{tp_size}-PP{pp_size}-DP{dp_size}"
-        )
-        cached_weight_path = f"../cached_weights/{pipeline_name}"
-        return Path(cached_weight_path).exists()
-
-    @staticmethod
-    def profile_data_path(tp_size, pp_size, dp_size) -> str:
-        pipeline_name = (
-            f"{Pipeline.pipeline_name_prefix}-TP{tp_size}-PP{pp_size}-DP{dp_size}"
-        )
-        return f"../profile_data/{pipeline_name}"
 
     def set_device(self, rank, device):
         self.rank = rank
@@ -131,7 +104,7 @@ class Pipeline:
     def init_set_weight(self, weight_path, cached):
         weight_manager = WeightManager(
             self.pipeline_name,
-            self.cached_weight_path,
+            self.cached_weight_dir,
             weight_path,
             cached,
             self.device,
@@ -422,7 +395,7 @@ class Pipeline:
         self.kqv.setShape(
             self.kqv_heads * self.head_dim,
             self.hidden_dim,
-            tp_idx=self.tp_idx,
+            tp_rank=self.tp_rank,
             tp_size=self.tp_size,
         ).setParameter(1.0, 0.0)
         self.ropeAppend.setShape(
@@ -435,29 +408,29 @@ class Pipeline:
             self.num_kv_heads, self.num_qo_heads, self.head_dim, tp_size=self.tp_size
         )
         self.o.setShape(
-            self.hidden_dim, self.hidden_dim, tp_idx=self.tp_idx, tp_size=self.tp_size
+            self.hidden_dim, self.hidden_dim, tp_rank=self.tp_rank, tp_size=self.tp_size
         ).setParameter(1.0, 1.0 / self.tp_size)
         self.allReduce_o.setShape(
-            self.hidden_dim, tp_idx=self.tp_idx, tp_size=self.tp_size
+            self.hidden_dim, rank=self.tp_rank, world_size=self.tp_size
         )
         self.layerNormFFN.setShape(self.hidden_dim)
         self.ug.setShape(
             self.intermediate_dim * 2,
             self.hidden_dim,
-            tp_idx=self.tp_idx,
+            tp_rank=self.tp_rank,
             tp_size=self.tp_size,
         ).setParameter(1.0, 0.0)
         self.d.setShape(
             self.hidden_dim,
             self.intermediate_dim,
-            tp_idx=self.tp_idx,
+            tp_rank=self.tp_rank,
             tp_size=self.tp_size,
         ).setParameter(1.0, 1.0 / self.tp_size)
         self.allReduce_d.setShape(
-            self.hidden_dim, tp_idx=self.tp_idx, tp_size=self.tp_size
+            self.hidden_dim, rank=self.tp_rank, world_size=self.tp_size
         )
         self.activation.setShape(
-            self.intermediate_dim, tp_idx=self.tp_idx, tp_size=self.tp_size
+            self.intermediate_dim, tp_rank=self.tp_rank, tp_size=self.tp_size
         )
         self.modelLayerNorm.setShape(self.hidden_dim)
         self.getLogits.setShape(self.vocab_size, self.hidden_dim).setParameter(1.0, 0.0)
@@ -532,7 +505,7 @@ class Pipeline:
         dist.init_process_group(
             backend="nccl", rank=rank, world_size=self.num_cuda_devices
         )
-        tp_group_idx = self.tp_idx // self.tp_size
+        tp_group_idx = self.tp_rank // self.tp_size
         print("tp_group_idx: ", tp_group_idx, "tp_size: ", self.tp_size)
         self.tp_group = dist.new_group(
             ranks=[
@@ -558,7 +531,7 @@ class Pipeline:
                     ]["p_value"]
                     op.set_stream(self.streams[op.category][sm_count])
 
-    def profile_config_streams(self, stream_tuple):
+    def config_profile_streams(self, stream_tuple):
         for operation in self.model_operations:
             operation.set_stream(stream_tuple)
 
@@ -697,7 +670,7 @@ class Pipeline:
                 self.update_allocate_buffers()
                 # print("finish update_allocate_buffers")
                 if is_profile:
-                    self.profile_config_streams(self.profile_streams[stream_name])
+                    self.config_profile_streams(self.profile_streams[stream_name])
                 else:
                     self.config_streams()
                 self.config_algorithm()

@@ -23,13 +23,13 @@ def process_weight_no_transpose(
     cached_weight_map,
     cached,
     device,
-    tp_idx=0,
+    tp_rank=0,
     tp_size=1,
     tp_split_row=True,
 ):
     owner_name = weight_wrapper.owner.name
     if not cached:
-        offset = tp_idx % tp_size
+        offset = tp_rank % tp_size
         if tp_split_row:
             stride = global_weight_map[weight_name.format(layer=0)].shape[0] // tp_size
             scope = (slice(offset * stride, (offset + 1) * stride), slice(None))
@@ -87,7 +87,7 @@ def process_weight_list(
     cached_weight_map,
     cached,
     device,
-    tp_idx=0,
+    tp_rank=0,
     tp_size=1,
     tp_split_row=True,
 ):
@@ -95,7 +95,7 @@ def process_weight_list(
     if not isinstance(weight_name, list):
         weight_name = [weight_name]
     if not cached:
-        offset = tp_idx % tp_size
+        offset = tp_rank % tp_size
         for l in layer_list:
             weights_list = []
             for name in weight_name:
@@ -129,14 +129,14 @@ def process_bias_list(
     cached_weight_map,
     cached,
     device,
-    tp_idx=0,
+    tp_rank=0,
     tp_size=1
 ):
     owner_name = weight_wrapper.owner.name
     if not isinstance(weight_name, list):
         weight_name = [weight_name]
     if not cached:
-        offset = tp_idx % tp_size
+        offset = tp_rank % tp_size
         for l in layer_list:
             weights_list = []
             for name in weight_name:

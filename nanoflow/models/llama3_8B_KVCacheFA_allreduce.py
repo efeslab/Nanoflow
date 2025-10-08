@@ -439,7 +439,7 @@ class Pipeline:
         self.getLogits.set_stream(self.streams["GEMM"])
         self.global_output.set_stream(self.streams["GEMM"])
 
-    def profile_config_streams(self, stream_tuple):
+    def config_profile_streams(self, stream_tuple):
         for operation in self.operation_list:
             operation.set_stream(stream_tuple)
 

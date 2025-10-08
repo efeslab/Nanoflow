@@ -2,10 +2,12 @@ import time
 import torch
 import torch.multiprocessing as mp
 
+
 def worker(T0, rank, affinity_module_path, *rest):
     # --- Set CPU affinity (import here so parent stays light) ---
     try:
-        _aff_mod = __import__(affinity_module_path, fromlist=["set_affinity_for_rank", "tune_threads_like", "AFFINITY"])
+        _aff_mod = __import__(affinity_module_path, fromlist=[
+                              "set_affinity_for_rank", "tune_threads_like", "AFFINITY"])
         _set_affinity_for_rank = getattr(_aff_mod, "set_affinity_for_rank")
         _tune_threads_like = getattr(_aff_mod, "tune_threads_like")
         _AFFINITY = getattr(_aff_mod, "AFFINITY")
@@ -16,11 +18,13 @@ def worker(T0, rank, affinity_module_path, *rest):
         print(f"[rank {rank}] CPU affinity set to cores: {_cores}", flush=True)
     except Exception as _e:
         # Affinity is best-effort; don't crash the worker if unavailable
-        print(f"[rank {rank}] CPU affinity setup skipped or failed: {_e}", flush=True)
+        print(
+            f"[rank {rank}] CPU affinity setup skipped or failed: {_e}", flush=True)
 
     from nanoflow.core.worker import worker as real_worker
 
     return real_worker(T0, rank, *rest)
+
 
 def test_correctness():
     # Spawn one worker per GPU (or per unit of parallelism).
@@ -118,7 +122,8 @@ def test_performance():
     prefill_batch_size = global_batch_size - decode_batch_size
 
     prefill_context_ids = tokenizer.encode(prefill_context)
-    assert seq_len <= len(prefill_context_ids), f"seq_len {seq_len} should be less than {len(prefill_context_ids)}"
+    assert seq_len <= len(
+        prefill_context_ids), f"seq_len {seq_len} should be less than {len(prefill_context_ids)}"
     prefill_input_ids = prefill_context_ids[:seq_len]
     request_queues = [mp.Queue(maxsize=1000) for _ in range(world_size)]
     result_queue = mp.Queue(maxsize=1000)
@@ -183,7 +188,8 @@ def test_performance():
         # print("new_tokens: ", new_tokens)
 
     # prepare for the testing configuration
-    assert prefill_batch_size <= len(prefill_context_ids), f"prefill_batch_size {prefill_batch_size} should be less than {len(prefill_context_ids)}"
+    assert prefill_batch_size <= len(
+        prefill_context_ids), f"prefill_batch_size {prefill_batch_size} should be less than {len(prefill_context_ids)}"
     output_strings[decode_batch_size] = prefill_context_ids[:prefill_batch_size].copy()
     decode_inputs.extend(
         [(decode_batch_size, prefill_context_ids[:prefill_batch_size].copy())]
@@ -242,7 +248,8 @@ def test_performance():
 
 def profile():
     # Spawn one worker per GPU (or per unit of parallelism).
-    prefill_context_ids = tokenizer.encode(prefill_context)  # which length is 1912.
+    # which length is 1912.
+    prefill_context_ids = tokenizer.encode(prefill_context)
     processes = []
     request_queues = [mp.Queue(maxsize=1000) for _ in range(world_size)]
     result_queue = mp.Queue(maxsize=1000)
@@ -312,6 +319,12 @@ if __name__ == "__main__":
         help="Tensor parallel size",
     )
     arg_parser.add_argument(
+        "--expert_parallel_size",
+        type=int,
+        default=1,
+        help="Expert parallel size",
+    )
+    arg_parser.add_argument(
         "--test",
         choices=["correctness", "performance", "profile"],
         default="correctness",
@@ -325,13 +338,26 @@ if __name__ == "__main__":
     )
     args = arg_parser.parse_args()
 
+    world_size = torch.cuda.device_count()
+    print("world size: ", world_size)
+    TP_size = args.tensor_parallel_size
+    EP_size = args.expert_parallel_size
+    PP_size = 1
+    DP_size = 1
+
+    unique_nccl_ids = [NCCLWrapper.get_nccl_unique_id() for _ in range(10)]
+
     if args.model == "70B":
         weight_map = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
-        from nanoflow.models.llama3_70B_FlashinferKVCache_allreduce import (
-            Pipeline as Pipeline_70B,
-        )
+        from nanoflow.models.llama3_70B.llama3_70B_FlashinferKVCache_allreduce import Pipeline
 
-        Pipeline = Pipeline_70B
+        from nanoflow.models.llama3_70B.config_llama3_70B import Llama3_70B_Config as Config
+        cfgs = [Config(
+            tp_size=TP_size,
+            tp_rank=i,
+            unique_nccl_ids=unique_nccl_ids,
+        ) for i in range(world_size)]
+
         tokenizer = AutoTokenizer.from_pretrained(
             "meta-llama/Meta-Llama-3-70B-Instruct"
         )
@@ -339,66 +365,68 @@ if __name__ == "__main__":
 
     elif args.model == "8B":
         weight_map = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
-        from nanoflow.models.llama3_8B_FlashinferKVCache_allreduce import (
-            Pipeline as Pipeline_8B,
-        )
-
-        Pipeline = Pipeline_8B
-        tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
+        from nanoflow.models.llama3_8B.llama3_8B_FlashinferKVCache_allreduce import Pipeline
+        from nanoflow.models.llama3_8B.config_llama3_8B import Llama3_8B_Config as Config
+        cfgs = [Config(
+            multi_gpu_mode=True,
+            tp_size=TP_size,
+            tp_rank=i,
+            unique_nccl_ids=unique_nccl_ids,
+        ) for i in range(world_size)]
+        tokenizer = AutoTokenizer.from_pretrained(
+            "meta-llama/Meta-Llama-3-8B-Instruct")
         auto_search_path = "../auto_search/search_result_json/8B_allreduce_search_result.json"
 
+    # elif args.model == "Qwen1.5-MoE-A2.7B-EP":
+    #     weight_map = "/code/hf/hub/models--Qwen--Qwen1.5-MoE-A2.7B/snapshots/1a758c50ecb6350748b9ce0a99d2352fd9fc11c9"
+    #     from nanoflow.models.qwen2_moe_ep import (
+    #         Pipeline as Pipeline_Qwen2_MoE_EP,
+    #     )
+
+    #     Pipeline = Pipeline_Qwen2_MoE_EP
+    #     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen1.5-MoE-A2.7B")
+    #     HAS_CACHED_WEIGHT = Pipeline.has_cached_weight(EP_size)
+    #     print("HAS_CACHED_WEIGHT: ", HAS_CACHED_WEIGHT)
+    #     auto_search_path = None
     else:
         # from models.llama3_8B_KVCacheFA_TP2 import Pipeline
         raise ValueError("Unsupported model")
 
-    world_size = torch.cuda.device_count()
-    print("world size: ", world_size)
-    TP_size = args.tensor_parallel_size
-    PP_size = 1
-    DP_size = 1
-
-    assert (
-        world_size == TP_size * PP_size * DP_size
-    ), f"world size {world_size} is not equal to TP size {TP_size} * PP size {PP_size} * DP size {DP_size}"
-
-    unique_nccl_ids = [NCCLWrapper.get_nccl_unique_id() for _ in range(10)]
-
-    if not hasattr(Pipeline, "has_cached_weight"):
-        raise ValueError("Pipeline class must have has_cached_weight staticmethod")
-    HAS_CACHED_WEIGHT = Pipeline.has_cached_weight(TP_size, PP_size, DP_size)
-    print("HAS_CACHED_WEIGHT: ", HAS_CACHED_WEIGHT)
+    # mkdir for profiler
+    if args.test == "profile":
+        if not hasattr(Pipeline, "profile_data_path"):
+            raise ValueError(
+                "Pipeline class must have profile_data_path staticmethod")
+        profile_data_path = Pipeline.profile_data_path(
+            TP_size, PP_size, DP_size)
+        import os
+        os.makedirs(profile_data_path, exist_ok=True)
 
     # process weights
+    HAS_CACHED_WEIGHT = cfgs[0].has_cached_weight()
+    print("HAS_CACHED_WEIGHT: ", HAS_CACHED_WEIGHT)
     if not HAS_CACHED_WEIGHT:
         pipeline_weight_list = [
             (
                 i,
                 f"cuda:{i}",
                 Pipeline(
-                    TP_idx=i,
-                    TP_size=TP_size,
+                    cfg=cfgs[i]
                 ),
             )
             for i in range(world_size)
         ]
         prepare_weight(pipeline_weight_list, weight_map)
 
-    # mkdir for profiler
-    if args.test == "profile":
-        if not hasattr(Pipeline, "profile_data_path"):
-            raise ValueError("Pipeline class must have profile_data_path staticmethod")
-        profile_data_path = Pipeline.profile_data_path(TP_size, PP_size, DP_size)
-        import os
-        os.makedirs(profile_data_path, exist_ok=True)
-
     # create pipeline instances
     pipeline_list = [
-        Pipeline(TP_idx=i, TP_size=TP_size, unique_nccl_ids=unique_nccl_ids)
+        Pipeline(cfg=cfgs[i])
         for i in range(world_size)
     ]
 
     # Create a shared integer (for the task value) and a shared array to hold each worker's result.
-    command = mp.Array("c", 32)  # A character array to hold the command string.
+    # A character array to hold the command string.
+    command = mp.Array("c", 32)
     shared_decode_bts = mp.Value("i", 0)
     use_auto_search = mp.Value("i", 0)
     use_nanosplit = mp.Value("i", 0)
