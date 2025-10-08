@@ -315,7 +315,7 @@ if __name__ == "__main__":
     arg_parser.add_argument(
         "--tensor_parallel_size",
         type=int,
-        required=True,
+        default=1,
         help="Tensor parallel size",
     )
     arg_parser.add_argument(
@@ -332,7 +332,7 @@ if __name__ == "__main__":
     )
     arg_parser.add_argument(
         "--model",
-        choices=["8B", "70B"],
+        choices=["8B", "70B", "Qwen1.5-MoE-A2.7B-EP"],
         default="8B",
         help="Pick which Pipeline to instantiate",
     )
@@ -377,28 +377,26 @@ if __name__ == "__main__":
             "meta-llama/Meta-Llama-3-8B-Instruct")
         auto_search_path = "../auto_search/search_result_json/8B_allreduce_search_result.json"
 
-    # elif args.model == "Qwen1.5-MoE-A2.7B-EP":
-    #     weight_map = "/code/hf/hub/models--Qwen--Qwen1.5-MoE-A2.7B/snapshots/1a758c50ecb6350748b9ce0a99d2352fd9fc11c9"
-    #     from nanoflow.models.qwen2_moe_ep import (
-    #         Pipeline as Pipeline_Qwen2_MoE_EP,
-    #     )
+    elif args.model == "Qwen1.5-MoE-A2.7B-EP":
+        weight_map = "/code/hf/hub/models--Qwen--Qwen1.5-MoE-A2.7B/snapshots/1a758c50ecb6350748b9ce0a99d2352fd9fc11c9"
+        from nanoflow.models.qwen2_moe.qwen2_moe_ep import Pipeline
+        from nanoflow.models.qwen2_moe.config_qwen2_moe import Qwen2MoEConfig as Config
+        cfgs = [Config(
+            multi_gpu_mode=True,
+            ep_size=EP_size,
+            ep_rank=i,
+            unique_nccl_ids=unique_nccl_ids,
+        ) for i in range(world_size)]
 
-    #     Pipeline = Pipeline_Qwen2_MoE_EP
-    #     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen1.5-MoE-A2.7B")
-    #     HAS_CACHED_WEIGHT = Pipeline.has_cached_weight(EP_size)
-    #     print("HAS_CACHED_WEIGHT: ", HAS_CACHED_WEIGHT)
-    #     auto_search_path = None
+        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen1.5-MoE-A2.7B")
+        auto_search_path = None
     else:
         # from models.llama3_8B_KVCacheFA_TP2 import Pipeline
         raise ValueError("Unsupported model")
 
     # mkdir for profiler
     if args.test == "profile":
-        if not hasattr(Pipeline, "profile_data_path"):
-            raise ValueError(
-                "Pipeline class must have profile_data_path staticmethod")
-        profile_data_path = Pipeline.profile_data_path(
-            TP_size, PP_size, DP_size)
+        profile_data_path = cfgs[0].profile_data_path()
         import os
         os.makedirs(profile_data_path, exist_ok=True)
 

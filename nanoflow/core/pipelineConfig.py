@@ -1,10 +1,11 @@
-from dataclasses import dataclass, field
-from typing import Optional
+from pathlib import Path
+import os
 
-@dataclass
 class PipelineConfig:
-    pipeline_name_prefix: str
     pipeline_name: str 
+    cached_weight_dir: str
+    profile_dir: str
+
     num_kv_heads: int
     num_qo_heads: int
     head_dim: int
@@ -22,3 +23,11 @@ class PipelineConfig:
     dp_size: int
     dp_rank: int
     unique_nccl_ids: list[str]
+
+    def has_cached_weight(self) -> bool:
+        flag = Path(self.cached_weight_dir).exists()
+        os.makedirs(self.cached_weight_dir, exist_ok=True)
+        return flag
+    
+    def profile_data_path(self) -> str:
+        return f"../profile_data/{self.pipeline_name}"

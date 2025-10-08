@@ -1,9 +1,9 @@
-from pathlib import Path
 from nanoflow.core.pipelineConfig import PipelineConfig
 
 class Llama3_70B_Config(PipelineConfig):
     def __init__(
         self,
+        multi_gpu_mode = False,
         vocab_size = 128256,
         hidden_dim = 8192,
         intermediate_dim = 28 * 1024,
@@ -23,7 +23,10 @@ class Llama3_70B_Config(PipelineConfig):
         kv_cache_type = "flashinfer",
         unique_nccl_ids = [],
     ):
-        self.pipeline_name = f"Llama3-70B-{kv_cache_type}-allreduce-TP{tp_size}-PP{pp_size}-DP{dp_size}"
+        if multi_gpu_mode:
+            self.pipeline_name = f"Llama3-70B-{kv_cache_type}-allreduce-TP{tp_size}-PP{pp_size}-DP{dp_size}"
+        else:
+            self.pipeline_name = f"Llama3-70B-{kv_cache_type}"
         self.cached_weight_dir = f"../cached_weights/{self.pipeline_name}"
         self.profile_dir = f"../profile_data/{self.pipeline_name}"
 
@@ -45,9 +48,3 @@ class Llama3_70B_Config(PipelineConfig):
         self.dp_rank = dp_rank
         self.kv_cache_type = kv_cache_type
         self.unique_nccl_ids = unique_nccl_ids
-    
-    def has_cached_weight(self) -> bool:
-        return Path(self.cached_weight_dir).exists()
-    
-    def profile_data_path(self) -> str:
-        return f"../profile_data/{self.pipeline_name}"

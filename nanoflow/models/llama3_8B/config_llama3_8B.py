@@ -1,4 +1,3 @@
-from pathlib import Path
 from nanoflow.core.pipelineConfig import PipelineConfig
 
 class Llama3_8B_Config(PipelineConfig):
@@ -49,9 +48,3 @@ class Llama3_8B_Config(PipelineConfig):
         self.dp_rank = dp_rank
         self.kv_cache_type = kv_cache_type
         self.unique_nccl_ids = unique_nccl_ids
-    
-    def has_cached_weight(self) -> bool:
-        return Path(self.cached_weight_dir).exists()
-    
-    def profile_data_path(self) -> str:
-        return f"../profile_data/{self.pipeline_name}"

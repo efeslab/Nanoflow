@@ -160,8 +160,8 @@ class FusedMoE(Operations):
         self.inputs["x"].init_shape((0, hidden_dim))
         self.inputs["router_logits"].init_shape((0, num_experts))
         self.outputs["output"].init_shape((0, hidden_dim))
-        self.weights["W31"].shape = (num_experts, 2 * moe_intermediate_dim, hidden_dim)
-        self.weights["W2"].shape = (num_experts, hidden_dim, moe_intermediate_dim)
+        self.weights["W31"].shape = (self.experts_per_rank, 2 * moe_intermediate_dim, hidden_dim)
+        self.weights["W2"].shape = (self.experts_per_rank, hidden_dim, moe_intermediate_dim)
 
         return self
 
@@ -169,8 +169,8 @@ class FusedMoE(Operations):
         self.impl.run(
             self.inputs["x"].tensor,
             self.inputs["router_logits"].tensor,
-            self.weights["W31"].weight_map[layer][self.experts_range, :],
-            self.weights["W2"].weight_map[layer][self.experts_range, :],
+            self.weights["W31"].weight_map[layer],
+            self.weights["W2"].weight_map[layer],
             self.outputs["output"].tensor,
             self.num_experts,
             top_k=self.top_k,
@@ -195,7 +195,7 @@ class FusedMoE(Operations):
             ug_weights = weight_name[0]
             for l in self.layer_list:
                 weights_list = []
-                for expert_id in range(self.num_experts):
+                for expert_id in range(self.experts_per_rank):
                     ug_weights_expert = ug_weights[expert_id]
                     weights_combine_ug = []
                     for name in ug_weights_expert:
@@ -218,7 +218,7 @@ class FusedMoE(Operations):
             down_weights = weight_name[1]
             for l in self.layer_list:
                 weights_list = []
-                for expert_id in range(self.num_experts):
+                for expert_id in range(self.experts_per_rank):
                     weights_list.append(
                         global_weight_map[down_weights[expert_id].format(layer=l)]
                     )

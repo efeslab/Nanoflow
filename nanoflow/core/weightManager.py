@@ -22,7 +22,6 @@ class WeightManager():
         self.weight_map = {}
         self.processed_weight_map = {}
         self.processed_weight_metadata = {}
-        os.makedirs(self.cached_weight_dir, exist_ok=True)
 
         if cached:
             self.load_from_disk(device)

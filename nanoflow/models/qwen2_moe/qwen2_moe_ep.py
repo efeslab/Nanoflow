@@ -10,11 +10,11 @@ from nanoflow.operations import Add, ScaledMul
 
 from nanoflow.operations import (
     GlobalInput,
-    GlobalOutput, 
-    GenEmbedding, 
+    GlobalOutput,
+    GenEmbedding,
     LayerNorm,
     GEMM_N_Parallel,
-    Activation, 
+    Activation,
     ExpandAdd,
     FusedMoE,
     AllReduce,
@@ -33,37 +33,44 @@ from nanoflow.core.bufferAllocate import BufferAllocator
 from nanoflow.core.executor import Executor
 from nanoflow.core.nanobatchSplit import split_nanobatch
 
-
 from nanoflow.utils.green_ctx import split_device_green_ctx_by_sm_count
 from nanoflow.utils.prof_marker import prof_marker
 
+from .config_qwen2_moe import Qwen2MoEConfig
+
 
 class Pipeline:
-    pipeline_name_prefix = "Qwen2-MoE"
-
-    def __init__(self, ep_rank, ep_size, unique_nccl_ids):
+    def __init__(self, cfg: Qwen2MoEConfig):
         # Set parameters as instance variables.
-        self.pipeline_name = f"{self.pipeline_name_prefix}-EP{ep_size}"
-        self.num_kv_heads = 16
-        self.num_qo_heads = 16
-        self.head_dim = 128
-        self.vocab_size = 151936
-        self.hidden_dim = 2048
-        self.intermediate_dim = 5632
-        self.num_layers = 24
-        self.moe_intermediate_dim = 1408
-        self.shared_expert_intermediate_dim = 5632
-        self.num_experts_per_tok = 4
-        self.num_experts = 60
-        self.norm_topk_prob = False
-        self.num_shared_experts = 1
-        self.rms_norm_eps = 1e-6
-        self.rope_theta = 1000000.0
-        self.page_size = 16
+        self.pipeline_name = cfg.pipeline_name
+        self.cached_weight_dir = cfg.cached_weight_dir
+        self.profile_dir = cfg.profile_dir
 
-        self.ep_rank = ep_rank
-        self.ep_size = ep_size
-        self.unique_nccl_ids = unique_nccl_ids
+        self.num_kv_heads = cfg.num_kv_heads
+        self.num_qo_heads = cfg.num_qo_heads
+        self.head_dim = cfg.head_dim
+        self.vocab_size = cfg.vocab_size
+        self.hidden_dim = cfg.hidden_dim
+        self.intermediate_dim = cfg.intermediate_dim
+        self.num_layers = cfg.num_layers
+        self.moe_intermediate_dim = cfg.moe_intermediate_dim
+        self.shared_expert_intermediate_dim = cfg.shared_expert_intermediate_dim
+        self.num_experts_per_tok = cfg.num_experts_per_tok
+        self.num_experts = cfg.num_experts
+        self.norm_topk_prob = False
+        self.num_shared_experts = cfg.num_shared_experts
+        self.rms_norm_eps = cfg.rms_norm_eps
+        self.rope_theta = cfg.rope_theta
+        self.page_size = cfg.page_size
+        self.ep_rank = cfg.ep_rank
+        self.ep_size = cfg.ep_size
+        self.unique_nccl_ids = cfg.unique_nccl_ids
+
+        # for expert parallel
+        self.experts_per_rank = self.num_experts // self.ep_size
+        self.exper_start = self.ep_rank * self.experts_per_rank
+        self.exper_end = self.exper_start + self.experts_per_rank
+        self.experts_range = range(self.exper_start, self.exper_end)
 
         self.kqv_heads = self.num_qo_heads + 2 * self.num_kv_heads
         self.global_batch_size: Optional[int] = None
@@ -71,10 +78,6 @@ class Pipeline:
         self.layer_list = [i for i in range(self.num_layers)]
         self.num_cuda_devices = torch.cuda.device_count()
 
-
-
-        self.cached_weight_path = f"../cached_weights/{self.pipeline_name}"
-        self.profile_dir = f"../profile_data/{self.pipeline_name}"
         self.profile_result: dict[str, Any] | None = None
         self.categories = [CategoryType.COMP, CategoryType.MEM]
 
@@ -87,12 +90,6 @@ class Pipeline:
             self.ep_size == self.num_cuda_devices
         ), f"num_cuda_devices {self.num_cuda_devices} should be equal to ep_size {self.ep_size}"
 
-    @staticmethod
-    def has_cached_weight(ep_size) -> bool:
-        pipeline_name = f"{Pipeline.pipeline_name_prefix}-EP{ep_size}"  
-        cached_weight_path = f"../cached_weights/{pipeline_name}"
-        return Path(cached_weight_path).exists()
-
     def set_device(self, rank, device):
         self.rank = rank
         self.device = device
@@ -104,11 +101,12 @@ class Pipeline:
         self.init_category()
         self.init_dependency()
         self.init_set_weight(weight_path, cached)
+        self.update_network_ops()
 
     def init_set_weight(self, weight_path, cached):
         weight_manager = WeightManager(
             self.pipeline_name,
-            self.cached_weight_path,
+            self.cached_weight_dir,
             weight_path,
             cached,
             self.device,
@@ -124,7 +122,8 @@ class Pipeline:
         self.main_stream = torch.cuda.Stream()
         self.total_sm = 132
         self.sm_counts = [
-            i for i in range(8, 128, 8)  # Assuming SM counts are in increments of 8
+            # Assuming SM counts are in increments of 8
+            i for i in range(8, 128, 8)
         ]
         # [8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120]
         num_sm_counts = len(self.sm_counts)
@@ -132,7 +131,8 @@ class Pipeline:
             "GEMM_Test": (torch.cuda.Stream(), self.total_sm),
         }
 
-        self.streams: dict[CategoryType, dict[int, tuple[torch._C.Stream, int]]] = {}
+        self.streams: dict[CategoryType,
+                           dict[int, tuple[torch._C.Stream, int]]] = {}
         for category in self.categories:
             self.streams[category] = {}
 
@@ -148,7 +148,8 @@ class Pipeline:
                 )
                 self.streams[category][sm_count_1] = (stream_1, sm_count_1)
                 self.streams[category][sm_count_2] = (stream_2, sm_count_2)
-            self.streams[category][self.total_sm] = (torch.cuda.Stream(), self.total_sm)
+            self.streams[category][self.total_sm] = (
+                torch.cuda.Stream(), self.total_sm)
 
         # Create green context streams for testing
         self.profile_streams: dict[str, tuple[torch._C.Stream, int]] = {}
@@ -167,7 +168,8 @@ class Pipeline:
                 stream_2,
                 sm_count_2,
             )
-        self.profile_streams[f"TEST_TOTAL"] = (torch.cuda.Stream(), self.total_sm)
+        self.profile_streams[f"TEST_TOTAL"] = (
+            torch.cuda.Stream(), self.total_sm)
 
     def init_external_data(self):
         print("Initializing external data...")
@@ -207,7 +209,8 @@ class Pipeline:
         self.global_input = (
             GlobalInput("GlobalInput", self.device).setShape().first_only()
         )
-        self.global_input_layers = self.global_input.expand_layer(self.layer_list)
+        self.global_input_layers = self.global_input.expand_layer(
+            self.layer_list)
         self.original_model_operations.append(self.global_input)
 
         self.gen_embedding = (
@@ -216,7 +219,8 @@ class Pipeline:
             .setShape(self.hidden_dim, self.vocab_size)
             .first_only()
         )
-        self.gen_embedding_layers = self.gen_embedding.expand_layer(self.layer_list)
+        self.gen_embedding_layers = self.gen_embedding.expand_layer(
+            self.layer_list)
         self.original_model_operations.append(self.gen_embedding)
 
         self.layerNormAttn = (
@@ -224,7 +228,8 @@ class Pipeline:
             .setWeightName("model.layers.{layer}.input_layernorm.weight")
             .setShape(self.hidden_dim)
         )
-        self.layerNormAttn_layers = self.layerNormAttn.expand_layer(self.layer_list)
+        self.layerNormAttn_layers = self.layerNormAttn.expand_layer(
+            self.layer_list)
         self.original_model_operations.append(self.layerNormAttn)
 
         self.kqv = (
@@ -291,7 +296,8 @@ class Pipeline:
             .setWeightName("model.layers.{layer}.post_attention_layernorm.weight")
             .setShape(self.hidden_dim)
         )
-        self.layerNormFFN_layers = self.layerNormFFN.expand_layer(self.layer_list)
+        self.layerNormFFN_layers = self.layerNormFFN.expand_layer(
+            self.layer_list)
         self.original_model_operations.append(self.layerNormFFN)
 
         self.gate = (
@@ -323,12 +329,12 @@ class Pipeline:
                             "model.layers.{layer}"
                             + f".mlp.experts.{expert}.gate_proj.weight",
                         ]
-                        for expert in range(self.num_experts)
+                        for expert in self.experts_range
                     ],
                     [
                         "model.layers.{layer}"
                         + f".mlp.experts.{expert}.down_proj.weight"
-                        for expert in range(self.num_experts)
+                        for expert in self.experts_range
                     ],
                 ]
             )
@@ -336,8 +342,10 @@ class Pipeline:
         self.fused_moe_layers = self.fused_moe.expand_layer(self.layer_list)
         self.original_model_operations.append(self.fused_moe)
 
-        self.allReduce_fused_moe = AllReduce("AllReduceFusedMoE", self.device).setShape(self.hidden_dim, rank=self.ep_rank, world_size=self.ep_size)
-        self.allReduce_fused_moe_layers = self.allReduce_fused_moe.expand_layer(self.layer_list)
+        self.allReduce_fused_moe = AllReduce("AllReduceFusedMoE", self.device).setShape(
+            self.hidden_dim, rank=self.ep_rank, world_size=self.ep_size)
+        self.allReduce_fused_moe_layers = self.allReduce_fused_moe.expand_layer(
+            self.layer_list)
         self.original_model_operations.append(self.allReduce_fused_moe)
 
         self.shared_expert_gate = (
@@ -392,16 +400,21 @@ class Pipeline:
         self.shared_d_layers = self.shared_d.expand_layer(self.layer_list)
         self.original_model_operations.append(self.shared_d)
 
-        self.shared_mul = ScaledMul("SharedMul", self.device).setShape(self.hidden_dim)
+        self.shared_mul = ScaledMul(
+            "SharedMul", self.device).setShape(self.hidden_dim)
         self.shared_mul_layers = self.shared_mul.expand_layer(self.layer_list)
         self.original_model_operations.append(self.shared_mul)
 
-        self.add_experts = Add("AddExperts", self.device).setShape(self.hidden_dim)
-        self.add_experts_layers = self.add_experts.expand_layer(self.layer_list)
+        self.add_experts = Add(
+            "AddExperts", self.device).setShape(self.hidden_dim)
+        self.add_experts_layers = self.add_experts.expand_layer(
+            self.layer_list)
         self.original_model_operations.append(self.add_experts)
 
-        self.add_down_bias = Add("AddDownBias", self.device).setShape(self.hidden_dim)
-        self.add_down_bias_layers = self.add_down_bias.expand_layer(self.layer_list)
+        self.add_down_bias = Add(
+            "AddDownBias", self.device).setShape(self.hidden_dim)
+        self.add_down_bias_layers = self.add_down_bias.expand_layer(
+            self.layer_list)
         self.original_model_operations.append(self.add_down_bias)
 
         self.getLogits = (
@@ -420,11 +433,13 @@ class Pipeline:
             .setShape(self.hidden_dim)
             .last_only()
         )
-        self.modelLayerNorm_layers = self.modelLayerNorm.expand_layer(self.layer_list)
+        self.modelLayerNorm_layers = self.modelLayerNorm.expand_layer(
+            self.layer_list)
         self.original_model_operations.append(self.modelLayerNorm)
 
         self.sample = (
-            Sampling("Sampling", self.device).setShape(self.vocab_size).last_only()
+            Sampling("Sampling", self.device).setShape(
+                self.vocab_size).last_only()
         )
         self.sample_layers = self.sample.expand_layer(self.layer_list)
         self.original_model_operations.append(self.sample)
@@ -432,7 +447,8 @@ class Pipeline:
         self.global_output = (
             GlobalOutput("GlobalOutput", self.device).setShape().last_only()
         )
-        self.global_output_layers = self.global_output.expand_layer(self.layer_list)
+        self.global_output_layers = self.global_output.expand_layer(
+            self.layer_list)
         self.original_model_operations.append(self.global_output)
 
         self.copy_embedding = Copy(
@@ -465,7 +481,8 @@ class Pipeline:
         self.virtual_operations = self.original_virtual_operations
         self.all_operations = (
             self.model_operations + self.virtual_operations
-        )  # NOTE(Ziren): for further nanosplit or auto search, which should keep the original operations since we need to change the strategy of optimization in the runtime.
+            # NOTE(Ziren): for further nanosplit or auto search, which should keep the original operations since we need to change the strategy of optimization in the runtime.
+        )
 
         self.all_layer_operations: list[Operation_Layer] = []
         for operation in self.model_operations:
@@ -529,7 +546,8 @@ class Pipeline:
         self.add_experts.outputs["output"] >> self.add_down_bias.inputs["input_1"]
 
         self.add_down_bias.outputs["output"] >> self.copy_d.inputs["input_0"]
-        self.copy_d.outputs["output_0"] >> (self.copy_embedding.inputs["input_1"], True)
+        self.copy_d.outputs["output_0"] >> (
+            self.copy_embedding.inputs["input_1"], True)
         self.copy_d.outputs["output_1"] >> self.modelLayerNorm.inputs["input"]
 
         self.modelLayerNorm.outputs["output"] >> self.getLogits.inputs["A"]
@@ -581,7 +599,8 @@ class Pipeline:
 
         if self.is_auto_search_enabled:
             for op in self.model_operations:
-                print(f"op.name: {op.name}, op.original_name: {op.original_name}")
+                print(
+                    f"op.name: {op.name}, op.original_name: {op.original_name}")
                 if op.original_name in self.profile_result["operations"]:
                     algo_tag = self.profile_result["operations"][op.original_name][
                         op.name
@@ -619,7 +638,8 @@ class Pipeline:
 
         if self.is_auto_search_enabled:
             for op in self.model_operations:
-                print(f"op.name: {op.name}, op.original_name: {op.original_name}")
+                print(
+                    f"op.name: {op.name}, op.original_name: {op.original_name}")
                 if op.original_name in self.profile_result["operations"]:
                     sm_count = self.profile_result["operations"][op.original_name][
                         op.name
@@ -730,7 +750,8 @@ class Pipeline:
                 self.input_ids.append(item[1])
         with prof_marker("update_step_1"):
             # concatenate input_ids into a single tensor
-            flattened = [item for sublist in self.input_ids for item in sublist]
+            flattened = [
+                item for sublist in self.input_ids for item in sublist]
             global_batch_size = len(flattened)
         with prof_marker("update_step_3"):
             input_tensor = torch.tensor(
@@ -781,7 +802,8 @@ class Pipeline:
                 self.update_allocate_buffers()
                 # print("finish update_allocate_buffers")
                 if is_profile:
-                    self.config_profile_streams(self.profile_streams[stream_name])
+                    self.config_profile_streams(
+                        self.profile_streams[stream_name])
                 else:
                     self.config_streams()
                 self.config_algorithm()
@@ -825,7 +847,8 @@ class Pipeline:
         filefolder_name="./test_data/llama3-8B-flashinfer_folder",
     ):
 
-        temp_out = torch.zeros(self.global_batch_size, dtype=torch.int32, device="cuda")
+        temp_out = torch.zeros(self.global_batch_size,
+                               dtype=torch.int32, device="cuda")
 
         # os.makedirs(f"./{filefolder_name}", exist_ok=True)
 
@@ -840,7 +863,8 @@ class Pipeline:
         with prof_marker("after_execute_before_return"):
             temp_out = temp_out.cpu()
         with prof_marker("after_execute_step_1"):
-            new_tokens = [[temp_out[idx - 1].item()] for idx in self.cumsum_input[1:]]
+            new_tokens = [[temp_out[idx - 1].item()]
+                          for idx in self.cumsum_input[1:]]
         with prof_marker("after_execute_step_2"):
             output = []
         with prof_marker("after_execute_step_3"):
