@@ -332,7 +332,7 @@ if __name__ == "__main__":
     )
     arg_parser.add_argument(
         "--model",
-        choices=["8B", "70B", "Qwen1.5-MoE-A2.7B-EP"],
+        choices=["8B", "70B", "Qwen1.5-MoE-A2.7B-EP", "Qwen2-57B-A14B-Instruct"],
         default="8B",
         help="Pick which Pipeline to instantiate",
     )
@@ -390,6 +390,21 @@ if __name__ == "__main__":
 
         tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen1.5-MoE-A2.7B")
         auto_search_path = None
+    
+    elif args.model == "Qwen2-57B-A14B-Instruct":
+        weight_map = "/code/hf/hub/models--Qwen--Qwen2-57B-A14B-Instruct/snapshots/50896d66b39f1425d63720541a66c7df13e053c0"
+        from nanoflow.models.qwen2_moe_57B.qwen2_moe_57B_ep import Pipeline
+        from nanoflow.models.qwen2_moe_57B.config_qwen2_moe_57B import Qwen2MoEConfig as Config
+        cfgs = [Config(
+            multi_gpu_mode=True,
+            ep_size=EP_size,
+            ep_rank=i,
+            unique_nccl_ids=unique_nccl_ids,
+        ) for i in range(world_size)]
+
+        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2-57B-A14B-Instruct")
+        auto_search_path = None
+
     else:
         # from models.llama3_8B_KVCacheFA_TP2 import Pipeline
         raise ValueError("Unsupported model")

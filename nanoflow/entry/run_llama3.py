@@ -247,7 +247,7 @@ arg_parser.add_argument(
 )
 arg_parser.add_argument(
     "--model",
-    choices=["8B", "Qwen1.5-MoE-A2.7B"],
+    choices=["8B", "Qwen1.5-MoE-A2.7B", "Qwen2-57B-A14B-Instruct"],
     default="8B",
     help="Pick which Pipeline to instantiate",
 )
@@ -284,6 +284,14 @@ elif args.model == "Qwen1.5-MoE-A2.7B":
 
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen1.5-MoE-A2.7B")
     weight_map = "/code/hf/hub/models--Qwen--Qwen1.5-MoE-A2.7B/snapshots/1a758c50ecb6350748b9ce0a99d2352fd9fc11c9"
+    auto_search_path = None
+elif args.model == "Qwen2-57B-A14B-Instruct":
+    from nanoflow.models.qwen2_moe_57B.qwen2_moe_57B import Pipeline
+    from nanoflow.models.qwen2_moe_57B.config_qwen2_moe_57B import Qwen2MoEConfig as Config
+    cfg = Config()
+
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2-57B-A14B-Instruct")
+    weight_map = "/code/hf/hub/models--Qwen--Qwen2-57B-A14B-Instruct/snapshots/50896d66b39f1425d63720541a66c7df13e053c0"
     auto_search_path = None
 else:
     raise NotImplementedError(f"Model {args.model} not implemented yet.")

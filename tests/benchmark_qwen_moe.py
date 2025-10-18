@@ -18,8 +18,8 @@ from transformers import (
 
 from nanoflow.utils.input_test import prefill_context
 
-MODEL_ID = "Qwen/Qwen1.5-MoE-A2.7B"
-# MODEL_ID = "Qwen/Qwen2-57B-A14B-Instruct"
+# MODEL_ID = "Qwen/Qwen1.5-MoE-A2.7B"
+MODEL_ID = "Qwen/Qwen2-57B-A14B-Instruct"
 
 # 1) Load tokenizer
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
@@ -34,7 +34,8 @@ model = Qwen2MoeForCausalLM.from_pretrained(
 
 gen_cfg = GenerationConfig.from_pretrained(MODEL_ID)
 gen_cfg.do_sample = False
-gen_cfg.max_new_tokens = 20
+gen_cfg.max_new_tokens = 1
+print("gen_cfg:", gen_cfg)
 
 print(model)
 

@@ -10,18 +10,20 @@ namespace py = pybind11;
 
 __global__ void genEmbedding(int* tokens, half* weights, half* out_embedding, int Hdim){
     int token_id = blockIdx.x;
-    float4* weights_ptr = reinterpret_cast<float4*>(weights);
-    float4* out_embedding_ptr = reinterpret_cast<float4*>(out_embedding);
     int token = tokens[token_id];
-    int row_offset = token * (Hdim / 8);  
+    int Hdim_8 = Hdim / 8;
+    float4* weights_ptr = reinterpret_cast<float4*>(weights) + token * Hdim_8;
+    float4* out_embedding_ptr = reinterpret_cast<float4*>(out_embedding) + token_id * Hdim_8;
 
     int per_iter_reads = blockDim.x;  
-    int iters = (Hdim / 8) / blockDim.x; 
+    int iters = ((Hdim_8) + blockDim.x -1) / blockDim.x; 
     
     for (int i = 0; i < iters; i++){
-        int idx = i * per_iter_reads + threadIdx.x + row_offset;
-        float4 w = weights_ptr[idx];
-        out_embedding_ptr[token_id * (Hdim / 8) + idx - row_offset] = w;
+        int idx = i * per_iter_reads + threadIdx.x;
+        if (idx < Hdim_8) {
+            float4 w = weights_ptr[idx];
+            out_embedding_ptr[idx] = w;
+        }
     }
 }
 
