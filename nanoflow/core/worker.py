@@ -5,10 +5,7 @@ from nanoflow.utils.prof_marker import prof_marker
 
 def worker(start_time, rank, request_queue: mp.Queue, shared_decode_bts, result_queue: mp.Queue, barrier, work_pipeline, use_auto_search, profile_result_path, use_nanosplit, use_cuda_graph, command):
     torch.cuda.set_device(rank)
-    device = f"cuda:{rank}"
     pipeline = work_pipeline
-    pipeline.set_device(rank, device)
-
     pipeline.init(None, cached=True)
 
     new_tokens = None

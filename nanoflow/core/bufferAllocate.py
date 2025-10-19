@@ -224,10 +224,13 @@ class BufferAllocator():
 
 
 
-    def allocate_buffer(self, device, plot = False):
+    def allocate_buffer(self, device, plot = False) -> None:
         self.allocate_buffers_for_components(device)
+        print(
+            f"Total allocated: {self.total_allocated / 1024 / 1024:.2f} MB in {device}"
+        )
         if plot:
             self.draw_dependency_graph()
             self.draw_dependency_subgraphs()
             # self.draw_allocation_subgraphs()
-        return self.total_allocated
+            

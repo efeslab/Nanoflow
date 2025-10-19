@@ -607,6 +607,8 @@ class DistKVPool:
         # self.kv_shape_cpu = [num_layers, capacity, self.num_kv_heads, page_size, head_dim]
         # self.k_data_cpu = torch.empty(self.kv_shape_cpu, dtype=torch.float16, device="cpu")
         # self.v_data_cpu = torch.empty(self.kv_shape_cpu, dtype=torch.float16, device="cpu")
+        
+        print(f"KV Cache takes {self.k_data.numel() * 2 * 2 / 1024 / 1024 / 1024} GB")
 
     # @property
     def num_free_pages(self) -> int:

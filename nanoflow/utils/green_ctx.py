@@ -12,3 +12,4 @@ __all__ = [
 def set_sm_count_target(sm_count: int):
     handle = torch.cuda.current_blas_handle()
     nvmath.bindings.cublas.set_sm_count_target(handle, sm_count)  # type: ignore
+    # when encounter error: RuntimeError: CUDA error: CUBLAS_STATUS_NOT_INITIALIZED when calling `cublasCreate(handle)`, the reason is probably that the world_size setting is wrong or GPU out of memory.

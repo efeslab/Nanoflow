@@ -306,6 +306,7 @@ if __name__ == "__main__":
     from nanoflow.pybind.build.bind_all_reduce import NCCLWrapper
 
     AFFINITY_MODULE_PATH = None
+    MULTI_GPU_MODE = True
     # AFFINITY_MODULE_PATH = "utils.affinity_utils"
     T0 = time.perf_counter()
 
@@ -332,7 +333,6 @@ if __name__ == "__main__":
     )
     arg_parser.add_argument(
         "--model",
-        choices=["8B", "70B", "Qwen1.5-MoE-A2.7B-EP", "Qwen2-57B-A14B-Instruct"],
         default="8B",
         help="Pick which Pipeline to instantiate",
     )
@@ -353,6 +353,9 @@ if __name__ == "__main__":
 
         from nanoflow.models.llama3_70B.config_llama3_70B import Llama3_70B_Config as Config
         cfgs = [Config(
+            multi_gpu_mode=MULTI_GPU_MODE,
+            world_size=world_size,
+            world_rank=i,
             tp_size=TP_size,
             tp_rank=i,
             unique_nccl_ids=unique_nccl_ids,
@@ -368,7 +371,9 @@ if __name__ == "__main__":
         from nanoflow.models.llama3_8B.llama3_8B_FlashinferKVCache_allreduce import Pipeline
         from nanoflow.models.llama3_8B.config_llama3_8B import Llama3_8B_Config as Config
         cfgs = [Config(
-            multi_gpu_mode=True,
+            multi_gpu_mode=MULTI_GPU_MODE,
+            world_size=world_size,
+            world_rank=i,
             tp_size=TP_size,
             tp_rank=i,
             unique_nccl_ids=unique_nccl_ids,
@@ -382,7 +387,9 @@ if __name__ == "__main__":
         from nanoflow.models.qwen2_moe.qwen2_moe_ep import Pipeline
         from nanoflow.models.qwen2_moe.config_qwen2_moe import Qwen2MoEConfig as Config
         cfgs = [Config(
-            multi_gpu_mode=True,
+            multi_gpu_mode=MULTI_GPU_MODE,
+            world_size=world_size,
+            world_rank=i,
             ep_size=EP_size,
             ep_rank=i,
             unique_nccl_ids=unique_nccl_ids,
@@ -391,12 +398,14 @@ if __name__ == "__main__":
         tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen1.5-MoE-A2.7B")
         auto_search_path = None
     
-    elif args.model == "Qwen2-57B-A14B-Instruct":
+    elif args.model == "Qwen2-57B-A14B-Instruct-EP":
         weight_map = "/code/hf/hub/models--Qwen--Qwen2-57B-A14B-Instruct/snapshots/50896d66b39f1425d63720541a66c7df13e053c0"
         from nanoflow.models.qwen2_moe_57B.qwen2_moe_57B_ep import Pipeline
         from nanoflow.models.qwen2_moe_57B.config_qwen2_moe_57B import Qwen2MoEConfig as Config
         cfgs = [Config(
-            multi_gpu_mode=True,
+            multi_gpu_mode=MULTI_GPU_MODE,
+            world_size=world_size,
+            world_rank=i,
             ep_size=EP_size,
             ep_rank=i,
             unique_nccl_ids=unique_nccl_ids,
@@ -405,6 +414,24 @@ if __name__ == "__main__":
         tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2-57B-A14B-Instruct")
         auto_search_path = None
 
+    elif args.model == "Qwen2-57B-A14B-Instruct-TP-EP":
+        weight_map = "/code/hf/hub/models--Qwen--Qwen2-57B-A14B-Instruct/snapshots/50896d66b39f1425d63720541a66c7df13e053c0"
+        from nanoflow.models.qwen2_moe_57B.qwen2_moe_57B_tp_ep import Pipeline
+        from nanoflow.models.qwen2_moe_57B.config_qwen2_moe_57B import Qwen2MoEConfig as Config
+        assert world_size == TP_size == EP_size, "world_size should be equal to TP_size and EP_size"
+        cfgs = [Config(
+            multi_gpu_mode=MULTI_GPU_MODE,
+            world_size=world_size,
+            world_rank=i,
+            tp_size=TP_size,
+            tp_rank=i,
+            ep_size=EP_size,
+            ep_rank=i,
+            unique_nccl_ids=unique_nccl_ids,
+        ) for i in range(world_size)]
+
+        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2-57B-A14B-Instruct")
+        auto_search_path = None
     else:
         # from models.llama3_8B_KVCacheFA_TP2 import Pipeline
         raise ValueError("Unsupported model")

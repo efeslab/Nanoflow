@@ -20,6 +20,8 @@ class Qwen2MoEConfig(PipelineConfig):
         num_shared_experts = 1,
         norm_topk_prob = False,
         page_size = 16,
+        world_size = 1,
+        world_rank = 0,
         tp_size = 1,
         tp_rank = 0,
         pp_size = 1,
@@ -31,6 +33,8 @@ class Qwen2MoEConfig(PipelineConfig):
         kv_cache_type = "flashinfer",
         unique_nccl_ids = [],
     ):
+        self.multi_gpu_mode = multi_gpu_mode
+        
         if multi_gpu_mode:
             self.pipeline_name = f"Qwen2-MoE-{kv_cache_type}-allreduce-TP{tp_size}-PP{pp_size}-DP{dp_size}-EP{ep_size}"
         else:
@@ -54,6 +58,8 @@ class Qwen2MoEConfig(PipelineConfig):
         self.num_shared_experts = num_shared_experts
         self.norm_topk_prob = norm_topk_prob
         self.page_size = page_size
+        self.world_size = world_size
+        self.world_rank = world_rank
         self.tp_size = tp_size
         self.tp_rank = tp_rank
         self.pp_size = pp_size

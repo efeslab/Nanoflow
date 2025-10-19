@@ -14,6 +14,7 @@ from nanoflow.operations import (
     GenEmbedding,
     LayerNorm,
     GEMM_N_Parallel,
+    GEMM_K_Parallel,
     Activation,
     ExpandAdd,
     FusedMoE,
@@ -38,7 +39,7 @@ from nanoflow.core.nanobatchSplit import split_nanobatch
 from nanoflow.utils.green_ctx import split_device_green_ctx_by_sm_count
 from nanoflow.utils.prof_marker import prof_marker
 
-from .config_qwen2_moe import Qwen2MoEConfig
+from .config_qwen2_moe_57B import Qwen2MoEConfig
 
 
 class Pipeline(BasePipeline):
@@ -70,6 +71,8 @@ class Pipeline(BasePipeline):
         self.rms_norm_eps = cfg.rms_norm_eps
         self.rope_theta = cfg.rope_theta
         self.page_size = cfg.page_size
+        self.tp_rank = cfg.tp_rank
+        self.tp_size = cfg.tp_size
         self.ep_rank = cfg.ep_rank
         self.ep_size = cfg.ep_size
         self.unique_nccl_ids = cfg.unique_nccl_ids
@@ -84,24 +87,26 @@ class Pipeline(BasePipeline):
 
     def init_external_data(self) -> None:
         print("Initializing external data...")
-        self.kv_pool = DistKVPool(
-            self.num_layers,
-            self.num_kv_heads,
-            self.head_dim,
-            2048,
-            self.page_size,
-            1,
-            self.device,
-        )
         # self.kv_pool = DistKVPool(
         #     self.num_layers,
         #     self.num_kv_heads,
         #     self.head_dim,
-        #     2048 * 18,
+        #     2048,
         #     self.page_size,
-        #     1,
+        #     self.tp_size,
         #     self.device,
         # )
+        capacity = 2048 * 28
+        self.kv_pool = DistKVPool(
+            self.num_layers,
+            self.num_kv_heads,
+            self.head_dim,
+            capacity,
+            self.page_size,
+            self.tp_size,
+            self.device,
+        )
+
         self.kv_cache = BatchedDistKVCache(self.kv_pool)
 
     def init_operations(self) -> None:
@@ -140,7 +145,10 @@ class Pipeline(BasePipeline):
                     "model.layers.{layer}.self_attn.q_proj.weight",
                 ]
             )
-            .setShape(self.kqv_heads * self.head_dim, self.hidden_dim)
+            .setShape(self.kqv_heads * self.head_dim,
+                      self.hidden_dim,
+                      tp_rank=self.tp_rank,
+                      tp_size=self.tp_size)
             .setParameter(alpha=1.0, beta=0.0)
         )
         self.kqv_layers = self.kqv.expand_layer(self.layer_list)
@@ -155,40 +163,51 @@ class Pipeline(BasePipeline):
                     "model.layers.{layer}.self_attn.q_proj.bias",
                 ]
             )
-            .setShape(self.kqv_heads * self.head_dim)
+            .setShape(self.kqv_heads * self.head_dim,
+                      tp_rank=self.tp_rank,
+                      tp_size=self.tp_size)
         )
         self.kqv_bias_layers = self.kqv_bias.expand_layer(self.layer_list)
         self.original_model_operations.append(self.kqv_bias)
 
         self.ropeAppend = RopeAppendFlashinfer(
             "RopeAppend", self.device, theta=self.rope_theta
-        ).setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim)
+        ).setShape(self.num_kv_heads, self.num_qo_heads, self.head_dim, tp_size=self.tp_size)
         self.ropeAppend.externals["KVCache"] = self.kv_cache
         self.ropeAppend_layers = self.ropeAppend.expand_layer(self.layer_list)
         self.original_model_operations.append(self.ropeAppend)
 
         self.decAttn = DecAttnFlashinfer("DecAttn", self.device).setShape(
-            self.num_kv_heads, self.num_qo_heads, self.head_dim
+            self.num_kv_heads, self.num_qo_heads, self.head_dim, tp_size=self.tp_size
         )
         self.decAttn.externals["KVCache"] = self.kv_cache
         self.decAttn_layers = self.decAttn.expand_layer(self.layer_list)
         self.original_model_operations.append(self.decAttn)
 
         self.pfAttn = PFAttnFlashinfer("PFAttn", self.device).setShape(
-            self.num_kv_heads, self.num_qo_heads, self.head_dim
+            self.num_kv_heads, self.num_qo_heads, self.head_dim, tp_size=self.tp_size
         )
         self.pfAttn.externals["KVCache"] = self.kv_cache
         self.pfAttn_layers = self.pfAttn.expand_layer(self.layer_list)
         self.original_model_operations.append(self.pfAttn)
 
         self.o = (
-            GEMM_N_Parallel("O", self.device, bias=True)
+            GEMM_K_Parallel("O", self.device, bias=True)
             .setWeightName("model.layers.{layer}.self_attn.o_proj.weight")
-            .setShape(self.hidden_dim, self.hidden_dim)
-            .setParameter(alpha=1.0, beta=1.0)
+            .setShape(self.hidden_dim, self.hidden_dim,
+                      tp_rank=self.tp_rank,
+                      tp_size=self.tp_size)
+            .setParameter(alpha=1.0, beta=1.0 / self.tp_size)
         )
         self.o_layers = self.o.expand_layer(self.layer_list)
         self.original_model_operations.append(self.o)
+
+        self.allReduce_o = AllReduce("AllReduceO", self.device).setShape(
+            self.hidden_dim, rank=self.tp_rank, world_size=self.tp_size
+        )
+        self.allReduce_o_layers = self.allReduce_o.expand_layer(
+            self.layer_list)
+        self.original_model_operations.append(self.allReduce_o)
 
         self.layerNormFFN = (
             LayerNorm("LayerNormFFN", self.device, eps=self.rms_norm_eps)
@@ -406,7 +425,9 @@ class Pipeline(BasePipeline):
         self.pfAttn.outputs["output"] >> self.redist_a.inputs["input_1"]
         self.redist_a.outputs["output_0"] >> self.o.inputs["A"]
 
-        self.o.outputs["D"] >> self.copy_o.inputs["input_0"]
+        self.o.outputs["D"] >> self.allReduce_o.inputs["input"]
+        self.allReduce_o.outputs["output"] >> self.copy_o.inputs["input_0"]
+        
         self.copy_o.outputs["output_0"] >> self.layerNormFFN.inputs["input"]
         self.copy_o.outputs["output_1"] >> self.add_down_bias.inputs["input_0"]
 
@@ -492,6 +513,7 @@ class Pipeline(BasePipeline):
             self.pfAttn.config_tag("batched_cuda", params)
             self.layerNormFFN.config_tag("cuda", params)
             self.o.config_tag("torch", params)
+            self.allReduce_o.config_tag("nccl", params)
             self.gate.config_tag("torch", params)
             self.fused_moe.config_tag("cutlass", params)
             self.allReduce_fused_moe.config_tag("nccl", params)
@@ -511,8 +533,11 @@ class Pipeline(BasePipeline):
     def config_network(self) -> None:
         print("Updating network operations with NCCL IDs...")
         # print("original unique_nccl_ids: ", self.unique_nccl_ids)
+        self.allReduce_o.update(
+            None, rank=self.tp_rank, world_size=self.tp_size, unique_nccl_ids=self.unique_nccl_ids[0:5]
+        )
         self.allReduce_fused_moe.update(
-            None, rank=self.ep_rank, world_size=self.ep_size, unique_nccl_ids=self.unique_nccl_ids[0:5]
+            None, rank=self.ep_rank, world_size=self.ep_size, unique_nccl_ids=self.unique_nccl_ids[5:10]
         )
 
     def nanobatch_split(self) -> None:

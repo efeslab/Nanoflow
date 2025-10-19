@@ -14,6 +14,8 @@ class Llama3_70B_Config(PipelineConfig):
         rms_norm_eps = 1e-05,
         rope_theta = 500000.0,
         page_size = 16,
+        world_size = 1,
+        world_rank = 0,
         tp_size = 1,
         tp_rank = 0,
         pp_size = 1,
@@ -23,6 +25,8 @@ class Llama3_70B_Config(PipelineConfig):
         kv_cache_type = "flashinfer",
         unique_nccl_ids = [],
     ):
+        self.multi_gpu_mode = multi_gpu_mode
+        
         if multi_gpu_mode:
             self.pipeline_name = f"Llama3-70B-{kv_cache_type}-allreduce-TP{tp_size}-PP{pp_size}-DP{dp_size}"
         else:
@@ -40,6 +44,8 @@ class Llama3_70B_Config(PipelineConfig):
         self.rms_norm_eps = rms_norm_eps
         self.rope_theta = rope_theta
         self.page_size = page_size
+        self.world_size = world_size
+        self.world_rank = world_rank
         self.tp_size = tp_size
         self.tp_rank = tp_rank
         self.pp_size = pp_size

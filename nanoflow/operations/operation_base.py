@@ -32,7 +32,7 @@ class Operations:
         self.last_layer_only = False
         self.weight_name = None
         self.tag = "torch"
-        self.category = None
+        self.category: CategoryType
         self.children = []
         self.isNanoSplit = False
         self.nano_ops = []
@@ -289,7 +289,7 @@ class Operations:
                     tag_list.append(category_tag)
         return tag_list
 
-    def set_category(self, category: Optional[CategoryType]) -> None:
+    def set_category(self, category: CategoryType) -> None:
         self.category = category
 
     def set_stream(

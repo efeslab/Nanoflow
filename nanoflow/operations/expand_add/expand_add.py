@@ -36,11 +36,14 @@ class ExpandAdd(Operations):
     def init_impl_map(self):
         self.add_impl(ExpandAddTorchImpl)
 
-    def setShape(self, N):
+    def setShape(self, N, tp_rank=0, tp_size=1):
         self.N = N
-        self.weights["weight"].shape = self.N
-        self.inputs["input"].init_shape((0, self.N))
-        self.outputs["output"].init_shape((0, self.N))
+        self.tp_rank = tp_rank
+        self.tp_size = tp_size
+        self.tp_N = N // tp_size
+        self.weights["weight"].shape = self.tp_N
+        self.inputs["input"].init_shape((0, self.tp_N))
+        self.outputs["output"].init_shape((0, self.tp_N))
 
         return self
 
@@ -49,7 +52,7 @@ class ExpandAdd(Operations):
         new_op.set_category(self.category)
         new_op.weights = self.weights
         new_op.expand_layer(self.layer_list)
-        new_op.setShape(self.N)
+        new_op.setShape(self.N, self.tp_rank, self.tp_size)
 
         self.nano_ops.append(new_op)
 
@@ -80,6 +83,8 @@ class ExpandAdd(Operations):
             cached_weight_map,
             cached,
             device,
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
         )
 
 
