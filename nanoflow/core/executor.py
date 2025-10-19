@@ -83,6 +83,7 @@ class Executor:
                 main_stream is not None
             ), "stream_for_cuda_graph must be provided when use_cuda_graph is True"
             # create cuda graph
+            print("Preparing CUDA graph")
             self.cuda_graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(self.cuda_graph, stream=main_stream):
                 for op_name in self.ordered_operations:
@@ -93,9 +94,11 @@ class Executor:
             self.cuda_graph.replay()
         if not plan_cuda_graph and is_cuda_graph_enabled:
             # replay CUDA graph
+            print("replay CUDA graph")
             self.cuda_graph.replay()
         elif not plan_cuda_graph and not is_cuda_graph_enabled:
             # just run
+            print("Normal execution")
             for op_name in self.ordered_operations:
                 op = self.ordered_graph.nodes[op_name]["op"]
                 with prof_marker(f"{op.name}"):
