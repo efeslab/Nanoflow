@@ -43,7 +43,6 @@ class Pipeline(BasePipeline):
     def __init__(self, cfg: Llama3_70B_Config) -> None:
         # Set parameters as instance variables.
         super().__init__(
-            multi_gpu_mode=cfg.multi_gpu_mode,
             pipeline_name=cfg.pipeline_name,
             cached_weight_dir=cfg.cached_weight_dir,
             profile_dir=cfg.profile_dir,

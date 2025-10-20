@@ -75,7 +75,6 @@ class BasePipeline(ABC):
     # --------- Base: construction / config ---------
     def __init__(
         self,
-        multi_gpu_mode: bool,
         pipeline_name: str,
         cached_weight_dir: str,
         profile_dir: str,
@@ -84,7 +83,6 @@ class BasePipeline(ABC):
         world_rank: int = 0,
         categories: list[CategoryType] = [CategoryType.COMP, CategoryType.MEM],
     ) -> None:
-        self.multi_gpu_mode = multi_gpu_mode
         self.pipeline_name = pipeline_name
         self.cached_weight_dir = cached_weight_dir
         self.profile_dir = profile_dir

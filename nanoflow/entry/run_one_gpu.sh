@@ -7,8 +7,8 @@ MODEL="Qwen2-57B-A14B-Instruct"
 TEST="correctness"
 # TEST="one_cycle"
 
-TORCH_CUDA_ARCH_LIST=9.0 CUDA_VISIBLE_DEVICES=0 \
-python run_llama3.py \
+TORCH_CUDA_ARCH_LIST=9.0 CUDA_VISIBLE_DEVICES=4 \
+python test_one_gpu.py \
   --model "$MODEL" \
   --test "$TEST"
 
