@@ -18,14 +18,12 @@
 cutlass_profiler
 build
 .vscode
-*.pdf
 *.png
 __pycache__
 *.prof
 new-small-gemv/src/generated/
 compute-bound/src/generated/
 /detailedGemmKernelPerf/CMakeFiles/
-*.json
 *.json.gz
 *.cmake
 *.stat

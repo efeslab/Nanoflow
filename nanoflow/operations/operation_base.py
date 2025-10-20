@@ -37,7 +37,7 @@ class Operations:
         self.isNanoSplit = False
         self.nano_ops = []
         self.isVirtual = False
-        self.stream: torch.cuda.Stream
+        self.stream: torch._C.Stream
         self.sm_count: int | None = None
         self.batch_size = None
 
@@ -300,7 +300,10 @@ class Operations:
         ),
     ) -> None:
         if self.isNanoSplit:
-            assert isinstance(stream, list), "Stream must be a list of streams"
+            if not isinstance(stream, list):
+                num_nano_ops = len(self.nano_ops)
+                stream = [stream for _ in range(num_nano_ops)]
+            assert len(stream) == len(self.nano_ops), f"Length of streams {len(stream)} is not matching with the number {len(self.nano_ops)} nano ops needed."
             for i, nano_op in enumerate(self.nano_ops):
                 nano_op.set_stream(stream[i])
         else:

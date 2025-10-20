@@ -125,6 +125,14 @@ class BasePipeline(ABC):
         self.init_dependency()
         self.init_set_weight(weight_path, cached)
         self.config_network()
+    
+    def init_wo_weight(self) -> None:
+        self.init_streams()
+        self.init_external_data()
+        self.init_operations()
+        self.init_category()
+        self.init_dependency()
+        self.config_network()
 
     def init_set_weight(self, weight_path: str, cached: bool) -> None:
         weight_manager = WeightManager(
@@ -145,21 +153,25 @@ class BasePipeline(ABC):
     # --------- Base: streams ---------
     def init_streams(self) -> None:
         self.main_stream = torch.cuda.Stream()
-        self.total_sm = 132  # default for H200; override in subclass if needed
-        # Assuming SM counts are in increments of 8 up to 120 (reserve 132 as total)
-        self.sm_counts = [i for i in range(8, 128, 8)]
 
+        # Assuming SM counts are in increments of 8 up to 120 (reserve 132 as total)
+        sm_counts_for_greenctx = [i for i in range(8, 128, 8)]
+        self.total_sm = 132  # default for H200; override in subclass if needed
+        
+        self.sm_counts = sm_counts_for_greenctx + [self.total_sm]
+        
         # Category -> { sm_count : (stream, sm_count) }
         self.streams: dict[CategoryType,
                            dict[int, tuple[torch._C.Stream, int]]] = {}
+
         for category in self.categories:
             self.streams[category] = {}
 
             # build paired green contexts
-            n = len(self.sm_counts)
+            n = len(sm_counts_for_greenctx)
             for i in range((n + 1) // 2):
-                sm1 = self.sm_counts[i]
-                sm2 = self.sm_counts[n - 1 - i]
+                sm1 = sm_counts_for_greenctx[i]
+                sm2 = sm_counts_for_greenctx[n - 1 - i]
                 (s1, s2, _), _ = split_device_green_ctx_by_sm_count(
                     torch.device(self.device), [sm1, sm2]
                 )
@@ -172,10 +184,10 @@ class BasePipeline(ABC):
 
         # Simple test pool for profiling sweeps
         self.profile_streams: dict[str, tuple[torch._C.Stream, int]] = {}
-        n = len(self.sm_counts)
+        n = len(sm_counts_for_greenctx)
         for i in range((n + 1) // 2):
-            sm1 = self.sm_counts[i]
-            sm2 = self.sm_counts[n - 1 - i]
+            sm1 = sm_counts_for_greenctx[i]
+            sm2 = sm_counts_for_greenctx[n - 1 - i]
             (s1, s2, _), _ = split_device_green_ctx_by_sm_count(
                 torch.device(self.device), [sm1, sm2]
             )

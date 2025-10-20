@@ -1,23 +1,30 @@
-import sys
-
-sys.path.append("../")
-sys.path.append("../pybind/build/")
+import json
+from matplotlib import pyplot as plt
+from gurobipy import GRB
+import gurobipy as gp
 import itertools
 from collections import defaultdict
 
-from models.llama3_AutoSearch import Pipeline
-from models.llama3_8B_allreduce_AutoSearch import Pipeline as Pipeline_8B_AllReduce
-from models.llama3_70B_allreduce_AutoSearch import Pipeline as Pipeline_70B_AllReduce
-from core.executor import Executor
-from core.categoryType import CategoryType
-from utils.util_functions import op_name_to_name_idx_layer
+from nanoflow.models.llama3_8B.llama3_AutoSearch import Pipeline
+from nanoflow.models.llama3_8B.llama3_8B_allreduce_AutoSearch import Pipeline as Pipeline_8B_AllReduce
+from nanoflow.models.llama3_8B.config_llama3_8B import Llama3_8B_Config
+
+from nanoflow.models.llama3_70B.llama3_70B_allreduce_AutoSearch import Pipeline as Pipeline_70B_AllReduce
+from nanoflow.models.llama3_70B.config_llama3_70B import Llama3_70B_Config
+
+# get layered operation
+from nanoflow.operations import Operation_Layer
+
+from nanoflow.core.executor import Executor
+from nanoflow.core.categoryType import CategoryType
+from nanoflow.utils.util_functions import op_name_to_name_idx_layer
 from profileAnalysis import getGemvTimeAndSMCount, getByBatchsizeAndSMCount
 
 
-global_batch_size = 3072
-decode_batch_size = 1280
-# global_batch_size = 2048
-# decode_batch_size = 640
+# global_batch_size = 3072
+# decode_batch_size = 1280
+global_batch_size = 2048
+decode_batch_size = 640
 # global_batch_size = 1024
 # decode_batch_size = 384
 
@@ -25,13 +32,7 @@ seq_len = 1024
 
 # create operations
 
-# pipeline = Pipeline()
-# stage1_figure_path = "8B_stage1_figure.png"
-# stage2_figure_path = "8B_stage2_figure.png"
-# dump_file = "8B_search_result.json"
-# stage1_figure_path = "8B_stage1_figure_large_btz_reverse_v.pdf"
-# stage2_figure_path = "8B_stage2_figure_large_btz_reverse_v.pdf"
-# dump_file = "8B_search_result_large_btz_reverse_v.json"
+# pipeline = Pipeline(cfg=Llama3_8B_Config())
 
 
 # pipeline = Pipeline_70B_AllReduce(TP_idx=0, TP_size=4)
@@ -42,26 +43,25 @@ seq_len = 1024
 # stage2_figure_path = "70B_stage2_figure_reverse_v3.pdf"
 # dump_file = "70B_search_result_reverse_v3.json"
 
-pipeline = Pipeline_8B_AllReduce(TP_idx=0, TP_size=4)
-stage1_figure_path = "8B_allreduce_naive_stage1_figure.pdf"
-stage2_figure_path = "8B_allreduce_naive_stage2_figure.pdf"
-dump_file = "8B_allreduce_naive_search_result.json"
+# pipeline = Pipeline_8B_AllReduce(cfg=Llama3_8B_Config(
+#     multi_gpu_mode=True, world_size=4, world_rank=0, tp_size=4, tp_rank=0))
+
+pipeline = Pipeline_70B_AllReduce(cfg=Llama3_70B_Config(
+    multi_gpu_mode=True, world_size=4, world_rank=0, tp_size=4, tp_rank=0))
 
 profile_dir = pipeline.profile_dir
 
+stage1_figure_path = "result_pdf/TEST_stage1_figure.pdf"
+stage2_figure_path = "result_pdf/TEST_stage2_figure.pdf"
+dump_file = "result_json/TEST_search_result.json"
 
-pipeline.init()
+pipeline.init_wo_weight()
 pipeline.global_batch_size = global_batch_size
 pipeline.decode_batch_size = decode_batch_size
-pipeline.config_batch_size()
+pipeline.apply_batch_size()
 pipeline.nanobatch_split()
 pipeline.update_allocate_buffers()
-
-# set streams
 pipeline.config_streams()
-
-# get layered operation
-from operations.operation_base import Operation_Layer
 
 layer_num = 1
 all_layered_ops: list[Operation_Layer] = []
@@ -71,7 +71,8 @@ for op in pipeline.model_operations:
     layered_ops = op.children[:layer_num]
     all_layered_ops.extend(layered_ops)
 print("all_layered_ops:", [op.name for op in all_layered_ops])
-print("all_layered_ops original name:", [op.original_name for op in all_layered_ops])
+print("all_layered_ops original name:", [
+      op.original_name for op in all_layered_ops])
 
 
 # operations = [op for op in pipeline.op_layers if op.parent.first_layer_only == False and op.parent.last_layer_only == False]
@@ -80,18 +81,18 @@ print("all_layered_ops original name:", [op.original_name for op in all_layered_
 
 
 profile_sm_counts = pipeline.sm_counts
-full_sm_counts = profile_sm_counts[-1]
+full_sm_counts = pipeline.total_sm
 print("sm_counts: ", profile_sm_counts)
 print("full_sm_counts: ", full_sm_counts)
 
 for layer_op in all_layered_ops:
     print(layer_op.name)
-    print("prerequisite operations:", [op for op in layer_op.prerequisites])
+    # print("prerequisite operations:", [op for op in layer_op.prerequisites])
     if layer_op.original_name == "DecAttn":
         batch_size = layer_op.batch_size
-        print("batch_size:", batch_size)
+        # print("batch_size:", batch_size)
         for sm_count in profile_sm_counts:
-            print("sm_count:", sm_count)
+            # print("sm_count:", sm_count)
             algo_tag, duration = getGemvTimeAndSMCount(
                 profile_dir, batch_size, seq_len, sm_count
             )
@@ -99,9 +100,9 @@ for layer_op in all_layered_ops:
             layer_op.algo_tag_map[(batch_size, sm_count)] = algo_tag
     else:
         batch_size = layer_op.batch_size
-        print("batch_size:", batch_size)
+        # print("batch_size:", batch_size)
         for sm_count in profile_sm_counts:
-            print("sm_count:", sm_count)
+            # print("sm_count:", sm_count)
             algo_tag, duration = getByBatchsizeAndSMCount(
                 profile_dir, layer_op.original_name, batch_size, sm_count
             )
@@ -117,16 +118,16 @@ for layer_op in all_layered_ops:
     print("prev_op_layer:", [op.name for op in layer_op.prev_op_layer])
     print("is_depended_on:", layer_op.is_depended_on)
 
-import gurobipy as gp
-from gurobipy import GRB
 
 model_stage_one = gp.Model("pipeline")
 for layer_op in all_layered_ops:
-    layer_op.initVariables(model_stage_one, full_sm_counts)  # add start_time, end_time
+    # add start_time, end_time
+    layer_op.initVariables(model_stage_one, full_sm_counts)
 
 # create sequantial constraints
 sequence_nano = {}
-category_nano_op_map: dict[CategoryType, list[Operation_Layer]] = defaultdict(list)
+category_nano_op_map: dict[CategoryType,
+                           list[Operation_Layer]] = defaultdict(list)
 for layer_op in all_layered_ops:
     category_nano_op_map[layer_op.category].append(layer_op)
 
@@ -205,7 +206,8 @@ for layer_op in all_layered_ops:
 
 # C_max constraints
 for layer_op in all_layered_ops:
-    model_stage_one.addConstr(layer_op.end_time <= C_max, name=f"C_max_{layer_op.name}")
+    model_stage_one.addConstr(
+        layer_op.end_time <= C_max, name=f"C_max_{layer_op.name}")
 
 
 model_stage_one.setObjective(C_max, GRB.MINIMIZE)
@@ -226,8 +228,6 @@ for layer_op in all_layered_ops:
         # else:
         #     print(f"Dependency check passed: {dep_op.name} -> {layer_op.name}")
 
-
-from matplotlib import pyplot as plt
 
 # Assuming you have a list of NanoOperation instances called nano_operations_list
 # and each NanoOperation has the required attributes.
@@ -281,11 +281,13 @@ plt.savefig(stage1_figure_path)
 
 # sort category_nano_op_map by start time
 for op_type, nano_ops in category_nano_op_map.items():
-    category_nano_op_map[op_type] = sorted(nano_ops, key=lambda x: x.start_time.X)
+    category_nano_op_map[op_type] = sorted(
+        nano_ops, key=lambda x: x.start_time.X)
 
 # Apply stream dependencies
 for op_type, nano_ops in category_nano_op_map.items():
-    print(f"{op_type}: {[f'{n.name}({n.start_time.X:.2f})' for n in nano_ops]}")
+    print(
+        f"{op_type}: {[f'{n.name}({n.start_time.X:.2f})' for n in nano_ops]}")
     nano_ops[0].parent.append_dependency((nano_ops[-1].parent, 1))
     for op, next_op in zip(nano_ops[:-1], nano_ops[1:]):
         print(f"Linking {op.name} to {next_op.name}")
@@ -381,7 +383,8 @@ for (type_1, list_1), (type_2, list_2) in itertools.combinations(
 ):
     print(f"Processing overlapping constraints between {type_1} and {type_2}")
     for op_1, op_2 in itertools.product(list_1, list_2):
-        print(f"Adding overlapping constraints for {op_1.name} and {op_2.name}")
+        print(
+            f"Adding overlapping constraints for {op_1.name} and {op_2.name}")
         is_overlap = second_stage_model.addVar(
             vtype=GRB.BINARY, name=f"{op_1.name}_overlap_{op_2.name}"
         )
@@ -396,7 +399,8 @@ for (type_1, list_1), (type_2, list_2) in itertools.combinations(
         )
         delta2.Start = 1
         delta_maps[(op_1.name, op_2.name)] = (delta1, delta2)
-        delta_maps[(op_2.name, op_1.name)] = (delta1, delta2)  # Ensure symmetry
+        delta_maps[(op_2.name, op_1.name)] = (
+            delta1, delta2)  # Ensure symmetry
         # Add constraints
         second_stage_model.addConstr(
             op_2.end_time <= epsilon + op_1.start_time + M * delta1,
@@ -440,7 +444,7 @@ for combo in itertools.product(*category_lists):
     )
     for idx in range(num_categories):
         op = combo[idx]
-        other_ops = combo[:idx] + combo[idx + 1 :]
+        other_ops = combo[:idx] + combo[idx + 1:]
         # print(f"Adding resource constraints for {op.name} in category {idx}")
         # print(f"Other operations in the combination: {[other_op.name for other_op in other_ops]}")
         # Add constraints for each operation in the combination
@@ -479,8 +483,10 @@ for category_list in category_lists:
     category_list.sort(key=lambda x: x.start_time.X)
 
 for list1, list2 in itertools.combinations(category_lists, 2):
-    filtered_list1 = [op for op in list1 if op_name_to_name_idx_layer(op.name)[2] == 1]
-    filtered_list2 = [op for op in list2 if op_name_to_name_idx_layer(op.name)[2] == 1]
+    filtered_list1 = [op for op in list1 if op_name_to_name_idx_layer(op.name)[
+        2] == 1]
+    filtered_list2 = [op for op in list2 if op_name_to_name_idx_layer(op.name)[
+        2] == 1]
     print(f"filtered_list1: {[op.name for op in filtered_list1]}")
     print(f"filtered_list2: {[op.name for op in filtered_list2]}")
     for op1 in filtered_list1:
@@ -490,7 +496,8 @@ for list1, list2 in itertools.combinations(category_lists, 2):
         ]
         if filtered_list2_for_op1:
             op2 = filtered_list2_for_op1[-1]
-            print(f"Attempting to add dependency from {op2.name} to {op1.name}")
+            print(
+                f"Attempting to add dependency from {op2.name} to {op1.name}")
             if not (
                 op1.is_extra_linked_before_op[op2.category]
                 or op2.is_extra_linked_after_op[op1.category]
@@ -513,7 +520,8 @@ for list1, list2 in itertools.combinations(category_lists, 2):
         ]
         if filtered_list1_for_op2:
             op1 = filtered_list1_for_op2[-1]
-            print(f"Attempting to add dependency from {op1.name} to {op2.name}")
+            print(
+                f"Attempting to add dependency from {op1.name} to {op2.name}")
             if not (
                 op2.is_extra_linked_before_op[op1.category]
                 or op1.is_extra_linked_after_op[op2.category]
@@ -545,7 +553,8 @@ for n in second_stage_nano_ops:
     x = x_positions[op_type]
 
     # Vertical bar: height=duration, bottom=start_time
-    ax.bar(x, duration, bottom=start_time, width=0.8, alpha=0.7, edgecolor="black")
+    ax.bar(x, duration, bottom=start_time,
+           width=0.8, alpha=0.7, edgecolor="black")
 
     # Put the label rotated along the bar to save horizontal space
     if duration > 0.03:  # Only label if the bar is tall enough
@@ -574,39 +583,6 @@ ax.grid(True, axis="y", linestyle="--", alpha=0.6)
 plt.tight_layout()
 plt.savefig(stage2_figure_path)
 
-# # Extract unique operation types
-# operation_types = sorted(set(str(n.category) for n in all_layered_ops))
-# y_positions = {op_type: i for i, op_type in enumerate(operation_types)}
-
-# fig, ax = plt.subplots(figsize=(30, 6))
-
-# for n in second_stage_nano_ops:
-#     n_name = n.name
-#     # Access the optimized values of the variables
-#     start_time = n.start_time.X
-#     duration = n.duration_map[(n.batch_size, n.p_choice.X)]  # Assuming duration is stored in a map with batch size as key
-#     batch_size = n.batch_size
-#     op_type = str(n.category)
-
-#     y_position = y_positions[op_type]
-
-#     # Plot the operation as a horizontal bar
-#     ax.barh(y_position, duration, left=start_time, height=0.8, alpha=0.7, edgecolor="black")
-
-#     # Annotate with operation name and batch size
-#     label = f"{n.name}\nL{n.layer}\nP {n.p_choice.X}\n"
-#     ax.text(start_time + duration / 2, y_position, label, ha="center", va="center", color="black", fontsize=12)
-
-# # Set y-ticks and labels
-# ax.set_yticks(list(y_positions.values()))
-# ax.set_yticklabels(list(y_positions.keys()))
-# ax.set_xlabel("Time (ms)")
-# ax.set_ylabel("Operation Type")
-# ax.set_title("Nano Operations Timeline with Batch Sizes")
-# ax.grid(True, linestyle="--", alpha=0.6)
-
-# plt.tight_layout()
-# plt.savefig(stage2_figure_path)
 
 output_overlap_map: defaultdict[str, dict[str, int]] = defaultdict(dict)
 output_op_infos: dict[str, dict[str, dict]] = {}
@@ -618,17 +594,20 @@ for (op1_name, op2_name), is_overlap in is_overlapping.items():
         output_overlap_map[op1_name][op2_name] = 0
 
 for op in second_stage_nano_ops:
-    op_basename, op_batch_idx, op_layer_idx = op_name_to_name_idx_layer(op.name)
+    op_basename, op_batch_idx, op_layer_idx = op_name_to_name_idx_layer(
+        op.name)
     if op_layer_idx != 1:
         continue
     p_value = op.p_choice.X
     duration = 0.0
     for sm_count in op.p_vars:
-        duration += op.duration_map[(op.batch_size, sm_count)] * op.p_vars[sm_count].X
+        duration += op.duration_map[(op.batch_size,
+                                     sm_count)] * op.p_vars[sm_count].X
     algo_tag = op.algo_tag_map[(op.batch_size, p_value)]
     start_time = op.start_time.X
     finish_time = op.end_time.X
-    str_extra_dep = [(elem0.name, elem1) for elem0, elem1 in op.parent.extra_dep]
+    str_extra_dep = [(elem0.name, elem1)
+                     for elem0, elem1 in op.parent.extra_dep]
 
     op_is_overlapping_with_others = False
     if op.name in output_overlap_map:
@@ -656,8 +635,6 @@ for op in second_stage_nano_ops:
         f"{op.name} starts {start_time:.3f} end {start_time + duration:.3f} p {p_value}, duration {duration}"
     )
 
-
-import json
 
 # Save the output to a JSON file
 output_data = {"operations": output_op_infos}
