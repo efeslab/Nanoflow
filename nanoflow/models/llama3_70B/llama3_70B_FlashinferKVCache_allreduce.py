@@ -4,7 +4,7 @@ import torch
 import torch.distributed as dist
 
 
-from nanoflow.operations import NanoOpInfo, Operations, Operation_Layer
+from nanoflow.operations import NanoOpInfo
 
 from nanoflow.operations import (
     GlobalInput,
@@ -297,7 +297,7 @@ class Pipeline(BasePipeline):
 
         self.copy_d.outputs["output_0"] >> self.modelLayerNorm.inputs["input"]
         self.copy_d.outputs["output_1"] >> (
-            self.copy_embedding.inputs["input_1"], 1)
+            self.copy_embedding.inputs["input_1"], True)
 
         self.modelLayerNorm.outputs["output"] >> self.getLogits.inputs["A"]
 

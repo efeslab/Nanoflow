@@ -94,9 +94,9 @@ class KVCacheTorch():
             return reserved_key[:kv_offset], reserved_value[:kv_offset]
         # print(f"{layer, idx} is not in kv cache.")
         raise ValueError(f"Request {layer, idx} not found in cache")
-        return None
     
-    def update(self, cumsum_input, input_req_idx, decode_batchsize):
+    def update(self, cumsum_input, input_req_idx, decode_batchsize, use_cuda_graph=False):
+       assert not use_cuda_graph, "cuda graph mode of KVCacheTorch isn't implemented"
        self.input_req_idx = input_req_idx
        return None
 

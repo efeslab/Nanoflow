@@ -1,3 +1,11 @@
+from nanoflow.utils.input_test import prefill_context
+from nanoflow.utils.util_functions import prepare_weight
+from nanoflow.utils.frontend import requestManager
+from nanoflow.utils.prof_marker import prof_marker
+from transformers import AutoTokenizer
+import argparse
+
+
 def test_performance():
     seq_len = 1024
     global_batch_size = 2048
@@ -158,7 +166,8 @@ def test_one_cycle():
 
 
 def profile_one_cycle():
-    prefill_context_ids = tokenizer.encode(prefill_context)  # which length is 1912.
+    # which length is 1912.
+    prefill_context_ids = tokenizer.encode(prefill_context)
 
     pipeline.init_profile_data()
 
@@ -229,15 +238,6 @@ def profile_one_cycle():
     print("All profiling data has been collected.")
 
 
-import argparse
-from transformers import AutoTokenizer
-
-from nanoflow.utils.prof_marker import prof_marker
-from nanoflow.utils.frontend import requestManager
-from nanoflow.utils.util_functions import prepare_weight
-from nanoflow.utils.input_test import prefill_context
-
-
 arg_parser = argparse.ArgumentParser()
 arg_parser.add_argument(
     "--test",
@@ -250,6 +250,12 @@ arg_parser.add_argument(
     choices=["8B", "Qwen1.5-MoE-A2.7B", "Qwen2-57B-A14B-Instruct"],
     default="8B",
     help="Pick which Pipeline to instantiate",
+)
+arg_parser.add_argument(
+    "--kvcache_type",
+    choices=["none", "torch", "flashinfer"],
+    default="flashinfer",
+    help="Pick which KVCache to use",
 )
 args = arg_parser.parse_args()
 print("Parse all args: ", args)
@@ -269,28 +275,34 @@ print("Parse all args: ", args)
 # print("new_input_ids: ", new_input_ids)
 
 if args.model == "8B":
-    from nanoflow.models.llama3_8B.llama3_FlashinferKVCache import Pipeline
+    MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"
     from nanoflow.models.llama3_8B.config_llama3_8B import Llama3_8B_Config as Config
-    cfg = Config()
-    # from nanoflow.models.llama3_KVCacheTorch import Pipeline
+    cfg = Config(kv_cache_type=args.kvcache_type)
+    if args.kvcache_type == "flashinfer":
+        from nanoflow.models.llama3_8B.llama3_FlashinferKVCache import Pipeline
+    elif args.kvcache_type == "torch":
+        from nanoflow.models.llama3_8B.llama3_KVCacheTorch import Pipeline
+    else:
+        raise NotImplementedError(
+            f"KVCache type {args.kvcache_type} not implemented yet.")
 
-    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct")
     weight_map = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
     auto_search_path = "../auto_search/8B_search_result_large_btz.json"
+
 elif args.model == "Qwen1.5-MoE-A2.7B":
+    MODEL_ID = "Qwen/Qwen1.5-MoE-A2.7B"
     from nanoflow.models.qwen2_moe.qwen2_moe import Pipeline
     from nanoflow.models.qwen2_moe.config_qwen2_moe import Qwen2MoEConfig as Config
     cfg = Config()
 
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen1.5-MoE-A2.7B")
     weight_map = "/code/hf/hub/models--Qwen--Qwen1.5-MoE-A2.7B/snapshots/1a758c50ecb6350748b9ce0a99d2352fd9fc11c9"
     auto_search_path = None
 elif args.model == "Qwen2-57B-A14B-Instruct":
+    MODEL_ID = "Qwen/Qwen2-57B-A14B-Instruct"
     from nanoflow.models.qwen2_moe_57B.qwen2_moe_57B import Pipeline
     from nanoflow.models.qwen2_moe_57B.config_qwen2_moe_57B import Qwen2MoEConfig as Config
     cfg = Config()
 
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2-57B-A14B-Instruct")
     weight_map = "/code/hf/hub/models--Qwen--Qwen2-57B-A14B-Instruct/snapshots/50896d66b39f1425d63720541a66c7df13e053c0"
     auto_search_path = None
 else:
@@ -298,12 +310,16 @@ else:
     # weight_map_wzr = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
     # weight_map_amd_kan = "/work1/kasikci/kanzhu/models/llama3-8b"
     # weight_map_yi = "/app/llama3-8b"
+print("--------------------------------")
+print("Model ID: ", MODEL_ID)
+print("--------------------------------")
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 
 HAS_CACHED_WEIGHT = cfg.has_cached_weight()
 print("HAS_CACHED_WEIGHT: ", HAS_CACHED_WEIGHT)
 
 if not HAS_CACHED_WEIGHT:
-    pipeline_weight_list = [(i, f"cuda:{i}", Pipeline(cfg=cfg)) for i in range(1)]
+    pipeline_weight_list = [Pipeline(cfg=cfg)]
     prepare_weight(pipeline_weight_list, weight_map)
 
 pipeline = Pipeline(cfg=cfg)

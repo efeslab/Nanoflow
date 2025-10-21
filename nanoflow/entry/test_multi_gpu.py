@@ -336,6 +336,30 @@ if __name__ == "__main__":
         default="8B",
         help="Pick which Pipeline to instantiate",
     )
+    arg_parser.add_argument(
+        "--kvcache_type",
+        choices=["none", "torch", "flashinfer"],
+        default="flashinfer",
+        help="Pick which KVCache to use",
+    )
+    arg_parser.add_argument(
+        "--network_type",
+        choices=["allreduce", "allgather"],
+        default="allreduce",
+        help="Pick which network type to use",
+    )
+    arg_parser.add_argument(
+        "--cuda_graph",
+        type=bool,
+        default=False,
+        help="Enable CUDA graph",
+    )
+    arg_parser.add_argument(
+        "--auto_search",
+        type=bool,
+        default=False,
+        help="Enable auto search",
+    )
     args = arg_parser.parse_args()
 
     world_size = torch.cuda.device_count()
@@ -348,22 +372,36 @@ if __name__ == "__main__":
     unique_nccl_ids = [NCCLWrapper.get_nccl_unique_id() for _ in range(10)]
 
     if args.model == "70B":
+        MODEL_ID = "meta-llama/Meta-Llama-3-70B-Instruct"
         weight_map = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
-        from nanoflow.models.llama3_70B.llama3_70B_FlashinferKVCache_allreduce import Pipeline
-
         from nanoflow.models.llama3_70B.config_llama3_70B import Llama3_70B_Config as Config
+
+        if args.kvcache_type == "flashinfer":
+            if args.network_type == "allreduce":
+                from nanoflow.models.llama3_70B.llama3_70B_FlashinferKVCache_allreduce import Pipeline
+            elif args.network_type == "allgather":
+                from nanoflow.models.llama3_70B.llama3_70B_FlashinferKVCache_allgather import Pipeline
+            else:
+                raise ValueError("Unsupported network type")
+        else:
+            raise ValueError("Unsupported KVCache type")
+        # elif args.kvcache_type == "torch":
+        #     if args.network_type == "allreduce":
+        #         from nanoflow.models.llama3_70B.llama3_70B_KVCacheTorch_allreduce import Pipeline
+        #     elif args.network_type == "allgather":
+        #         from nanoflow.models.llama3_70B.llama3_70B_KVCacheTorch_allgather import Pipeline
+
         cfgs = [Config(
             multi_gpu_mode=MULTI_GPU_MODE,
             world_size=world_size,
             world_rank=i,
             tp_size=TP_size,
             tp_rank=i,
+            kv_cache_type=args.kvcache_type,
+            network_type=args.network_type,
             unique_nccl_ids=unique_nccl_ids,
         ) for i in range(world_size)]
 
-        tokenizer = AutoTokenizer.from_pretrained(
-            "meta-llama/Meta-Llama-3-70B-Instruct"
-        )
         auto_search_path = "../auto_search/search_result_json/70B_search_result_reverse_v3.json"
 
     elif args.model == "8B":
@@ -383,6 +421,7 @@ if __name__ == "__main__":
         auto_search_path = "../auto_search/search_result_json/8B_allreduce_search_result.json"
 
     elif args.model == "Qwen1.5-MoE-A2.7B-EP":
+        MODEL_ID = "Qwen/Qwen1.5-MoE-A2.7B"
         weight_map = "/code/hf/hub/models--Qwen--Qwen1.5-MoE-A2.7B/snapshots/1a758c50ecb6350748b9ce0a99d2352fd9fc11c9"
         from nanoflow.models.qwen2_moe.qwen2_moe_ep import Pipeline
         from nanoflow.models.qwen2_moe.config_qwen2_moe import Qwen2MoEConfig as Config
@@ -395,10 +434,10 @@ if __name__ == "__main__":
             unique_nccl_ids=unique_nccl_ids,
         ) for i in range(world_size)]
 
-        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen1.5-MoE-A2.7B")
         auto_search_path = None
     
     elif args.model == "Qwen2-57B-A14B-Instruct-EP":
+        MODEL_ID = "Qwen/Qwen2-57B-A14B-Instruct"
         weight_map = "/code/hf/hub/models--Qwen--Qwen2-57B-A14B-Instruct/snapshots/50896d66b39f1425d63720541a66c7df13e053c0"
         from nanoflow.models.qwen2_moe_57B.qwen2_moe_57B_ep import Pipeline
         from nanoflow.models.qwen2_moe_57B.config_qwen2_moe_57B import Qwen2MoEConfig as Config
@@ -411,10 +450,10 @@ if __name__ == "__main__":
             unique_nccl_ids=unique_nccl_ids,
         ) for i in range(world_size)]
 
-        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2-57B-A14B-Instruct")
         auto_search_path = None
 
     elif args.model == "Qwen2-57B-A14B-Instruct-TP-EP":
+        MODEL_ID = "Qwen/Qwen2-57B-A14B-Instruct"
         weight_map = "/code/hf/hub/models--Qwen--Qwen2-57B-A14B-Instruct/snapshots/50896d66b39f1425d63720541a66c7df13e053c0"
         from nanoflow.models.qwen2_moe_57B.qwen2_moe_57B_tp_ep import Pipeline
         from nanoflow.models.qwen2_moe_57B.config_qwen2_moe_57B import Qwen2MoEConfig as Config
@@ -430,7 +469,6 @@ if __name__ == "__main__":
             unique_nccl_ids=unique_nccl_ids,
         ) for i in range(world_size)]
 
-        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2-57B-A14B-Instruct")
         auto_search_path = None
     else:
         # from models.llama3_8B_KVCacheFA_TP2 import Pipeline
@@ -442,18 +480,19 @@ if __name__ == "__main__":
         import os
         os.makedirs(profile_data_path, exist_ok=True)
 
+    print("--------------------------------")
+    print("MODEL_ID: ", MODEL_ID)
+    print("args: ", args)
+    print("--------------------------------")
+
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+
     # process weights
     HAS_CACHED_WEIGHT = cfgs[0].has_cached_weight()
     print("HAS_CACHED_WEIGHT: ", HAS_CACHED_WEIGHT)
     if not HAS_CACHED_WEIGHT:
         pipeline_weight_list = [
-            (
-                i,
-                f"cuda:{i}",
-                Pipeline(
-                    cfg=cfgs[i]
-                ),
-            )
+            Pipeline(cfg=cfgs[i])
             for i in range(world_size)
         ]
         prepare_weight(pipeline_weight_list, weight_map)

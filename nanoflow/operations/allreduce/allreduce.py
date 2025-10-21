@@ -1,8 +1,6 @@
 import torch
 import torch.distributed as dist
 
-import nanoflow.platform_config as platform_config
-from nanoflow.utils.prof_marker import prof_marker
 from nanoflow.operations import Operations, Operation_Layer, OperationImpl
 from nanoflow.core.IOWrapper import IOWrapper
 from nanoflow.pybind.build.bind_all_reduce import NCCLWrapper
@@ -13,11 +11,12 @@ class AllReduceTorchImpl(OperationImpl):
 
     def __init__(self, op_base, stream, device):
         super().__init__(op_base, stream, device)
-        self.subgroup = op_base.subgroup # for torch allreduce
+        self.subgroup = op_base.subgroup  # for torch allreduce
 
     def run(self, input, output):
         with torch.cuda.stream(self.stream):
-            work = dist.all_reduce(input, op=dist.ReduceOp.SUM, group=self.subgroup, async_op=True)
+            work = dist.all_reduce(
+                input, op=dist.ReduceOp.SUM, group=self.subgroup, async_op=True)
             work.wait()
 
             output.copy_(input)
@@ -39,7 +38,8 @@ class AllReduce(Operations):
     def __init__(self, name, device, nano_idx=None):
         super().__init__(name, device, nano_idx)
         self.inputs = {"input": IOWrapper(self, "input", device).is_input()}
-        self.outputs = {"output": IOWrapper(self, "output", device).is_output()}
+        self.outputs = {"output": IOWrapper(
+            self, "output", device).is_output()}
         self.impl_map = {}
         self.init_impl_map()
         self.op_layer = AllReduce_Layer
@@ -79,7 +79,7 @@ class AllReduce(Operations):
                 self.subgroup,
                 self.rank,
                 self.world_size,
-                self.unique_nccl_ids[index + 1 : index + 2],
+                self.unique_nccl_ids[index + 1: index + 2],
             )
         else:
             new_op.update(self.subgroup, self.rank, self.world_size, None)
@@ -115,9 +115,9 @@ class AllReduce(Operations):
             (self.batch_size, self.sm_count, self.N, average_elapsed_ms),
         )
 
-
     def run(self):
-        self.impl.run(self.inputs["input"].tensor, self.outputs["output"].tensor)
+        self.impl.run(self.inputs["input"].tensor,
+                      self.outputs["output"].tensor)
 
     def profile_run(self):
         self.run()

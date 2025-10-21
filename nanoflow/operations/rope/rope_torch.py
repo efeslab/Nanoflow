@@ -1,15 +1,10 @@
-import logging
 import torch
-import time
 
-import platform_config
-from operations.rope.help_functions import apply_rope
-from operations.operation_base import Operations, Operation_Layer
-from core.IOWrapper import IOWrapper
-from operations.impl_base import OperationImpl
-from kvcache.kv import KVCacheNone, KVCacheTorch, DistKVPool, BatchedDistKVCache
-from utils.prof_marker import prof_marker
-from utils.util_functions import tensor_offset_to_req_idx
+from nanoflow.operations.rope.help_functions import apply_rope
+from nanoflow.operations.operation_base import Operations, Operation_Layer
+from nanoflow.core.IOWrapper import IOWrapper
+from nanoflow.operations.impl_base import OperationImpl
+from nanoflow.utils.util_functions import tensor_offset_to_req_idx
 
 
 def _apply_rotary_emb_torch(
@@ -82,6 +77,7 @@ class RopeAppendTorchImpl(OperationImpl):
                 apply_rope(
                     self.rope_type,
                     self.theta,
+                    self.head_dim,
                     self.original_max_position_embeddings,
                     self.low_freq_factor,
                     self.high_freq_factor,
@@ -93,6 +89,7 @@ class RopeAppendTorchImpl(OperationImpl):
                 apply_rope(
                     self.rope_type,
                     self.theta,
+                    self.head_dim,
                     self.original_max_position_embeddings,
                     self.low_freq_factor,
                     self.high_freq_factor,
@@ -115,8 +112,8 @@ class RopeAppendTorch(Operations):
         self,
         name,
         device,
+        theta,
         rope_type="llama3",
-        theta=10000.0,
         factor=8.0,
         low_freq_factor=1.0,
         high_freq_factor=4.0,
@@ -164,6 +161,8 @@ class RopeAppendTorch(Operations):
         ))
         # The output "q" has shape [batch_size, num_qo_heads * head_dim]
         self.outputs["q"].init_shape((0, self.num_qo_heads * self.head_dim // self.tp_size))
+
+        return self
 
     def update(self, qo_indicies, decode_batchsize):
         if self.isNanoSplit:
@@ -214,64 +213,7 @@ class RopeAppendTorch(Operations):
 
     def profile_run(self):
         self.run(self.layer_list[0])
-
-    def profile(self):
-        input_kqv = torch.randn(2, (self.num_qo_heads + 2 * self.num_kv_heads) * self.head_dim, dtype=torch.float16, device='cuda')
-        output_list = []
-        for category_tag, impl in self.impl_map.items():
-            out = torch.zeros((2, self.num_qo_heads * self.head_dim), dtype=torch.float16, device='cuda')
-            # print("name:", category_tag)
-            if category_tag == "torch":
-                impl().run(0, self.head_dim, self.num_qo_heads, self.num_kv_heads, torch.tensor([0, 2], dtype=torch.int32).cuda(), input_kqv, [KVCacheNone()], self.rope_type, self.theta, self.original_max_position_embeddings, self.low_freq_factor, self.high_freq_factor, self.factor, out, False)
-
-                output_list.append(out)
-
-                impl().run(0, self.head_dim, self.num_qo_heads, self.num_kv_heads, torch.tensor([0, 2], dtype=torch.int32).cuda(), input_kqv, [KVCacheTorch()], self.rope_type, self.theta, self.original_max_position_embeddings, self.low_freq_factor, self.high_freq_factor, self.factor, out, False)
-
-            # print("out:", out)
-            output_list.append(out)
         
-        self.checkConsistencyBetweenImpl(output_list)
-        # print("RopeAppend profile passed")
-        rounds = 100
-        batch_sizes = [2, 4, 8, 16, 32, 64, 128, 256, 384, 512, 640, 768, 896, 1024]
-        for batch_size in batch_sizes:
-            output = torch.zeros((batch_size, self.num_qo_heads * self.head_dim), dtype=torch.float16, device='cuda')
-            for _, impl in self.impl_map.items():
-                impl_instance = impl()
-                category_tag = impl_instance.category_tag
-                if category_tag == "torch":
-                    kv_caches_choices = ['nokv', 'torch']
-                elif category_tag == "cuda":
-                    kv_caches_choices = ['flashinfer']
-
-                total_latency = 0
-                for kv_choice in kv_caches_choices:
-                    for round in range(rounds):
-                        input_kqv = torch.randn(batch_size, (self.num_qo_heads + 2 * self.num_kv_heads) * self.head_dim, dtype=torch.float16, device='cuda')
-                        if kv_choice == 'nokv':
-                            kv_caches = [KVCacheNone()]
-                        elif kv_choice == 'torch':
-                            kv_caches = [KVCacheTorch()]
-                        elif kv_choice == 'flashinfer':
-                            kv_pool = DistKVPool(1, self.num_kv_heads, self.head_dim, 2048, 7, 1)
-                            batchde_kv = BatchedDistKVCache(kv_pool, 0)
-                            kv_caches = [batchde_kv]
-
-                        start_time = time.time()
-                        impl_instance.run(0, self.head_dim, self.num_qo_heads, self.num_kv_heads, torch.tensor([0, batch_size], dtype=torch.int32).cuda(), input_kqv, kv_caches, self.rope_type, self.theta, self.original_max_position_embeddings, self.low_freq_factor, self.high_freq_factor, self.factor, output, False)
-                        if round > 0:
-                            total_latency += time.time() - start_time
-
-                    average_time = total_latency / rounds
-                    print("name: {}, batch_size: {}, average_time: {}".format(self.name + f"_{category_tag}" + f"with_{kv_caches[0].name}", batch_size, average_time))
-                    self.cursor.execute('''
-                    INSERT INTO performance (keyword, batch_size, average_time)
-                    VALUES (?, ?, ?)
-                    ''', (self.name + f"_{category_tag}" + f"with_{kv_caches[0].name}", batch_size, average_time))
-        self.conn.commit()
-        
-
 class RopeAppendTorch_Layer(Operation_Layer):
     def __init__(self, layer, base_op):
         super().__init__(layer, base_op)

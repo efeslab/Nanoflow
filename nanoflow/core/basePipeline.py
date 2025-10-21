@@ -6,7 +6,7 @@ from typing import Any, Optional, Iterable
 
 import torch
 
-from nanoflow.kvcache.kv import KVCacheNone, BatchedDistKVCache
+from nanoflow.kvcache.kv import KVCacheNone, KVCacheTorch, BatchedDistKVCache
 
 from nanoflow.core import WeightManager, CategoryType
 from nanoflow.core.bufferAllocate import BufferAllocator
@@ -92,7 +92,7 @@ class BasePipeline(ABC):
         self.world_rank = world_rank
         self.device = f"cuda:{world_rank}"
         self.categories = categories
-        self.kv_cache: Optional[KVCacheNone | BatchedDistKVCache] = None
+        self.kv_cache: Optional[KVCacheNone | KVCacheTorch | BatchedDistKVCache] = None
 
         # execution / profiling flags
         self.buffer_fixed: bool = False

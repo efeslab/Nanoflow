@@ -1,12 +1,9 @@
 import torch
 
-from operations.operation_base import Operations, Operation_Layer
-from utils.prof_marker import prof_marker
-from core.IOWrapper import IOWrapper
-from operations.impl_base import OperationImpl
-from kvcache.kv import KVCacheNone, KVCacheTorch, DistKVPool, BatchedDistKVCache
-from utils.util_functions import tensor_offset_to_req_idx
-import platform_config
+from nanoflow.operations.operation_base import Operations, Operation_Layer
+from nanoflow.core.IOWrapper import IOWrapper
+from nanoflow.operations.impl_base import OperationImpl
+from nanoflow.utils.util_functions import tensor_offset_to_req_idx
 
 
 class DecAttnTorchImpl(OperationImpl):
@@ -86,6 +83,8 @@ class DecAttnTorch(Operations):
         q_dim = num_qo_heads * head_dim // tp_size
         self.inputs["Q"].init_shape((0, q_dim))
         self.outputs["output"].init_shape((0, q_dim))
+
+        return self
     
     def update(self, qo_indicies):
         self.qo_indicies = qo_indicies
@@ -95,14 +94,15 @@ class DecAttnTorch(Operations):
 
         self.input_req_idx = self.externals["KVCache"].input_req_idx[start_req_idx:end_req_idx]
 
+    def run(self, layer):
+        self.impl.run(layer, self.inputs["Q"].tensor, self.externals["KVCache"], self.outputs["output"].tensor)
+
 class DecAttnTorch_Layer(Operation_Layer):
     def __init__(self, layer, base_op):
         super().__init__(layer, base_op)
 
     def run(self):
-        Q = self.inputs["Q"].tensor
-        # self.operator_device.parent.impl.run(Q, self.kv_tuple, self.outputs["output"].tensor)
-        self.impl.run(self.layer, Q, self.parent.externals["KVCache"], self.outputs["output"].tensor)
+        self.parent.run(self.layer)
     
 class PFAttnTorchImpl(OperationImpl):
     category_tag = "torch"
@@ -212,6 +212,8 @@ class PFAttnTorch(Operations):
         q_dim = num_qo_heads * head_dim // tp_size
         self.inputs["Q"].init_shape((0, q_dim))
         self.outputs["output"].init_shape((0, q_dim))
+
+        return self
     
     def update(self, qo_indicies):
         io = self.inputs["Q"]
@@ -220,13 +222,13 @@ class PFAttnTorch(Operations):
 
         self.qo_indicies = torch.tensor(qo_indicies[start_req_idx:end_req_idx + 1]) - io.tensor_offset
         self.input_req_idx = self.externals["KVCache"].input_req_idx[start_req_idx:end_req_idx]
-    
+
+    def run(self, layer):
+        self.impl.run(layer, self.qo_indicies, self.inputs["Q"].tensor, self.externals["KVCache"], self.outputs["output"].tensor)
 
 class PFAttnTorch_Layer(Operation_Layer):
     def __init__(self, layer, base_op):
         super().__init__(layer, base_op)
     
     def run(self):
-        Q = self.inputs["Q"].tensor
-        self.impl.run(self.layer, self.parent.qo_indicies, Q, self.externals["KVCache"], self.outputs["output"].tensor)
-        
+        self.parent.run(self.layer)

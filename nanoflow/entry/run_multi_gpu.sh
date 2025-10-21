@@ -1,6 +1,6 @@
 ########################## TP2 ##########################
-MODEL="8B"
-# MODEL="70B"
+# MODEL="8B"
+MODEL="70B"
 # MODEL="Qwen1.5-MoE-A2.7B-EP"
 # MODEL="Qwen2-57B-A14B-Instruct-EP"
 # MODEL="Qwen2-57B-A14B-Instruct-TP-EP"
@@ -9,19 +9,33 @@ TEST="correctness"
 # TEST="performance"
 # TEST="profile"
 
-EP_size=2
+EP_SIZE=2
+TP_SIZE=2
 
-TP_size=2
+# KVCacheType="none"
+# KVCacheType="torch"
+KV_CACHE_TYPE="flashinfer"
 
-nsys_profile_name="./nsys/qwen2-moe-57B-a14b-instruct_ep2_naive_impl"
+# NetworkType="allreduce"
+NETWORK_TYPE="allgather"
 
-TORCH_CUDA_ARCH_LIST="9.0" CUDA_VISIBLE_DEVICES=0,1 \
+# take effect when TEST is "performance"
+USE_CUDA_GRAPH=False
+USE_AUTO_SEARCH=False
+
+NSYS_PROFILE_NAME="./nsys/qwen2-moe-57B-a14b-instruct_ep2_naive_impl"
+
+TORCH_CUDA_ARCH_LIST="9.0" CUDA_VISIBLE_DEVICES=4,5 \
 MASTER_ADDR=localhost MASTER_PORT=12555 \
 python test_multi_gpu.py \
 --model "$MODEL" \
 --test "$TEST" \
---tensor_parallel_size "$TP_size" \
---expert_parallel_size "$EP_size"
+--tensor_parallel_size "$TP_SIZE" \
+--expert_parallel_size "$EP_SIZE" \
+--kvcache_type "$KV_CACHE_TYPE" \
+--network_type "$NETWORK_TYPE" \
+--cuda_graph "$USE_CUDA_GRAPH" \
+--auto_search "$USE_AUTO_SEARCH"
 
 # TORCH_CUDA_ARCH_LIST="9.0" CUDA_VISIBLE_DEVICES=4,5 \
 # MASTER_ADDR=localhost MASTER_PORT=12555 \
@@ -29,26 +43,3 @@ python test_multi_gpu.py \
 # --model "$MODEL" \
 # --test "$TEST" \
 # --expert_parallel_size "$EP_size"
-
-# TORCH_CUDA_ARCH_LIST="9.0" CUDA_VISIBLE_DEVICES=0,1,2,3 MASTER_ADDR=localhost MASTER_PORT=12548 nsys profile -o ./nsys/llama3-70B_naive_impl python test_multi_gpu3.py
-# TORCH_CUDA_ARCH_LIST="9.0" CUDA_VISIBLE_DEVICES=0,1,2,3 MASTER_ADDR=localhost MASTER_PORT=12548 nsys profile -o ./nsys/llama3-70B_2way_auto_search python test_multi_gpu3.py
-# TORCH_CUDA_ARCH_LIST="9.0" CUDA_VISIBLE_DEVICES=0,1,2,3 MASTER_ADDR=localhost MASTER_PORT=12548 nsys profile -o ./nsys/llama3-70B_2way_auto_search_cuda_graph python test_multi_gpu3.py
-# TORCH_CUDA_ARCH_LIST="9.0" CUDA_VISIBLE_DEVICES=0,1,2,3 MASTER_ADDR=localhost MASTER_PORT=12548 nsys profile --cuda-graph-trace node -o ./nsys/llama3-70B_2way_auto_search_cuda_graph_node_mode_%n python test_multi_gpu3.py
-# TORCH_CUDA_ARCH_LIST="9.0" CUDA_VISIBLE_DEVICES=1,2,3,4 MASTER_ADDR=localhost MASTER_PORT=12548 nsys profile -o ./nsys/test_multi_gpu_use_auto_search_cuda_graph_%n python test_multi_gpu3.py
-# TORCH_CUDA_ARCH_LIST="9.0" CUDA_VISIBLE_DEVICES=0,1 MASTER_ADDR=localhost MASTER_PORT=12548 nsys profile -o ./nsys/test_nccl_wrapper_%n python test_multi_gpu3.py --tensor_parallel_size 2
-# TORCH_CUDA_ARCH_LIST="9.0" CUDA_VISIBLE_DEVICES=1,2 MASTER_ADDR=localhost MASTER_PORT=12555 python test_multi_gpu3.py --model 8B --test correctness --tensor_parallel_size 2
-# TORCH_CUDA_ARCH_LIST="9.0"  CUDA_VISIBLE_DEVICES=1,2 MASTER_ADDR=localhost MASTER_PORT=12555 python test_multi_gpu3.py --model Qwen1.5-MoE-A2.7B-EP --test correctness --expert_parallel_size 2
-
-
-
-########################### TP4 ##########################
-# TORCH_CUDA_ARCH_LIST="9.0" CUDA_VISIBLE_DEVICES=0,1,2,3 MASTER_ADDR=localhost MASTER_PORT=12548 nsys profile -o ./nsys/llama3-8B_naive_impl_%n python test_multi_gpu3.py --model 8B --test performance --tensor_parallel_size 4
-# TORCH_CUDA_ARCH_LIST="9.0" CUDA_VISIBLE_DEVICES=0,1,2,3 MASTER_ADDR=localhost MASTER_PORT=12548 nsys profile -o ./nsys/llama3-70B_2way_auto_search_%n python test_multi_gpu3.py --model 70B --test performance --tensor_parallel_size 4
-# TORCH_CUDA_ARCH_LIST="9.0" CUDA_VISIBLE_DEVICES=0,1,2,3 MASTER_ADDR=localhost MASTER_PORT=12548 nsys profile -o ./nsys/llama3-70B_2way_auto_search_cuda_graph_%n python test_multi_gpu3.py --model 70B --test performance --tensor_parallel_size 4
-# TORCH_CUDA_ARCH_LIST="9.0" CUDA_VISIBLE_DEVICES=0,1,2,3 MASTER_ADDR=localhost MASTER_PORT=12548 nsys profile --cuda-graph-trace node -o ./nsys/llama3-70B_2way_auto_search_cuda_graph_node_mode_%n python test_multi_gpu3.py --model 70B --test performance --tensor_parallel_size 4
-# TORCH_CUDA_ARCH_LIST="9.0" CUDA_VISIBLE_DEVICES=1,2,3,4 MASTER_ADDR=localhost MASTER_PORT=12548 nsys profile -o ./nsys/test_multi_gpu_use_auto_search_cuda_graph_%n python test_multi_gpu3.py
-# TORCH_CUDA_ARCH_LIST="9.0" CUDA_VISIBLE_DEVICES=0,1,2,3 MASTER_ADDR=localhost MASTER_PORT=12548 python test_multi_gpu3.py --model 70B --test correctness --tensor_parallel_size 4
-
-########################### TP8 ##########################
-# TORCH_CUDA_ARCH_LIST="9.0" MASTER_ADDR=localhost MASTER_PORT=12550 python test_multi_gpu3.py --model 70B --test performance --tensor_parallel_size 8
-# TORCH_CUDA_ARCH_LIST="9.0" MASTER_ADDR=localhost MASTER_PORT=12550 nsys profile -o ./nsys/llama70B_tp8_naive python test_multi_gpu3.py --model 70B --test performance --tensor_parallel_size 8

@@ -23,12 +23,13 @@ class Llama3_70B_Config(PipelineConfig):
         dp_size = 1,
         dp_rank = 0,
         kv_cache_type = "flashinfer",
+        network_type = "allreduce",
         unique_nccl_ids = [],
     ):
         self.multi_gpu_mode = multi_gpu_mode
         
         if multi_gpu_mode:
-            self.pipeline_name = f"Llama3-70B-{kv_cache_type}-allreduce-TP{tp_size}-PP{pp_size}-DP{dp_size}"
+            self.pipeline_name = f"Llama3-70B-{kv_cache_type}-{network_type}-TP{tp_size}-PP{pp_size}-DP{dp_size}"
         else:
             self.pipeline_name = f"Llama3-70B-{kv_cache_type}"
         self.cached_weight_dir = f"../cached_weights/{self.pipeline_name}"
@@ -53,4 +54,5 @@ class Llama3_70B_Config(PipelineConfig):
         self.dp_size = dp_size
         self.dp_rank = dp_rank
         self.kv_cache_type = kv_cache_type
+        self.network_type = network_type
         self.unique_nccl_ids = unique_nccl_ids

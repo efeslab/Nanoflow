@@ -10,6 +10,7 @@ from .expand_add.expand_add import ExpandAdd
 
 
 from .activation.silu import Activation
+from .allgather.allgather import AllGather
 from .allreduce.allreduce import AllReduce
 from .embedding.embedding import GenEmbedding
 from .globalOp.globalOp import GlobalInput, GlobalOutput
@@ -19,10 +20,14 @@ from .fused_moe.fused_moe import FusedMoE
 from .norm.rmsnorm import LayerNorm
 from .sampling.max_sampling import Sampling
 from .rope.rope_flashinfer import RopeAppendFlashinfer
+from .rope.rope_torch import RopeAppendTorch
 from .attention.llamaAttention_flashinfer import (
     DecAttnFlashinfer,
     PFAttnFlashinfer,
 )
-
+from .attention.llamaAttention_torch import (
+    DecAttnTorch,
+    PFAttnTorch,
+)
 
 from .virtualOp.virtual_ops import Copy, Redist
