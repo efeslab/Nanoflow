@@ -31,15 +31,18 @@ class Qwen2MoEConfig(PipelineConfig):
         ep_size = 1,
         ep_rank = 0,
         kv_cache_type = "flashinfer",
+        network_type = "allreduce",
         unique_nccl_ids = [],
     ):
         self.multi_gpu_mode = multi_gpu_mode
         
         if multi_gpu_mode:
-            self.pipeline_name = f"Qwen2-MoE-{kv_cache_type}-allreduce-TP{tp_size}-PP{pp_size}-DP{dp_size}-EP{ep_size}"
+            self.pipeline_name = f"Qwen2-MoE-{kv_cache_type}-{network_type}-TP{tp_size}-PP{pp_size}-DP{dp_size}-EP{ep_size}"
+            self.cache_weight_name = f"Qwen2-MoE-TP{tp_size}-PP{pp_size}-DP{dp_size}-EP{ep_size}"
         else:
             self.pipeline_name = f"Qwen2-MoE-{kv_cache_type}"
-        self.cached_weight_dir = f"../cached_weights/{self.pipeline_name}"
+            self.cache_weight_name = "Qwen2-MoE"
+        self.cached_weight_dir = f"../cached_weights/{self.cache_weight_name}"
         self.profile_dir = f"../profile_data/{self.pipeline_name}"
 
         self.vocab_size = vocab_size

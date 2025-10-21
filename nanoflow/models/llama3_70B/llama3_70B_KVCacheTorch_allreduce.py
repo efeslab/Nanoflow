@@ -1,7 +1,5 @@
-import copy
-import json
-from typing import Any, Optional
 import torch
+import torch.distributed as dist
 
 from nanoflow.operations import NanoOpInfo
 
@@ -11,24 +9,28 @@ from nanoflow.operations import (
     GenEmbedding,
     LayerNorm,
     GEMM_N_Parallel,
+    GEMM_K_Parallel,
     RopeAppendTorch,
     DecAttnTorch,
     PFAttnTorch,
     Activation,
+    AllReduce,
     Sampling,
     Copy,
     Redist,
 )
+
 from nanoflow.kvcache.kv import KVCacheTorch
+
 from nanoflow.core.basePipeline import BasePipeline
 from nanoflow.core import CategoryType
 from nanoflow.core.nanobatchSplit import split_nanobatch
 
-from .config_llama3_8B import Llama3_8B_Config
+from .config_llama3_70B import Llama3_70B_Config
 
 
 class Pipeline(BasePipeline):
-    def __init__(self, cfg: Llama3_8B_Config) -> None:
+    def __init__(self, cfg: Llama3_70B_Config) -> None:
         # Set parameters as instance variables.
         super().__init__(
             pipeline_name=cfg.pipeline_name,
@@ -50,12 +52,15 @@ class Pipeline(BasePipeline):
         self.rms_norm_eps = cfg.rms_norm_eps
         self.rope_theta = cfg.rope_theta
         self.page_size = cfg.page_size
+        self.tp_size = cfg.tp_size
+        self.tp_rank = cfg.tp_rank
+        self.unique_nccl_ids = cfg.unique_nccl_ids
 
         self.kqv_heads = self.num_qo_heads + 2 * self.num_kv_heads
 
     def init_external_data(self) -> None:
         print("Initializing external data...")
-        self.kv_cache = KVCacheTorch(self.num_kv_heads, self.head_dim)
+        self.kv_cache = KVCacheTorch(self.num_kv_heads, self.head_dim, tp_size=self.tp_size)
 
     def init_operations(self) -> None:
         self.global_input = (
@@ -90,39 +95,48 @@ class Pipeline(BasePipeline):
             ]
         ).setShape(
             self.kqv_heads * self.head_dim,
-            self.hidden_dim
+            self.hidden_dim,
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
         ).setParameter(1.0, 0.0)
         self.kqv_layers = self.kqv.expand_layer(self.layer_list)
         self.original_model_operations.append(self.kqv)
 
         self.ropeAppend = RopeAppendTorch("RopeAppend", self.device, theta=self.rope_theta).setShape(
-            self.num_kv_heads, self.num_qo_heads, self.head_dim
+            self.num_kv_heads, self.num_qo_heads, self.head_dim, tp_size=self.tp_size
         )
         self.ropeAppend.externals["KVCache"] = self.kv_cache
         self.ropeAppend_layers = self.ropeAppend.expand_layer(self.layer_list)
         self.original_model_operations.append(self.ropeAppend)
 
         self.decAttn = DecAttnTorch("DecAttn", self.device).setShape(
-            self.num_kv_heads, self.num_qo_heads, self.head_dim
+            self.num_kv_heads, self.num_qo_heads, self.head_dim, tp_size=self.tp_size
         )
         self.decAttn.externals["KVCache"] = self.kv_cache
         self.decAttn_layers = self.decAttn.expand_layer(self.layer_list)
         self.original_model_operations.append(self.decAttn)
 
         self.pfAttn = PFAttnTorch("PFAttn", self.device).setShape(
-            self.num_kv_heads, self.num_qo_heads, self.head_dim
+            self.num_kv_heads, self.num_qo_heads, self.head_dim, tp_size=self.tp_size
         )
         self.pfAttn.externals["KVCache"] = self.kv_cache
         self.pfAttn_layers = self.pfAttn.expand_layer(self.layer_list)
         self.original_model_operations.append(self.pfAttn)
 
-        self.o = GEMM_N_Parallel("O", self.device, bias=True).setWeightName(
+        self.o = GEMM_K_Parallel("O", self.device, bias=True).setWeightName(
             "model.layers.{layer}.self_attn.o_proj.weight"
         ).setShape(
-            self.hidden_dim, self.hidden_dim
-        ).setParameter(1.0, 1.0)
+            self.hidden_dim, self.hidden_dim, tp_rank=self.tp_rank, tp_size=self.tp_size
+        ).setParameter(1.0, 1.0 / self.tp_size)
         self.o_layers = self.o.expand_layer(self.layer_list)
         self.original_model_operations.append(self.o)
+
+        self.allReduce_o = AllReduce("AllReduceO", self.device).setShape(
+            self.hidden_dim, rank=self.tp_rank, world_size=self.tp_size
+        )
+        self.allReduce_o_layers = self.allReduce_o.expand_layer(
+            self.layer_list)
+        self.original_model_operations.append(self.allReduce_o)
 
         self.layerNormFFN = LayerNorm(
             "LayerNormFFN", device=self.device, eps=self.rms_norm_eps
@@ -133,30 +147,41 @@ class Pipeline(BasePipeline):
 
         self.ug = GEMM_N_Parallel("UG", self.device).setWeightName(
             [
-            "model.layers.{layer}.mlp.up_proj.weight",
+                "model.layers.{layer}.mlp.up_proj.weight",
                 "model.layers.{layer}.mlp.gate_proj.weight",
             ]
         ).setShape(
             self.intermediate_dim * 2,
-            self.hidden_dim
+            self.hidden_dim,
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
         ).setParameter(1.0, 0.0)
         self.ug_layers = self.ug.expand_layer(self.layer_list)
         self.original_model_operations.append(self.ug)
 
         self.activation = Activation("Activation", self.device).setShape(
-            self.intermediate_dim
+            self.intermediate_dim, tp_rank=self.tp_rank, tp_size=self.tp_size
         )
         self.activation_layers = self.activation.expand_layer(self.layer_list)
         self.original_model_operations.append(self.activation)
 
-        self.d = GEMM_N_Parallel("D", self.device, bias=True).setWeightName(
+        self.d = GEMM_K_Parallel("D", self.device, bias=True).setWeightName(
             "model.layers.{layer}.mlp.down_proj.weight"
         ).setShape(
             self.hidden_dim,
-            self.intermediate_dim
-        ).setParameter(1.0, 1.0)
+            self.intermediate_dim,
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
+        ).setParameter(1.0, 1.0 / self.tp_size)
         self.d_layers = self.d.expand_layer(self.layer_list)
         self.original_model_operations.append(self.d)
+
+        self.allReduce_d = AllReduce("AllReduceD", self.device).setShape(
+            self.hidden_dim, rank=self.tp_rank, world_size=self.tp_size
+        )
+        self.allReduce_d_layers = self.allReduce_d.expand_layer(
+            self.layer_list)
+        self.original_model_operations.append(self.allReduce_d)
 
         self.getLogits = (
             GEMM_N_Parallel("GetLogits", self.device)
@@ -238,7 +263,9 @@ class Pipeline(BasePipeline):
         self.pfAttn.outputs["output"] >> self.redist_a.inputs["input_1"]
         self.redist_a.outputs["output_0"] >> self.o.inputs["A"]
 
-        self.o.outputs["D"] >> self.copy_o.inputs["input_0"]
+        self.o.outputs["D"] >> self.allReduce_o.inputs["input"]
+        self.allReduce_o.outputs["output"] >> self.copy_o.inputs["input_0"]
+
         self.copy_o.outputs["output_0"] >> self.layerNormFFN.inputs["input"]
         self.copy_o.outputs["output_1"] >> self.d.inputs["C"]
 
@@ -248,10 +275,11 @@ class Pipeline(BasePipeline):
 
         self.activation.outputs["output"] >> self.d.inputs["A"]
 
-        self.d.outputs["D"] >> self.copy_d.inputs["input_0"]
-        self.copy_d.outputs["output_0"] >> (
-            self.copy_embedding.inputs["input_1"], True)
-        self.copy_d.outputs["output_1"] >> self.modelLayerNorm.inputs["input"]
+        self.d.outputs["D"] >> self.allReduce_d.inputs["input"]
+        self.allReduce_d.outputs["output"] >> self.copy_d.inputs["input_0"]
+
+        self.copy_d.outputs["output_0"] >> self.modelLayerNorm.inputs["input"]
+        self.copy_d.outputs["output_1"] >> (self.copy_embedding.inputs["input_1"], True)
 
         self.modelLayerNorm.outputs["output"] >> self.getLogits.inputs["A"]
 
@@ -267,14 +295,15 @@ class Pipeline(BasePipeline):
         self.layerNormAttn.set_category(CategoryType.COMP)
         self.kqv.set_category(CategoryType.COMP)
         self.ropeAppend.set_category(CategoryType.COMP)
-        self.decAttn.set_category(CategoryType.MEM)
+        self.decAttn.set_category(CategoryType.COMP)
         self.pfAttn.set_category(CategoryType.COMP)
         self.layerNormFFN.set_category(CategoryType.COMP)
         self.o.set_category(CategoryType.COMP)
+        self.allReduce_o.set_category(CategoryType.NET)
         self.ug.set_category(CategoryType.COMP)
         self.activation.set_category(CategoryType.COMP)
         self.d.set_category(CategoryType.COMP)
-
+        self.allReduce_d.set_category(CategoryType.NET)
 
     def apply_batch_size(self) -> None:
         print(
@@ -311,68 +340,43 @@ class Pipeline(BasePipeline):
             self.pfAttn.config_tag("torch", params)
             self.layerNormFFN.config_tag("torch", params)
             self.o.config_tag("torch", params)
+            self.allReduce_o.config_tag("torch", params)
             self.ug.config_tag("torch", params)
             self.activation.config_tag("torch", params)
             self.d.config_tag("torch", params)
+            self.allReduce_d.config_tag("torch", params)
 
         self.getLogits.config_tag("torch", params)
         self.modelLayerNorm.config_tag("torch", params)
         self.sample.config_tag("torch", params)
 
-    def nanobatch_split(self) -> None:
-        op_nanobatch_info_map: dict[str, tuple[NanoOpInfo, ...]] = {}
-        extra_links: dict[str, list[tuple[str, bool]]] = {}
-        if self.is_auto_search_enabled:
-            operations = self.profile_result["operations"]
-            for op_basename, op_info in operations.items():
-                split_info_list = []
-                for nano_op_name, nano_op_info in op_info.items():
-                    split_info_list.append(
-                        NanoOpInfo(
-                            batch_idx=nano_op_info["batch_idx"],
-                            batch_size=nano_op_info["batch_size"],
-                        )
-                    )
-                    extra_links[nano_op_name] = nano_op_info["extra_dep"]
-
-                op_nanobatch_info_map[op_basename] = tuple(split_info_list)
-        else:
-            info = (
-                NanoOpInfo(batch_idx=0, batch_size=self.decode_batch_size),
-                NanoOpInfo(
-                    batch_idx=1,
-                    batch_size=self.global_batch_size - self.decode_batch_size,
-                ),
-            )
-            op_nanobatch_info_map = {
-                "LayerNormAttn": copy.deepcopy(info),
-                "KQV": copy.deepcopy(info),
-                "RopeAppend": copy.deepcopy(info),
-                "O": copy.deepcopy(info),
-                "LayerNormFFN": copy.deepcopy(info),
-                "UG": copy.deepcopy(info),
-                "Activation": copy.deepcopy(info),
-                "D": copy.deepcopy(info),
-            }
-            extra_links = {
-                # TODO: add extra links for virtual ops
-                # "KQV0": "KQV1",
-                # "RopeAppend0": "RopeAppend1",
-                "RopeAppend0": [("O1", False)],
-                "RopeAppend1": [("O0", True)],
-            }
-
-        model_ops, addtional_virtual_ops = split_nanobatch(
-            self.original_model_operations, op_nanobatch_info_map, extra_links
+    def config_network(self) -> None:
+        dist.init_process_group(
+            backend="nccl", rank=self.world_rank, world_size=self.world_size
         )
-        self.model_operations = model_ops
-        self.all_operations = []
-        self.all_layer_operations = []
-        for op in model_ops + self.virtual_operations + addtional_virtual_ops:
-            print("op.name", op.name, op.batch_size)
-            self.all_operations.append(op)
-        for operation in model_ops:
-            self.all_layer_operations.extend(operation.children)
+        tp_group_idx = self.tp_rank // self.tp_size
+        print("tp_group_idx: ", tp_group_idx, "tp_size: ", self.tp_size)
+        self.tp_group = dist.new_group(
+            ranks=[
+                i
+                for i in range(
+                    tp_group_idx *
+                    self.tp_size, (tp_group_idx + 1) * self.tp_size
+                )
+            ]
+        )
+        # print("tp_group in main: ", self.tp_group)
+        print("Updating network operations with NCCL IDs...")
+        # print("original unique_nccl_ids: ", self.unique_nccl_ids)
+        self.allReduce_o.update(
+            self.tp_group, self.tp_rank, self.tp_size, self.unique_nccl_ids[0:5]
+        )
+        self.allReduce_d.update(
+            self.tp_group, self.tp_rank, self.tp_size, self.unique_nccl_ids[5:10]
+        )
+
+    def nanobatch_split(self, total_batchsize, decode_batch_size):
+        pass
 
     def post_update_ops(self, input_req_idx: list[int], input_tensor: torch.Tensor, cumsum_input: list[int], decode_batch_size: int) -> None:
         assert self.kv_cache is not None, "KV cache not initialized"

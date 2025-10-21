@@ -15,8 +15,8 @@ except ImportError:
     import numpy as np
 
 class WeightManager():
-    def __init__(self, pipeline_name, cached_weight_dir, weight_path, cached, device):
-        self.pipeline_name = pipeline_name
+    def __init__(self, cache_weight_name, cached_weight_dir, weight_path, cached, device):
+        self.cache_weight_name = cache_weight_name
         self.cached = cached
         self.cached_weight_dir = cached_weight_dir
         self.weight_map = {}
@@ -40,8 +40,8 @@ class WeightManager():
     
     def load_from_disk(self, device):
         print("load weight from disk")
-        meta_data = json.load(open(os.path.join(self.cached_weight_dir, f"{self.pipeline_name}_{device}_metadata.json"), "r"))
-        file = os.path.join(self.cached_weight_dir, f"{self.pipeline_name}_{device}.bin")
+        meta_data = json.load(open(os.path.join(self.cached_weight_dir, f"{self.cache_weight_name}_{device}_metadata.json"), "r"))
+        file = os.path.join(self.cached_weight_dir, f"{self.cache_weight_name}_{device}.bin")
         start_load_time = time.time()
         # use torch.load to load the tensor
         if USE_FAST_URING:
@@ -94,10 +94,10 @@ class WeightManager():
             for t, offset in zip(self.processed_weight_map.values(), offsets):
                 flat[offset:offset + t.numel()].copy_(t.contiguous().view(-1))
 
-            with open(os.path.join(self.cached_weight_dir, f"{self.pipeline_name}_{device}.bin"), "wb") as f:
+            with open(os.path.join(self.cached_weight_dir, f"{self.cache_weight_name}_{device}.bin"), "wb") as f:
                 f.write(flat.numpy().tobytes())
 
-            json.dump(self.processed_weight_metadata, open(os.path.join(self.cached_weight_dir, f"{self.pipeline_name}_{device}_metadata.json"), "w"))
+            json.dump(self.processed_weight_metadata, open(os.path.join(self.cached_weight_dir, f"{self.cache_weight_name}_{device}_metadata.json"), "w"))
             # breakpoint()
         
         print(f"set weight time: {time.time() - start_time:.2f}s")

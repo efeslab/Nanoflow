@@ -1,6 +1,7 @@
 # Pick one:
-MODEL="8B"
-# MODEL="Qwen1.5-MoE-A2.7B"
+# MODEL="Llama3-8B"
+# MODEL="Llama3-70B"
+MODEL="Qwen1.5-MoE-A2.7B"
 # MODEL="Qwen2-57B-A14B-Instruct"
 
 # Pick one:
@@ -9,18 +10,19 @@ TEST="correctness"
 
 # Pick one:
 # KVCacheType="none"
-KVCacheType="torch"
-# KVCacheType="flashinfer"
+# KVCacheType="torch"
+KVCacheType="flashinfer"
 
+NSYS_PROFILE_NAME="./nsys/llama3-8B_flashinfer_impl"
 
-TORCH_CUDA_ARCH_LIST=9.0 CUDA_VISIBLE_DEVICES=4 \
+TORCH_CUDA_ARCH_LIST=9.0 CUDA_VISIBLE_DEVICES=7 \
 python test_one_gpu.py \
   --model "$MODEL" \
   --test "$TEST"\
   --kvcache_type "$KVCacheType"
 
-# TORCH_CUDA_ARCH_LIST="9.0" CUDA_VISIBLE_DEVICES=6 nsys profile -o nsys/qwen2-moe-naive-impl python run_llama3.py --model Qwen1.5-MoE-A2.7B --test performance
-# TORCH_CUDA_ARCH_LIST="9.0" CUDA_VISIBLE_DEVICES=0 nsys profile -o llama3-8B_naive_impl python run_llama3.py
-# TORCH_CUDA_ARCH_LIST="9.0" CUDA_VISIBLE_DEVICES=0 nsys profile -o llama3-8B_auto_search python run_llama3.py
-# TORCH_CUDA_ARCH_LIST="9.0" CUDA_VISIBLE_DEVICES=0 nsys profile -o llama3-8B_auto_search_cuda_graph python run_llama3.py
-# TORCH_CUDA_ARCH_LIST="9.0" CUDA_VISIBLE_DEVICES=0 nsys profile --cuda-graph-trace node -o llama3-8B_auto_search_cuda_graph_node_mode python run_llama3.py
+TORCH_CUDA_ARCH_LIST=9.0 CUDA_VISIBLE_DEVICES=7 \
+nsys profile -o "$NSYS_PROFILE_NAME" python test_one_gpu.py \
+  --model "$MODEL" \
+  --test "$TEST"\
+  --kvcache_type "$KVCacheType"

@@ -76,6 +76,7 @@ class BasePipeline(ABC):
     def __init__(
         self,
         pipeline_name: str,
+        cache_weight_name: str,
         cached_weight_dir: str,
         profile_dir: str,
         num_layers: int,
@@ -84,6 +85,7 @@ class BasePipeline(ABC):
         categories: list[CategoryType] = [CategoryType.COMP, CategoryType.MEM],
     ) -> None:
         self.pipeline_name = pipeline_name
+        self.cache_weight_name = cache_weight_name
         self.cached_weight_dir = cached_weight_dir
         self.profile_dir = profile_dir
         self.num_layers = num_layers
@@ -136,7 +138,7 @@ class BasePipeline(ABC):
 
     def init_set_weight(self, weight_path: str, cached: bool) -> None:
         weight_manager = WeightManager(
-            self.pipeline_name,
+            self.cache_weight_name,
             self.cached_weight_dir,
             weight_path,
             cached,

@@ -13,7 +13,7 @@ from gurobipy import GRB
 
 
 class Operations:
-    def __init__(self, name: str, device: str, nano_idx=None):
+    def __init__(self, name: str, device: str, nano_idx: int | None = None):
         # should be initialized in the device class
         self.inputs: dict[str, IOWrapper] = {}
         self.outputs: dict[str, IOWrapper] = {}
@@ -23,10 +23,7 @@ class Operations:
 
         # remain in this class
         self.original_name = name
-        if nano_idx is not None:
-            self.name = f"{name}{nano_idx}"
-        else:
-            self.name = name
+        self.name = f"{name}{nano_idx}" if nano_idx is not None else name
 
         self.first_layer_only = False
         self.last_layer_only = False

@@ -247,7 +247,6 @@ arg_parser.add_argument(
 )
 arg_parser.add_argument(
     "--model",
-    choices=["8B", "Qwen1.5-MoE-A2.7B", "Qwen2-57B-A14B-Instruct"],
     default="8B",
     help="Pick which Pipeline to instantiate",
 )
@@ -274,10 +273,9 @@ print("Parse all args: ", args)
 #     new_input_ids.append((req.req_idx, req.prompt))
 # print("new_input_ids: ", new_input_ids)
 
-if args.model == "8B":
+if args.model == "Llama3-8B":
     MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"
     from nanoflow.models.llama3_8B.config_llama3_8B import Llama3_8B_Config as Config
-    cfg = Config(kv_cache_type=args.kvcache_type)
     if args.kvcache_type == "flashinfer":
         from nanoflow.models.llama3_8B.llama3_FlashinferKVCache import Pipeline
     elif args.kvcache_type == "torch":
@@ -285,10 +283,24 @@ if args.model == "8B":
     else:
         raise NotImplementedError(
             f"KVCache type {args.kvcache_type} not implemented yet.")
-
+    
+    cfg = Config(kv_cache_type=args.kvcache_type)
     weight_map = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
     auto_search_path = "../auto_search/8B_search_result_large_btz.json"
-
+elif args.model == "Llama3-70B":
+    MODEL_ID = "meta-llama/Meta-Llama-3-70B-Instruct"
+    from nanoflow.models.llama3_70B.config_llama3_70B import Llama3_70B_Config as Config
+    if args.kvcache_type == "flashinfer":
+        from nanoflow.models.llama3_70B.llama3_70B_FlashinferKVCache import Pipeline
+    elif args.kvcache_type == "torch":
+        raise NotImplementedError(
+            f"KVCache type {args.kvcache_type} not implemented yet.")
+    else:
+        raise NotImplementedError(
+            f"KVCache type {args.kvcache_type} not implemented yet.")
+    cfg = Config(kv_cache_type=args.kvcache_type)
+    weight_map = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
+    auto_search_path = None
 elif args.model == "Qwen1.5-MoE-A2.7B":
     MODEL_ID = "Qwen/Qwen1.5-MoE-A2.7B"
     from nanoflow.models.qwen2_moe.qwen2_moe import Pipeline

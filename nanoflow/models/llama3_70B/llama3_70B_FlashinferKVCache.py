@@ -11,24 +11,24 @@ from nanoflow.operations import (
     GenEmbedding,
     LayerNorm,
     GEMM_N_Parallel,
-    RopeAppendTorch,
-    DecAttnTorch,
-    PFAttnTorch,
+    RopeAppendFlashinfer,
+    DecAttnFlashinfer,
+    PFAttnFlashinfer,
     Activation,
     Sampling,
     Copy,
     Redist,
 )
-from nanoflow.kvcache.kv import KVCacheTorch
+
+from nanoflow.kvcache.kv import DistKVPool, BatchedDistKVCache
+
 from nanoflow.core.basePipeline import BasePipeline
 from nanoflow.core import CategoryType
 from nanoflow.core.nanobatchSplit import split_nanobatch
 
-from .config_llama3_8B import Llama3_8B_Config
-
-
+from .config_llama3_70B import Llama3_70B_Config
 class Pipeline(BasePipeline):
-    def __init__(self, cfg: Llama3_8B_Config) -> None:
+    def __init__(self, cfg: Llama3_70B_Config) -> None:
         # Set parameters as instance variables.
         super().__init__(
             pipeline_name=cfg.pipeline_name,
@@ -52,10 +52,19 @@ class Pipeline(BasePipeline):
         self.page_size = cfg.page_size
 
         self.kqv_heads = self.num_qo_heads + 2 * self.num_kv_heads
-
+        
     def init_external_data(self) -> None:
         print("Initializing external data...")
-        self.kv_cache = KVCacheTorch(self.num_kv_heads, self.head_dim)
+        self.kv_pool = DistKVPool(
+            self.num_layers,
+            self.num_kv_heads,
+            self.head_dim,
+            512,
+            self.page_size,
+            1,
+            self.device,
+        )
+        self.kv_cache = BatchedDistKVCache(self.kv_pool)
 
     def init_operations(self) -> None:
         self.global_input = (
@@ -95,21 +104,23 @@ class Pipeline(BasePipeline):
         self.kqv_layers = self.kqv.expand_layer(self.layer_list)
         self.original_model_operations.append(self.kqv)
 
-        self.ropeAppend = RopeAppendTorch("RopeAppend", self.device, theta=self.rope_theta).setShape(
+        self.ropeAppend = RopeAppendFlashinfer(
+            "RopeAppend", self.device, theta=self.rope_theta
+        ).setShape(
             self.num_kv_heads, self.num_qo_heads, self.head_dim
         )
         self.ropeAppend.externals["KVCache"] = self.kv_cache
         self.ropeAppend_layers = self.ropeAppend.expand_layer(self.layer_list)
         self.original_model_operations.append(self.ropeAppend)
 
-        self.decAttn = DecAttnTorch("DecAttn", self.device).setShape(
+        self.decAttn = DecAttnFlashinfer("DecAttn", self.device).setShape(
             self.num_kv_heads, self.num_qo_heads, self.head_dim
         )
         self.decAttn.externals["KVCache"] = self.kv_cache
         self.decAttn_layers = self.decAttn.expand_layer(self.layer_list)
         self.original_model_operations.append(self.decAttn)
 
-        self.pfAttn = PFAttnTorch("PFAttn", self.device).setShape(
+        self.pfAttn = PFAttnFlashinfer("PFAttn", self.device).setShape(
             self.num_kv_heads, self.num_qo_heads, self.head_dim
         )
         self.pfAttn.externals["KVCache"] = self.kv_cache
@@ -133,7 +144,7 @@ class Pipeline(BasePipeline):
 
         self.ug = GEMM_N_Parallel("UG", self.device).setWeightName(
             [
-            "model.layers.{layer}.mlp.up_proj.weight",
+                "model.layers.{layer}.mlp.up_proj.weight",
                 "model.layers.{layer}.mlp.gate_proj.weight",
             ]
         ).setShape(
@@ -292,7 +303,7 @@ class Pipeline(BasePipeline):
             "use_cuda_graph": self.is_cuda_graph_enabled,
         }
 
-        self.gen_embedding.config_tag("torch", params)
+        self.gen_embedding.config_tag("cuda", params)
 
         if self.is_auto_search_enabled:
             for op in self.model_operations:
@@ -304,75 +315,24 @@ class Pipeline(BasePipeline):
                     ]["algo_tag"]
                     op.config_tag(algo_tag, params)
         else:
-            self.layerNormAttn.config_tag("torch", params)
+            self.layerNormAttn.config_tag("cuda", params)
             self.kqv.config_tag("torch", params)
-            self.ropeAppend.config_tag("torch:withKVCache", params)
-            self.decAttn.config_tag("torch", params)
-            self.pfAttn.config_tag("torch", params)
-            self.layerNormFFN.config_tag("torch", params)
+            self.ropeAppend.config_tag("cuda", params)
+            self.decAttn.config_tag("batched_cuda", params)
+            self.pfAttn.config_tag("batched_cuda", params)
+            self.layerNormFFN.config_tag("cuda", params)
             self.o.config_tag("torch", params)
             self.ug.config_tag("torch", params)
-            self.activation.config_tag("torch", params)
+            self.activation.config_tag("cuda", params)
             self.d.config_tag("torch", params)
 
         self.getLogits.config_tag("torch", params)
-        self.modelLayerNorm.config_tag("torch", params)
-        self.sample.config_tag("torch", params)
+        self.modelLayerNorm.config_tag("cuda", params)
+        self.sample.config_tag("cuda", params)
+
 
     def nanobatch_split(self) -> None:
-        op_nanobatch_info_map: dict[str, tuple[NanoOpInfo, ...]] = {}
-        extra_links: dict[str, list[tuple[str, bool]]] = {}
-        if self.is_auto_search_enabled:
-            operations = self.profile_result["operations"]
-            for op_basename, op_info in operations.items():
-                split_info_list = []
-                for nano_op_name, nano_op_info in op_info.items():
-                    split_info_list.append(
-                        NanoOpInfo(
-                            batch_idx=nano_op_info["batch_idx"],
-                            batch_size=nano_op_info["batch_size"],
-                        )
-                    )
-                    extra_links[nano_op_name] = nano_op_info["extra_dep"]
-
-                op_nanobatch_info_map[op_basename] = tuple(split_info_list)
-        else:
-            info = (
-                NanoOpInfo(batch_idx=0, batch_size=self.decode_batch_size),
-                NanoOpInfo(
-                    batch_idx=1,
-                    batch_size=self.global_batch_size - self.decode_batch_size,
-                ),
-            )
-            op_nanobatch_info_map = {
-                "LayerNormAttn": copy.deepcopy(info),
-                "KQV": copy.deepcopy(info),
-                "RopeAppend": copy.deepcopy(info),
-                "O": copy.deepcopy(info),
-                "LayerNormFFN": copy.deepcopy(info),
-                "UG": copy.deepcopy(info),
-                "Activation": copy.deepcopy(info),
-                "D": copy.deepcopy(info),
-            }
-            extra_links = {
-                # TODO: add extra links for virtual ops
-                # "KQV0": "KQV1",
-                # "RopeAppend0": "RopeAppend1",
-                "RopeAppend0": [("O1", False)],
-                "RopeAppend1": [("O0", True)],
-            }
-
-        model_ops, addtional_virtual_ops = split_nanobatch(
-            self.original_model_operations, op_nanobatch_info_map, extra_links
-        )
-        self.model_operations = model_ops
-        self.all_operations = []
-        self.all_layer_operations = []
-        for op in model_ops + self.virtual_operations + addtional_virtual_ops:
-            print("op.name", op.name, op.batch_size)
-            self.all_operations.append(op)
-        for operation in model_ops:
-            self.all_layer_operations.extend(operation.children)
+        pass
 
     def post_update_ops(self, input_req_idx: list[int], input_tensor: torch.Tensor, cumsum_input: list[int], decode_batch_size: int) -> None:
         assert self.kv_cache is not None, "KV cache not initialized"

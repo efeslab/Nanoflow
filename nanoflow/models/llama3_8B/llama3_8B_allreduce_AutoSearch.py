@@ -36,6 +36,7 @@ class Pipeline(BasePipeline):
         # Set parameters as instance variables.
         super().__init__(
             pipeline_name=cfg.pipeline_name,
+            cache_weight_name=cfg.cache_weight_name,
             cached_weight_dir=cfg.cached_weight_dir,
             profile_dir=cfg.profile_dir,
             num_layers=cfg.num_layers,

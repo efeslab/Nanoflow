@@ -1,10 +1,7 @@
 import copy
-import json
-from pathlib import Path
-from typing import Any, Optional
 import torch
 
-from nanoflow.operations import NanoOpInfo, Operations, Operation_Layer
+from nanoflow.operations import NanoOpInfo
 
 from nanoflow.operations import Add, ScaledMul
 
@@ -25,16 +22,11 @@ from nanoflow.operations import (
     Redist,
 )
 
-from nanoflow.kvcache.kv import KVCacheNone, DistKVPool, BatchedDistKVCache
+from nanoflow.kvcache.kv import DistKVPool, BatchedDistKVCache
 
 from nanoflow.core.basePipeline import BasePipeline
-from nanoflow.core import WeightManager, CategoryType
-from nanoflow.core.bufferAllocate import BufferAllocator
-from nanoflow.core.executor import Executor
+from nanoflow.core import CategoryType
 from nanoflow.core.nanobatchSplit import split_nanobatch
-
-from nanoflow.utils.green_ctx import split_device_green_ctx_by_sm_count
-from nanoflow.utils.prof_marker import prof_marker
 
 from nanoflow.models.qwen2_moe_57B.config_qwen2_moe_57B import Qwen2MoEConfig
 
@@ -43,6 +35,7 @@ class Pipeline(BasePipeline):
         # Set parameters as instance variables.
         super().__init__(
             pipeline_name=cfg.pipeline_name,
+            cache_weight_name=cfg.cache_weight_name,
             cached_weight_dir=cfg.cached_weight_dir,
             profile_dir=cfg.profile_dir,
             num_layers=cfg.num_layers,

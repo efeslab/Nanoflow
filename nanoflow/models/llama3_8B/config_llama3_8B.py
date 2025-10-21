@@ -23,15 +23,18 @@ class Llama3_8B_Config(PipelineConfig):
         dp_size = 1,
         dp_rank = 0,
         kv_cache_type = "flashinfer",
+        network_type = "allreduce",
         unique_nccl_ids = [],
     ):
         self.multi_gpu_mode = multi_gpu_mode
         
         if multi_gpu_mode:
-            self.pipeline_name = f"Llama3-8B-{kv_cache_type}-allreduce-TP{tp_size}-PP{pp_size}-DP{dp_size}"
+            self.pipeline_name = f"Llama3-8B-{kv_cache_type}-{network_type}-TP{tp_size}-PP{pp_size}-DP{dp_size}"
+            self.cache_weight_name = f"Llama3-8B-TP{tp_size}-PP{pp_size}-DP{dp_size}"
         else:
             self.pipeline_name = f"Llama3-8B-{kv_cache_type}"
-        self.cached_weight_dir = f"../cached_weights/{self.pipeline_name}"
+            self.cache_weight_name = "Llama3-8B"
+        self.cached_weight_dir = f"../cached_weights/{self.cache_weight_name}"
         self.profile_dir = f"../profile_data/{self.pipeline_name}"
 
         self.vocab_size = vocab_size

@@ -109,6 +109,88 @@ def test_correctness():
 
     print(output_text)
 
+def test_prefill_only():
+    seq_len = 512
+    num_prefill_reqs = 128
+    prefill_context_ids = tokenizer.encode(prefill_context)
+    assert seq_len <= len(
+        prefill_context_ids), f"seq_len {seq_len} should be less than {len(prefill_context_ids)}"
+    prefill_input_ids = prefill_context_ids[:seq_len]
+    request_queues = [mp.Queue(maxsize=1000) for _ in range(world_size)]
+    result_queue = mp.Queue(maxsize=1000)
+
+    prefill_inputs = []
+    output_strings = {}
+    processes = []
+    for rank in range(world_size):
+        start_time = time.perf_counter()
+        # print(f"Starting process {rank} on GPU {rank}")
+        args = (
+            T0,
+            rank,
+            AFFINITY_MODULE_PATH,
+            request_queues[rank],
+            shared_decode_bts,
+            result_queue,
+            barrier,
+            pipeline_list[rank],
+            use_auto_search,
+            auto_search_path,
+            use_nanosplit,
+            use_cuda_graph,
+            command,
+        )
+        p = mp.Process(target=worker, args=args)
+
+        p.start()
+        processes.append(p)
+        # print(f"Process {rank} started on GPU {rank} in {time.perf_counter() - start_time:.2f} seconds")
+    command.value = b"Execute"
+    shared_decode_bts.value = 0
+    use_auto_search.value = 0
+    use_nanosplit.value = 0
+    use_cuda_graph.value = 0
+
+    group_prefill_size = 8
+    cycles = (num_prefill_reqs + group_prefill_size - 1) // group_prefill_size
+
+    for i in range(cycles):
+        print(f"Cycle {i + 1}/{cycles}")
+        prefill_inputs = []
+        if i == cycles - 1:
+            for j in range(i * group_prefill_size, num_prefill_reqs):
+                prefill_inputs.append((j, prefill_input_ids.copy()))
+                output_strings[j] = prefill_input_ids.copy()
+        else:
+            for j in range(i * group_prefill_size, (i + 1) * group_prefill_size):
+                prefill_inputs.append((j, prefill_input_ids.copy()))
+                output_strings[j] = prefill_input_ids.copy()
+        for queue in request_queues:
+            queue.put_nowait(prefill_inputs)
+
+        barrier.wait()
+        barrier.wait()
+
+        new_tokens = result_queue.get(timeout=1)
+        for req_idx, new_token in new_tokens:
+            output_strings[req_idx].extend(new_token)
+
+    command.value = b"Terminate"
+    # Execute the final two barrier waits so that all workers exit cleanly.
+    barrier.wait()  # First barrier of termination iteration.
+    barrier.wait()  # Second barrier of termination iteration.
+
+    print("Waiting for all processes to finish... ", time.perf_counter() - T0)
+    # Wait for all worker processes to finish.
+    for p in processes:
+        p.join()
+
+    print("All processes have finished.")
+
+    output_text = tokenizer.batch_decode(
+        list(output_strings.values())[:2], skip_special_tokens=True
+    )
+    print(output_text)
 
 def test_performance():
     seq_len = 1024
@@ -327,7 +409,6 @@ if __name__ == "__main__":
     )
     arg_parser.add_argument(
         "--test",
-        choices=["correctness", "performance", "profile"],
         default="correctness",
         help="Which test to run",
     )
@@ -350,13 +431,13 @@ if __name__ == "__main__":
     )
     arg_parser.add_argument(
         "--cuda_graph",
-        type=bool,
+        action="store_true",
         default=False,
         help="Enable CUDA graph",
     )
     arg_parser.add_argument(
         "--auto_search",
-        type=bool,
+        action="store_true",
         default=False,
         help="Enable auto search",
     )
@@ -382,14 +463,20 @@ if __name__ == "__main__":
             elif args.network_type == "allgather":
                 from nanoflow.models.llama3_70B.llama3_70B_FlashinferKVCache_allgather import Pipeline
             else:
-                raise ValueError("Unsupported network type")
+                raise NotImplementedError(
+                    f"Network type {args.network_type} not implemented yet.")
+        elif args.kvcache_type == "torch":
+            if args.network_type == "allreduce":
+                from nanoflow.models.llama3_70B.llama3_70B_KVCacheTorch_allreduce import Pipeline
+            elif args.network_type == "allgather":
+                from nanoflow.models.llama3_70B.llama3_70B_KVCacheTorch_allgather import Pipeline
+            else:
+                raise NotImplementedError(
+                    f"Network type {args.network_type} not implemented yet.")
         else:
-            raise ValueError("Unsupported KVCache type")
-        # elif args.kvcache_type == "torch":
-        #     if args.network_type == "allreduce":
-        #         from nanoflow.models.llama3_70B.llama3_70B_KVCacheTorch_allreduce import Pipeline
-        #     elif args.network_type == "allgather":
-        #         from nanoflow.models.llama3_70B.llama3_70B_KVCacheTorch_allgather import Pipeline
+            raise NotImplementedError(
+                f"KVCache type {args.kvcache_type} not implemented yet.")
+
 
         cfgs = [Config(
             multi_gpu_mode=MULTI_GPU_MODE,
@@ -402,7 +489,8 @@ if __name__ == "__main__":
             unique_nccl_ids=unique_nccl_ids,
         ) for i in range(world_size)]
 
-        auto_search_path = "../auto_search/search_result_json/70B_search_result_reverse_v3.json"
+        # auto_search_path = "../auto_search/search_result_json/70B_search_result_reverse_v3.json"
+        auto_search_path = None
 
     elif args.model == "8B":
         weight_map = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
@@ -521,5 +609,9 @@ if __name__ == "__main__":
         test_correctness()
     elif args.test == "performance":
         test_performance()
+    elif args.test == "prefill_only":
+        test_prefill_only()
     elif args.test == "profile":
         profile()
+    else:
+        raise NotImplementedError(f"Unsupported test: {args.test}")
