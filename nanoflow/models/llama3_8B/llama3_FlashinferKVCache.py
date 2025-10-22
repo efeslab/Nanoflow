@@ -309,14 +309,7 @@ class Pipeline(BasePipeline):
         self.gen_embedding.config_tag("cuda", params)
 
         if self.is_auto_search_enabled:
-            for op in self.model_operations:
-                print(
-                    f"op.name: {op.name}, op.original_name: {op.original_name}")
-                if op.original_name in self.profile_result["operations"]:
-                    algo_tag = self.profile_result["operations"][op.original_name][
-                        op.name
-                    ]["algo_tag"]
-                    op.config_tag(algo_tag, params)
+            super().config_algorithm_auto_search(params)
         else:
             self.layerNormAttn.config_tag("cuda", params)
             self.kqv.config_tag("torch", params)
@@ -338,8 +331,7 @@ class Pipeline(BasePipeline):
         op_nanobatch_info_map: dict[str, tuple[NanoOpInfo, ...]] = {}
         extra_links: dict[str, list[tuple[str, bool]]] = {}
         if self.is_auto_search_enabled:
-            operations = self.profile_result["operations"]
-            for op_basename, op_info in operations.items():
+            for op_basename, op_info in self.profile_result.items():
                 split_info_list = []
                 for nano_op_name, nano_op_info in op_info.items():
                     split_info_list.append(

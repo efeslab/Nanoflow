@@ -168,51 +168,52 @@ class Operations:
 
     def profile_all(self):
         with prof_marker(f"batchsize:{self.batch_size}"):
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
+            if self.batch_size > 0:
+                start = torch.cuda.Event(enable_timing=True)
+                end = torch.cuda.Event(enable_timing=True)
 
-            g = torch.cuda.CUDAGraph()
-            for _, impl in self.impl_map.items():
-                self.impl = impl(self, self.stream, self.device)
-                category_tag = impl.category_tag
-                is_profiled = self.is_profiled_in_db(category_tag)
-                if is_profiled:
-                    # If already profiled, we can skip profiling
-                    continue
-                # loop in the impl configs
-                for impl_tag, para_map in self.impl_configs_map[category_tag]:
-                    self.impl.config(impl_tag, para_map)
-                    self.profile_update()
-                    g.reset()
+                g = torch.cuda.CUDAGraph()
+                for _, impl in self.impl_map.items():
+                    self.impl = impl(self, self.stream, self.device)
+                    category_tag = impl.category_tag
+                    is_profiled = self.is_profiled_in_db(category_tag)
+                    if is_profiled:
+                        # If already profiled, we can skip profiling
+                        continue
+                    # loop in the impl configs
+                    for impl_tag, para_map in self.impl_configs_map[category_tag]:
+                        self.impl.config(impl_tag, para_map)
+                        self.profile_update()
+                        g.reset()
 
-                    # warm up for 10 cycles.
-                    for _ in range(10):
+                        # warm up for 10 cycles.
+                        for _ in range(10):
+                            self.profile_run()
+
+                        # # prepare a graph for 100 cycles.
+                        rounds = 100
+                        with torch.cuda.graph(g, stream=self.stream):
+                            for round in range(rounds):
+                                self.profile_run()
+                        # torch.cuda.synchronize()
+
                         self.profile_run()
 
-                    # # prepare a graph for 100 cycles.
-                    rounds = 100
-                    with torch.cuda.graph(g, stream=self.stream):
-                        for round in range(rounds):
-                            self.profile_run()
-                    # torch.cuda.synchronize()
-
-                    self.profile_run()
-
-                    start.record(self.stream)
-                    with torch.cuda.stream(self.stream):
-                        g.replay()
-                        # for round in range(rounds):
-                        #     self.profile_run()
-                    end.record(self.stream)
-                    torch.cuda.synchronize()
-                    elapsed_ms = start.elapsed_time(end)
-                    average_elapsed_ms = elapsed_ms / rounds
-                    # Store to results
-                    if self.is_save_db:
-                        self.store_profile_db(
-                            category_tag, impl_tag, average_elapsed_ms
-                        )
-            self.conn.commit()
+                        start.record(self.stream)
+                        with torch.cuda.stream(self.stream):
+                            g.replay()
+                            # for round in range(rounds):
+                            #     self.profile_run()
+                        end.record(self.stream)
+                        torch.cuda.synchronize()
+                        elapsed_ms = start.elapsed_time(end)
+                        average_elapsed_ms = elapsed_ms / rounds
+                        # Store to results
+                        if self.is_save_db:
+                            self.store_profile_db(
+                                category_tag, impl_tag, average_elapsed_ms
+                            )
+                self.conn.commit()
 
     def print_profile(self):
         if not hasattr(self, "cursor"):
@@ -248,6 +249,9 @@ class Operations:
 
     def config_tag(self, tag, parameter_map={}):
         if self.isNanoSplit:
+            if not isinstance(tag, list):
+                tag = [tag for _ in range(len(self.nano_ops))]
+                
             assert len(tag) == len(
                 self.nano_ops
             ), f"Operation {self.name} has {len(self.nano_ops)} nano ops, but {len(tag)} tags were provided."
@@ -359,8 +363,6 @@ class Operation_Layer:
         # for auto search
         self.duration_map = {}
         self.algo_tag_map = {}
-        self.start_time: gp.Var
-        self.end_time: gp.Var
 
     @property
     def impl(self):
@@ -462,21 +464,21 @@ class Operation_Layer:
             self.stream.wait_event(event)
 
     # for auto search
-    def initVariables(self, model: gp.Model, full_sm_count: int):
-        self.start_time = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_start")
-        self.end_time = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_end")
-        # print(f"init_Variables: {self.name}, start_time: {self.start_time}, end_time: {self.end_time}")
+    def initVariablesStageOne(self, model: gp.Model, full_sm_count: int):
+        self.start_time_stage_one = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_start")
+        self.end_time_stage_one = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_end")
+        # print(f"init_Variables: {self.name}, start_time: {self.start_time_stage_one}, end_time: {self.end_time_stage_one}")
         model.addConstr(
-            self.end_time
-            == self.start_time + self.duration_map[(self.batch_size, full_sm_count)],
-            name=f"{self.name}_end_time",
+            self.end_time_stage_one
+            == self.start_time_stage_one + self.duration_map[(self.batch_size, full_sm_count)],
+            name=f"{self.name}_end_time_stage_one",
         )
 
     def initVariablesStageTwo(
-        self, model: gp.Model, sm_counts: list[int], categories: set[CategoryType]
+        self, model: gp.Model, sm_counts: list[int], categories: set[CategoryType], output_op_infos_stage_one: dict, period_time_stage_one: float
     ):
-        self.start_time = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_start")
-        self.end_time = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_end")
+        self.start_time_stage_two = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_start")
+        self.end_time_stage_two = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_end")
         self.p_vars: dict[int, gp.Var] = {}  # Variables for p choices
         self.durations: dict[int, float] = {}  # Duration in units for each p
         self.p_choice = model.addVar(vtype=GRB.CONTINUOUS, name=f"{self.name}_p_choice")
@@ -488,16 +490,25 @@ class Operation_Layer:
                 self.is_extra_linked_before_op[category] = False
                 self.is_extra_linked_after_op[category] = False
 
+        start_val = output_op_infos_stage_one[self.original_name][self.parent.name]["start_time"] + period_time_stage_one * self.layer
+        end_val = output_op_infos_stage_one[self.original_name][self.parent.name]["end_time"] + period_time_stage_one * self.layer
+
+        self.start_time_stage_two.PStart = start_val
+        self.end_time_stage_two.PStart = end_val
+
+        # print(f"operation {self.name} start time: {start_val}, end time: {end_val} layer: {self.layer}")
+        # only get through sm_counts with stride of 16
         for sm_count in sm_counts:
+            # if sm_count % 16 != 0:
+            #     continue
             self.p_vars[sm_count] = model.addVar(
                 vtype=GRB.BINARY, name=f"{self.name}_p_{sm_count}"
             )
-            if sm_count == 76:
-                self.p_vars[sm_count].Start = 1  # Force p_56 to be chosen
+            if sm_count == 64:
+                self.p_vars[sm_count].Start = 1  # Force p_64 to be chosen
             else:
                 self.p_vars[sm_count].Start = 0
-            duration = self.duration_map[(self.batch_size, sm_count)]
-            self.durations[sm_count] = duration
+            self.durations[sm_count] = self.duration_map[(self.batch_size, sm_count)]
 
     def addInternalConstraintsStageTwo(self, model: gp.Model):
         model.addConstr(
@@ -505,13 +516,13 @@ class Operation_Layer:
         )
 
         model.addConstr(
-            self.end_time
-            == self.start_time
+            self.end_time_stage_two
+            == self.start_time_stage_two
             + gp.quicksum(
                 self.p_vars[sm_count] * self.durations[sm_count]
                 for sm_count in self.p_vars
             ),
-            name=f"{self.name}_end_time",
+            name=f"{self.name}_end_time_stage_two",
         )
 
         model.addConstr(
@@ -528,7 +539,7 @@ class Operation_Layer:
         COLOR_GREEN = "\033[32m"
         COLOR_BLUE = "\033[34m"
         COLOR_RESET = "\033[0m"
-        s = f"{COLOR_BLUE}{self.name}{COLOR_RESET} start: {self.start_time.X:.3f} end: {self.end_time.X:.3f} batch_size: {round(self.batch_size)}"
+        s = f"{COLOR_BLUE}{self.name}{COLOR_RESET} start: {self.start_time_stage_one.X:.3f} end: {self.end_time_stage_one.X:.3f} batch_size: {round(self.batch_size)}"
         return s
 
 

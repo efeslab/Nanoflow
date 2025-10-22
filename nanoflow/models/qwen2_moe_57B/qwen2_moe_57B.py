@@ -433,13 +433,7 @@ class Pipeline(BasePipeline):
         self.gen_embedding.config_tag("cuda", params)
 
         if self.is_auto_search_enabled:
-            for op in self.model_operations:
-                print(f"op.name: {op.name}, op.original_name: {op.original_name}")
-                if op.original_name in self.profile_result["operations"]:
-                    algo_tag = self.profile_result["operations"][op.original_name][
-                        op.name
-                    ]["algo_tag"]
-                    op.config_tag(algo_tag, params)
+            super().config_algorithm_auto_search(params)
         else:
             self.layerNormAttn.config_tag("cuda", params)
             self.kqv.config_tag("torch", params)
@@ -463,59 +457,6 @@ class Pipeline(BasePipeline):
         self.getLogits.config_tag("torch", params)
         self.modelLayerNorm.config_tag("cuda", params)
         self.sample.config_tag("cuda", params)
-
-
-    def nanobatch_split(self) -> None:
-        op_nanobatch_info_map: dict[str, tuple[NanoOpInfo, ...]] = {}
-        extra_links: dict[str, list[tuple[str, bool]]] = {}
-        if self.is_auto_search_enabled:
-            operations = self.profile_result["operations"]
-            for op_basename, op_info in operations.items():
-                split_info_list = []
-                for nano_op_name, nano_op_info in op_info.items():
-                    split_info_list.append(
-                        NanoOpInfo(
-                            batch_idx=nano_op_info["batch_idx"],
-                            batch_size=nano_op_info["batch_size"],
-                        )
-                    )
-                    extra_links[nano_op_name] = nano_op_info["extra_dep"]
-
-                op_nanobatch_info_map[op_basename] = tuple(split_info_list)
-        else:
-            info = (
-                NanoOpInfo(batch_idx=0, batch_size=self.decode_batch_size),
-                NanoOpInfo(
-                    batch_idx=1,
-                    batch_size=self.global_batch_size - self.decode_batch_size,
-                ),
-            )
-            op_nanobatch_info_map = {
-                "LayerNormAttn": copy.deepcopy(info),
-                "KQV": copy.deepcopy(info),
-                "RopeAppend": copy.deepcopy(info),
-                "O": copy.deepcopy(info),
-                "LayerNormFFN": copy.deepcopy(info),
-                "UG": copy.deepcopy(info),
-                "Activation": copy.deepcopy(info),
-                "D": copy.deepcopy(info),
-            }
-            extra_links = {}
-
-        print("op_nanobatch_info_map", op_nanobatch_info_map)
-        print("extra_links", extra_links)
-
-        model_ops, addtional_virtual_ops = split_nanobatch(
-            self.original_model_operations, op_nanobatch_info_map, extra_links
-        )
-        self.model_operations = model_ops
-        self.all_operations = []
-        self.all_layer_operations = []
-        for op in model_ops + self.virtual_operations + addtional_virtual_ops:
-            print("op.name", op.name, op.batch_size)
-            self.all_operations.append(op)
-        for operation in model_ops:
-            self.all_layer_operations.extend(operation.children)
 
     def post_update_ops(self, input_req_idx: list[int], input_tensor: torch.Tensor, cumsum_input: list[int], decode_batch_size: int) -> None:
         assert self.kv_cache is not None, "KV cache not initialized"

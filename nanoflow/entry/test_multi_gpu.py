@@ -147,11 +147,11 @@ def test_prefill_only():
         # print(f"Process {rank} started on GPU {rank} in {time.perf_counter() - start_time:.2f} seconds")
     command.value = b"Execute"
     shared_decode_bts.value = 0
-    use_auto_search.value = 0
-    use_nanosplit.value = 0
-    use_cuda_graph.value = 0
+    use_auto_search.value = USE_AUTO_SEARCH
+    use_nanosplit.value = USE_NANOSPLIT
+    use_cuda_graph.value = USE_CUDA_GRAPH
 
-    group_prefill_size = 8
+    group_prefill_size = 16
     cycles = (num_prefill_reqs + group_prefill_size - 1) // group_prefill_size
 
     for i in range(cycles):
@@ -330,11 +330,7 @@ def test_performance():
 
 def profile():
     # Spawn one worker per GPU (or per unit of parallelism).
-    # which length is 1912.
-    prefill_context_ids = tokenizer.encode(prefill_context)
     processes = []
-    request_queues = [mp.Queue(maxsize=1000) for _ in range(world_size)]
-    result_queue = mp.Queue(maxsize=1000)
     for rank in range(world_size):
         start_time = time.perf_counter()
         # print(f"Starting process {rank} on GPU {rank}")
@@ -342,9 +338,9 @@ def profile():
             T0,
             rank,
             AFFINITY_MODULE_PATH,
-            request_queues[rank],
-            shared_decode_bts,
-            result_queue,
+            None,
+            None,
+            None,
             barrier,
             pipeline_list[rank],
             0,
@@ -358,7 +354,6 @@ def profile():
         p.start()
         processes.append(p)
         # print(f"Process {rank} started on GPU {rank} in {time.perf_counter() - start_time:.2f} seconds")
-        request_queues[rank].put_nowait(prefill_context_ids)
 
     command.value = b"Profile"
     barrier.wait()
@@ -430,25 +425,34 @@ if __name__ == "__main__":
         help="Pick which network type to use",
     )
     arg_parser.add_argument(
-        "--cuda_graph",
+        "--use_cuda_graph",
         action="store_true",
         default=False,
         help="Enable CUDA graph",
     )
     arg_parser.add_argument(
-        "--auto_search",
+        "--use_auto_search",
         action="store_true",
         default=False,
         help="Enable auto search",
+    )
+    arg_parser.add_argument(
+        "--use_nanosplit",
+        action="store_true",
+        default=False,
+        help="Enable nanosplit",
     )
     args = arg_parser.parse_args()
 
     world_size = torch.cuda.device_count()
     print("world size: ", world_size)
-    TP_size = args.tensor_parallel_size
-    EP_size = args.expert_parallel_size
-    PP_size = 1
-    DP_size = 1
+    TP_size: int = args.tensor_parallel_size
+    EP_size: int = args.expert_parallel_size
+    PP_size: int = 1
+    DP_size: int = 1
+    USE_CUDA_GRAPH: bool = args.use_cuda_graph
+    USE_AUTO_SEARCH: bool = args.use_auto_search
+    USE_NANOSPLIT: bool = args.use_nanosplit
 
     unique_nccl_ids = [NCCLWrapper.get_nccl_unique_id() for _ in range(10)]
 
@@ -489,8 +493,8 @@ if __name__ == "__main__":
             unique_nccl_ids=unique_nccl_ids,
         ) for i in range(world_size)]
 
-        # auto_search_path = "../auto_search/search_result_json/70B_search_result_reverse_v3.json"
-        auto_search_path = None
+        auto_search_path = "/code/Nanoflow-python/nanoflow/auto_search/result_json/prefill_only_search_result_stage1.json"
+        # auto_search_path = None
 
     elif args.model == "8B":
         weight_map = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
@@ -564,6 +568,7 @@ if __name__ == "__main__":
 
     # mkdir for profiler
     if args.test == "profile":
+        print("Do Profile")
         profile_data_path = cfgs[0].profile_data_path()
         import os
         os.makedirs(profile_data_path, exist_ok=True)

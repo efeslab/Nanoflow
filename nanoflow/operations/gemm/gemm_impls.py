@@ -1,5 +1,6 @@
 import torch
 import nanoflow.platform_config as platform_config
+from nanoflow.utils.prof_marker import prof_marker
 from nanoflow.operations import OperationImpl
 
 if platform_config.PLATFORM_CUDA:
@@ -26,12 +27,14 @@ class GEMMTorchImpl(OperationImpl):
 
     def run(self, A, B, C, D):
         with torch.cuda.stream(self.stream):
-            if self.op_base.sm_count is not None:
-                set_sm_count_target(self.op_base.sm_count)
-            if self.bias or self.alpha != 1:
-                torch.addmm(C, A, B, beta=self.beta, alpha=self.alpha, out=D)
-            else:
-                torch.matmul(A, B, out=D)
+            with prof_marker(f"Set SM count target"):
+                if self.op_base.sm_count is not None:
+                    set_sm_count_target(self.op_base.sm_count)
+            with prof_marker(f"GEMMTorchImpl.run"):
+                if self.bias or self.alpha != 1:
+                    torch.addmm(C, A, B, beta=self.beta, alpha=self.alpha, out=D)
+                else:
+                    torch.matmul(A, B, out=D)
 
 
 if platform_config.PLATFORM_AITER:

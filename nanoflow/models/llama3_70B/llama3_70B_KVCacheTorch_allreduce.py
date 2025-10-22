@@ -324,14 +324,7 @@ class Pipeline(BasePipeline):
         self.gen_embedding.config_tag("torch", params)
 
         if self.is_auto_search_enabled:
-            for op in self.model_operations:
-                print(
-                    f"op.name: {op.name}, op.original_name: {op.original_name}")
-                if op.original_name in self.profile_result["operations"]:
-                    algo_tag = self.profile_result["operations"][op.original_name][
-                        op.name
-                    ]["algo_tag"]
-                    op.config_tag(algo_tag, params)
+            super().config_algorithm_auto_search(params)
         else:
             self.layerNormAttn.config_tag("torch", params)
             self.kqv.config_tag("torch", params)
@@ -374,9 +367,6 @@ class Pipeline(BasePipeline):
         self.allReduce_d.update(
             self.tp_group, self.tp_rank, self.tp_size, self.unique_nccl_ids[5:10]
         )
-
-    def nanobatch_split(self, total_batchsize, decode_batch_size):
-        pass
 
     def post_update_ops(self, input_req_idx: list[int], input_tensor: torch.Tensor, cumsum_input: list[int], decode_batch_size: int) -> None:
         assert self.kv_cache is not None, "KV cache not initialized"

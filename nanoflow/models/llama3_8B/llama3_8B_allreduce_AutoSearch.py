@@ -322,6 +322,7 @@ class Pipeline(BasePipeline):
 
     def config_algorithm(self) -> None:
         pass
+    
     def config_network(self) -> None:
         self.allReduce_o.update(None, None, None, None)
         self.allReduce_d.update(None, None, None, None)

@@ -50,7 +50,7 @@ class WeightManager():
             ten = torch.from_numpy(np.fromfile(file, dtype=np.float16))
         t1 = time.time()
         mb_s = ten.numel()*2 / 1e6 / (t1 - start_load_time)
-        print(f"Weight takes {ten.numel() * 2 / 1024 / 1024 / 1024} GB")
+        print(f"Weight takes {ten.numel() * 2 / 1024 / 1024 / 1024:.2f} GB")
         print(f"Loaded {mb_s:,.1f} MB/s with {ten.numel():,} elements")
         
         start_load_to_device_time = time.time()

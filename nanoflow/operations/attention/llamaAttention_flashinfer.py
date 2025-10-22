@@ -30,8 +30,8 @@ if platform_config.PLATFORM_CUDA:
             # print("DecAttnBatchedCudaImpl initialized with cuda stream:", self.stream.cuda_stream)
 
         def plan(self, kv_indptr, kv_indices, kv_last_page_len, page_size):
-            with prof_marker("DecAttnBatchedCudaImpl.plan"):
-                with torch.cuda.stream(self.stream):
+            with torch.cuda.stream(self.stream):
+                with prof_marker("DecAttnBatchedCudaImpl.plan"):
                     # print("DecAttnBatchedCudaImpl.plan")
                     # print("kv_indptr: ", kv_indptr)
                     # print("kv_indices: ", kv_indices)
@@ -102,13 +102,12 @@ class DecAttnFlashinfer(Operations):
         start_req_idx = tensor_offset_to_req_idx(qo_indicies, io.tensor_offset)
         end_req_idx = tensor_offset_to_req_idx(
             qo_indicies, io.tensor_offset + io.batch_size)
-
         self.kv_indptr = self.externals["KVCache"].kv_indptr[start_req_idx: end_req_idx + 1]
         self.kv_indices = self.externals["KVCache"].kv_indices
         self.kv_last_page_len = self.externals["KVCache"].kv_last_page_len[start_req_idx: end_req_idx]
 
         self.page_size = self.externals["KVCache"].page_size
-        if start_req_idx != end_req_idx:
+        if io.batch_size > 0:
             self.impl.plan(self.kv_indptr, self.kv_indices,
                            self.kv_last_page_len, self.page_size)
 
@@ -315,6 +314,7 @@ class PFAttnFlashinfer(Operations):
     def copy_nano(self, index):
         new_op = PFAttnFlashinfer(self.name, self.device, nano_idx=index)
         new_op.set_category(self.category)
+        new_op.externals = self.externals
         new_op.expand_layer(self.layer_list)
         new_op.setShape(self.num_kv_heads, self.num_qo_heads,
                         self.head_dim, self.tp_size)

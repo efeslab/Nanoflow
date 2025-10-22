@@ -333,6 +333,11 @@ class Pipeline(BasePipeline):
         self.global_input.setBatchSize(self.global_batch_size)
         self.decAttn.setBatchSize(self.decode_batch_size)
 
+    def config_streams(self) -> None:
+        super().config_streams()
+        self.allReduce_o.set_stream((self.streams[CategoryType.NET][self.total_sm][0], self.total_sm))
+        self.allReduce_d.set_stream((self.streams[CategoryType.NET][self.total_sm][0], self.total_sm))
+
     def config_algorithm(self) -> None:
         print("Configuring algorithms...")
         params = {
@@ -342,14 +347,7 @@ class Pipeline(BasePipeline):
         self.gen_embedding.config_tag("cuda", params)
 
         if self.is_auto_search_enabled:
-            for op in self.model_operations:
-                print(
-                    f"op.name: {op.name}, op.original_name: {op.original_name}")
-                if op.original_name in self.profile_result["operations"]:
-                    algo_tag = self.profile_result["operations"][op.original_name][
-                        op.name
-                    ]["algo_tag"]
-                    op.config_tag(algo_tag, params)
+            super().config_algorithm_auto_search(params)
         else:
             self.layerNormAttn.config_tag("cuda", params)
             self.kqv.config_tag("torch", params)
@@ -374,15 +372,8 @@ class Pipeline(BasePipeline):
         )
         tp_group_idx = self.tp_rank // self.tp_size
         print("tp_group_idx: ", tp_group_idx, "tp_size: ", self.tp_size)
-        self.tp_group = dist.new_group(
-            ranks=[
-                i
-                for i in range(
-                    tp_group_idx *
-                    self.tp_size, (tp_group_idx + 1) * self.tp_size
-                )
-            ]
-        )
+        ranks = [ i for i in range(tp_group_idx * self.tp_size, (tp_group_idx + 1) * self.tp_size)]
+        self.tp_group = dist.new_group(ranks)
         # print("tp_group in main: ", self.tp_group)
         print("Updating network operations with NCCL IDs...")
         # print("original unique_nccl_ids: ", self.unique_nccl_ids)
@@ -397,8 +388,7 @@ class Pipeline(BasePipeline):
         op_nanobatch_info_map: dict[str, tuple[NanoOpInfo, ...]] = {}
         extra_links: dict[str, list[tuple[str, bool]]] = {}
         if self.is_auto_search_enabled:
-            operations = self.profile_result["operations"]
-            for op_basename, op_info in operations.items():
+            for op_basename, op_info in self.profile_result.items():
                 split_info_list = []
                 for nano_op_name, nano_op_info in op_info.items():
                     split_info_list.append(
@@ -411,7 +401,26 @@ class Pipeline(BasePipeline):
 
                 op_nanobatch_info_map[op_basename] = tuple(split_info_list)
         else:
-            raise ValueError("Auto search is not enabled")
+            assert self.decode_batch_size == 0, "Decode batch size should be 0 for auto search"
+            micro_batch_size = self.global_batch_size // 2
+            info = (
+                NanoOpInfo(batch_idx=0, batch_size=micro_batch_size),
+                NanoOpInfo(batch_idx=1, batch_size=micro_batch_size),
+            )
+            op_nanobatch_info_map: dict[str, tuple[NanoOpInfo, ...]] = {
+                "LayerNormAttn": copy.deepcopy(info),
+                "KQV": copy.deepcopy(info),
+                "RopeAppend": copy.deepcopy(info),
+                "PFAttn": copy.deepcopy(info),
+                "O": copy.deepcopy(info),
+                "AllReduceO": copy.deepcopy(info),
+                "LayerNormFFN": copy.deepcopy(info),
+                "UG": copy.deepcopy(info),
+                "Activation": copy.deepcopy(info),
+                "D": copy.deepcopy(info),
+                "AllReduceD": copy.deepcopy(info),
+            }
+            extra_links = {}
         model_ops, addtional_virtual_ops = split_nanobatch(
             self.original_model_operations, op_nanobatch_info_map, extra_links
         )

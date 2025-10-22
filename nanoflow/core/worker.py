@@ -31,12 +31,13 @@ def worker(start_time, rank, request_queue: mp.Queue, shared_decode_bts, result_
                         result_queue.put_nowait(new_tokens)
 
             case "Profile":
-                input_ids = request_queue.get(timeout=1)
-
+                input_ids = torch.randint(
+                    0, 100000, (8192,), device=torch.device(rank)
+                )
                 pipeline.init_profile_data()
 
                 # stream_names = ["TEST_TOTAL"]
-                stream_names = [ f"TEST_{i}" for i in range(len(pipeline.sm_counts)) ] + ["TEST_TOTAL"]
+                stream_names = [ f"TEST_{sm_count}" for sm_count in pipeline.sm_counts ]
                 for stream_name in stream_names:
                     pipeline.reset()
                     print(f"Stream: {stream_name}")

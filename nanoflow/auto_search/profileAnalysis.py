@@ -13,7 +13,7 @@ def getGemvTimeAndSMCount(profile_data_path, batch_size, seq_len, sm_count=132):
     """, (batch_size, seq_len, sm_count))
     row = cur.fetchone()
     duration = row['average_time_ms']
-    print("Fastest CUDA run:", tuple(row), "duration:", duration)
+    # print("Fastest CUDA run:", tuple(row), "duration:", duration)
     cur.close()
     conn.close()
 
@@ -54,8 +54,8 @@ def getByBatchsizeAndSMCount(profile_data_path, name, batch_size, sm_count=132):
             print(f"Skipped table {table} due to error: {e}")
 
     if best_row:
-        print("Fastest run found in table:", best_table)
-        print("Row:", tuple(best_row), "Duration:", best_duration)
+        # print("Fastest run found in table:", best_table)
+        # print("Row:", tuple(best_row), "Duration:", best_duration)
         if 'impl_tag' in best_row.keys():
             algo_tag = f"{best_table}:{best_row['impl_tag']}"
         else:

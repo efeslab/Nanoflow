@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
-from typing import Any, Optional, Iterable
+from typing import Any, Optional
+import copy
 
 import torch
 
@@ -11,7 +12,8 @@ from nanoflow.kvcache.kv import KVCacheNone, KVCacheTorch, BatchedDistKVCache
 from nanoflow.core import WeightManager, CategoryType
 from nanoflow.core.bufferAllocate import BufferAllocator
 from nanoflow.core.executor import Executor
-from nanoflow.operations import Operations, Operation_Layer
+from nanoflow.core.nanobatchSplit import split_nanobatch
+from nanoflow.operations import Operations, Operation_Layer, NanoOpInfo
 from nanoflow.utils.green_ctx import split_device_green_ctx_by_sm_count
 from nanoflow.utils.prof_marker import prof_marker
 
@@ -68,9 +70,44 @@ class BasePipeline(ABC):
         """Optionally tag ops with CategoryType for stream allocation."""
         pass
 
+    def config_algorithm_auto_search(self, params: dict[str, Any]) -> None:
+        """Choose algorithms per-op from profile."""
+        for op in self.model_operations:
+            print(f"op.name: {op.name}, op.original_name: {op.original_name}")
+            if op.original_name in self.profile_result:
+                algo_tag = self.profile_result[op.original_name][op.name]["algo_tag"]
+                op.config_tag(algo_tag, params)
+
     def nanobatch_split(self) -> None:
-        """Optionally split ops into nanobatches for better memory usage."""
-        pass
+        """Split the model operations into nano operations."""
+        op_nanobatch_info_map: dict[str, tuple[NanoOpInfo, ...]] = {}
+        extra_links: dict[str, list[tuple[str, bool]]] = {}
+        if self.is_auto_search_enabled:
+            for op_basename, op_info in self.profile_result.items():
+                split_info_list = []
+                for nano_op_name, nano_op_info in op_info.items():
+                    split_info_list.append(
+                        NanoOpInfo(
+                            batch_idx=nano_op_info["batch_idx"],
+                            batch_size=nano_op_info["batch_size"],
+                        )
+                    )
+                    extra_links[nano_op_name] = nano_op_info["extra_dep"]
+
+                op_nanobatch_info_map[op_basename] = tuple(split_info_list)
+        else:
+            raise NotImplementedError("Nanobatch split is not implemented without auto search")
+        model_ops, addtional_virtual_ops = split_nanobatch(
+            self.original_model_operations, op_nanobatch_info_map, extra_links
+        )
+        self.model_operations = model_ops
+        self.all_operations = []
+        self.all_layer_operations = []
+        for op in model_ops + self.virtual_operations + addtional_virtual_ops:
+            print("op.name", op.name, op.batch_size)
+            self.all_operations.append(op)
+        for operation in model_ops:
+            self.all_layer_operations.extend(operation.children)
 
     # --------- Base: construction / config ---------
     def __init__(
@@ -193,9 +230,9 @@ class BasePipeline(ABC):
             (s1, s2, _), _ = split_device_green_ctx_by_sm_count(
                 torch.device(self.device), [sm1, sm2]
             )
-            self.profile_streams[f"TEST_{i}"] = (s1, sm1)
-            self.profile_streams[f"TEST_{n - 1 - i}"] = (s2, sm2)
-        self.profile_streams["TEST_TOTAL"] = (
+            self.profile_streams[f"TEST_{sm1}"] = (s1, sm1)
+            self.profile_streams[f"TEST_{sm2}"] = (s2, sm2)
+        self.profile_streams[f"TEST_{self.total_sm}"] = (
             torch.cuda.Stream(), self.total_sm)
 
     def config_streams(self) -> None:
@@ -207,9 +244,8 @@ class BasePipeline(ABC):
         if self.is_auto_search_enabled:
             assert self.profile_result is not None, "Profile result not initialized"
             for op in self.model_operations:
-                base = op.original_name
-                if base in self.profile_result.get("operations", {}):
-                    sm_count = self.profile_result["operations"][base][op.name]["p_value"]
+                if op.original_name in self.profile_result:
+                    sm_count = self.profile_result[op.original_name][op.name]["p_value"]
                     op.set_stream(self.streams[op.category][sm_count])
 
     def config_profile_streams(self, stream_tuple: tuple[torch._C.Stream, int]) -> None:

@@ -1,7 +1,7 @@
 import copy
 from typing import Any, Optional
 import torch
-from nanoflow.operations import NanoOpInfo, Operations, Operation_Layer
+from nanoflow.operations import NanoOpInfo
 
 from nanoflow.operations import (
     GlobalInput,
@@ -280,7 +280,7 @@ class Pipeline(BasePipeline):
         self.allReduce_d.outputs["output"] >> self.copy_d.inputs["input_0"]
 
         self.copy_d.outputs["output_0"] >> self.modelLayerNorm.inputs["input"]
-        self.copy_d.outputs["output_1"] >> (self.copy_embedding.inputs["input_1"], 1)
+        self.copy_d.outputs["output_1"] >> (self.copy_embedding.inputs["input_1"], True)
 
         self.modelLayerNorm.outputs["output"] >> self.getLogits.inputs["A"]
 
@@ -325,16 +325,35 @@ class Pipeline(BasePipeline):
 
 
     def nanobatch_split(self) -> None:
+        # info = (
+        #     NanoOpInfo(batch_idx=0, batch_size=self.decode_batch_size),
+        #     NanoOpInfo(
+        #         batch_idx=1, batch_size=self.global_batch_size - self.decode_batch_size
+        #     ),
+        # )
+        # op_nanobatch_info_map: dict[str, tuple[NanoOpInfo, ...]] = {
+        #     "LayerNormAttn": copy.deepcopy(info),
+        #     "KQV": copy.deepcopy(info),
+        #     "RopeAppend": copy.deepcopy(info),
+        #     "O": copy.deepcopy(info),
+        #     "AllReduceO": copy.deepcopy(info),
+        #     "LayerNormFFN": copy.deepcopy(info),
+        #     "UG": copy.deepcopy(info),
+        #     "Activation": copy.deepcopy(info),
+        #     "D": copy.deepcopy(info),
+        #     "AllReduceD": copy.deepcopy(info),
+        # }
+        # extra_links = {}
+        micro_batch_size = self.global_batch_size // 2
         info = (
-            NanoOpInfo(batch_idx=0, batch_size=self.decode_batch_size),
-            NanoOpInfo(
-                batch_idx=1, batch_size=self.global_batch_size - self.decode_batch_size
-            ),
+            NanoOpInfo(batch_idx=0, batch_size=micro_batch_size),
+            NanoOpInfo(batch_idx=1, batch_size=micro_batch_size),
         )
         op_nanobatch_info_map: dict[str, tuple[NanoOpInfo, ...]] = {
             "LayerNormAttn": copy.deepcopy(info),
             "KQV": copy.deepcopy(info),
             "RopeAppend": copy.deepcopy(info),
+            "PFAttn": copy.deepcopy(info),
             "O": copy.deepcopy(info),
             "AllReduceO": copy.deepcopy(info),
             "LayerNormFFN": copy.deepcopy(info),
@@ -344,10 +363,6 @@ class Pipeline(BasePipeline):
             "AllReduceD": copy.deepcopy(info),
         }
         extra_links = {}
-
-        print("op_nanobatch_info_map", op_nanobatch_info_map)
-        print("extra_links", extra_links)
-
         model_ops, addtional_virtual_ops = split_nanobatch(
             self.original_model_operations, op_nanobatch_info_map, extra_links
         )
