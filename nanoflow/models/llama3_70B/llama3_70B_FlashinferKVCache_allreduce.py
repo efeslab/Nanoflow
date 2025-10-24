@@ -71,7 +71,7 @@ class Pipeline(BasePipeline):
             self.num_layers,
             self.num_kv_heads,
             self.head_dim,
-            H200_TP2_num_pages,
+            H200_TP4_num_pages,
             self.page_size,
             self.tp_size,
             self.device,
@@ -333,10 +333,10 @@ class Pipeline(BasePipeline):
         self.global_input.setBatchSize(self.global_batch_size)
         self.decAttn.setBatchSize(self.decode_batch_size)
 
-    def config_streams(self) -> None:
-        super().config_streams()
-        self.allReduce_o.set_stream((self.streams[CategoryType.NET][self.total_sm][0], self.total_sm))
-        self.allReduce_d.set_stream((self.streams[CategoryType.NET][self.total_sm][0], self.total_sm))
+    # def config_streams(self) -> None:
+    #     super().config_streams()
+    #     self.allReduce_o.set_stream((self.streams[CategoryType.NET][self.total_sm][0], self.total_sm))
+    #     self.allReduce_d.set_stream((self.streams[CategoryType.NET][self.total_sm][0], self.total_sm))
 
     def config_algorithm(self) -> None:
         print("Configuring algorithms...")

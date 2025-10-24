@@ -109,6 +109,7 @@ def test_correctness():
 
     print(output_text)
 
+
 def test_prefill_only():
     seq_len = 512
     num_prefill_reqs = 128
@@ -192,18 +193,17 @@ def test_prefill_only():
     )
     print(output_text)
 
-def test_performance():
-    seq_len = 1024
+
+def test_decode_only():
+    seq_len = 512
     # seq_len = 2048
-    # global_batch_size = 1024
-    global_batch_size = 2048
-    # global_batch_size = 3072
     # decode_batch_size = 128
-    decode_batch_size = 640
-    # decode_batch_size = 1280
-    prefill_batch_size = global_batch_size - decode_batch_size
+    # decode_batch_size = 640
+    decode_batch_size = 256
 
     prefill_context_ids = tokenizer.encode(prefill_context)
+    print("len(prefill_context_ids): ", len(
+        prefill_context_ids), "seq_len: ", seq_len)
     assert seq_len <= len(
         prefill_context_ids), f"seq_len {seq_len} should be less than {len(prefill_context_ids)}"
     prefill_input_ids = prefill_context_ids[:seq_len]
@@ -243,7 +243,130 @@ def test_performance():
     use_nanosplit.value = 0
     use_cuda_graph.value = 0
 
-    group_prefill_size = 8
+    group_prefill_size = 4  # might encounter the illegal memory access issue when group_prefill_size is too large, like group_prefill_size* seq_len == 16384
+    cycles = (decode_batch_size + group_prefill_size - 1) // group_prefill_size
+
+    for i in range(cycles):
+        print(f"Cycle {i + 1}/{cycles}")
+        prefill_inputs = []
+        if i == cycles - 1:
+            for j in range(i * group_prefill_size, decode_batch_size):
+                prefill_inputs.append((j, prefill_input_ids.copy()))
+                output_strings[j] = prefill_input_ids.copy()
+        else:
+            for j in range(i * group_prefill_size, (i + 1) * group_prefill_size):
+                prefill_inputs.append((j, prefill_input_ids.copy()))
+                output_strings[j] = prefill_input_ids.copy()
+        for queue in request_queues:
+            queue.put_nowait(prefill_inputs)
+
+        barrier.wait()
+        barrier.wait()
+
+        new_tokens = result_queue.get(timeout=1)
+        for req_idx, new_token in new_tokens:
+            output_strings[req_idx].extend(new_token)
+        decode_inputs.extend(new_tokens)
+        # print("new_tokens: ", new_tokens)
+
+    # prepare for the testing configuration
+
+    for queue in request_queues:
+        queue.put_nowait(decode_inputs)
+    shared_decode_bts.value = decode_batch_size
+    use_auto_search.value = USE_AUTO_SEARCH
+    use_nanosplit.value = USE_NANOSPLIT
+    use_cuda_graph.value = USE_CUDA_GRAPH
+
+    for i in range(20):
+        print("Cycle: ", i)
+        # Set the shared task value.
+        barrier.wait()
+        barrier.wait()
+        new_tokens = result_queue.get(timeout=1)
+        for req_idx, new_token in new_tokens:
+            output_strings[req_idx].extend(new_token)
+
+        # print("new_tokens: ", new_tokens)
+        assert len(new_tokens) == decode_batch_size
+
+        for queue in request_queues:
+            queue.put_nowait(new_tokens)
+
+    print("Start to terminate")
+
+    command.value = b"Terminate"
+    # Execute the final two barrier waits so that all workers exit cleanly.
+    barrier.wait()  # First barrier of termination iteration.
+    barrier.wait()  # Second barrier of termination iteration.
+
+    print("Waiting for all processes to finish... ", time.perf_counter() - T0)
+    # Wait for all worker processes to finish.
+    for p in processes:
+        p.join()
+
+    print("All processes have finished.")
+
+    output_text = tokenizer.batch_decode(
+        list(output_strings.values())[:2], skip_special_tokens=True
+    )
+    print(output_text)
+
+
+def test_performance():
+    # seq_len = 1024
+    seq_len = 2048
+    # global_batch_size = 1024
+    # global_batch_size = 2048
+    global_batch_size = 3072
+    # decode_batch_size = 128
+    # decode_batch_size = 640
+    decode_batch_size = 1280
+    prefill_batch_size = global_batch_size - decode_batch_size
+
+    prefill_context_ids = tokenizer.encode(prefill_context)
+    print("len(prefill_context_ids): ", len(
+        prefill_context_ids), "seq_len: ", seq_len)
+    assert seq_len <= len(
+        prefill_context_ids), f"seq_len {seq_len} should be less than {len(prefill_context_ids)}"
+    prefill_input_ids = prefill_context_ids[:seq_len]
+    request_queues = [mp.Queue(maxsize=1000) for _ in range(world_size)]
+    result_queue = mp.Queue(maxsize=1000)
+
+    prefill_inputs = []
+    decode_inputs = []
+    output_strings = {}
+    processes = []
+    for rank in range(world_size):
+        start_time = time.perf_counter()
+        # print(f"Starting process {rank} on GPU {rank}")
+        args = (
+            T0,
+            rank,
+            AFFINITY_MODULE_PATH,
+            request_queues[rank],
+            shared_decode_bts,
+            result_queue,
+            barrier,
+            pipeline_list[rank],
+            use_auto_search,
+            auto_search_path,
+            use_nanosplit,
+            use_cuda_graph,
+            command,
+        )
+        p = mp.Process(target=worker, args=args)
+
+        p.start()
+        processes.append(p)
+        # print(f"Process {rank} started on GPU {rank} in {time.perf_counter() - start_time:.2f} seconds")
+    command.value = b"Execute"
+    shared_decode_bts.value = 0
+    use_auto_search.value = 0
+    use_nanosplit.value = 0
+    use_cuda_graph.value = 0
+
+    group_prefill_size = 4  # might encounter the illegal memory access issue when group_prefill_size is too large, like group_prefill_size* seq_len == 16384
     cycles = (decode_batch_size + group_prefill_size - 1) // group_prefill_size
 
     for i in range(cycles):
@@ -279,9 +402,9 @@ def test_performance():
     for queue in request_queues:
         queue.put_nowait(decode_inputs)
     shared_decode_bts.value = decode_batch_size
-    use_auto_search.value = 0
-    use_nanosplit.value = 0
-    use_cuda_graph.value = 0
+    use_auto_search.value = USE_AUTO_SEARCH
+    use_nanosplit.value = USE_NANOSPLIT
+    use_cuda_graph.value = USE_CUDA_GRAPH
 
     for i in range(decode_batch_size, decode_batch_size + 20):
         print("Cycle: ", i - decode_batch_size)
@@ -390,58 +513,25 @@ if __name__ == "__main__":
     print("import modules, ", time.perf_counter() - T0)
 
     arg_parser = argparse.ArgumentParser()
-    arg_parser.add_argument(
-        "--tensor_parallel_size",
-        type=int,
-        default=1,
-        help="Tensor parallel size",
-    )
-    arg_parser.add_argument(
-        "--expert_parallel_size",
-        type=int,
-        default=1,
-        help="Expert parallel size",
-    )
-    arg_parser.add_argument(
-        "--test",
-        default="correctness",
-        help="Which test to run",
-    )
-    arg_parser.add_argument(
-        "--model",
-        default="8B",
-        help="Pick which Pipeline to instantiate",
-    )
-    arg_parser.add_argument(
-        "--kvcache_type",
-        choices=["none", "torch", "flashinfer"],
-        default="flashinfer",
-        help="Pick which KVCache to use",
-    )
-    arg_parser.add_argument(
-        "--network_type",
-        choices=["allreduce", "allgather"],
-        default="allreduce",
-        help="Pick which network type to use",
-    )
-    arg_parser.add_argument(
-        "--use_cuda_graph",
-        action="store_true",
-        default=False,
-        help="Enable CUDA graph",
-    )
-    arg_parser.add_argument(
-        "--use_auto_search",
-        action="store_true",
-        default=False,
-        help="Enable auto search",
-    )
-    arg_parser.add_argument(
-        "--use_nanosplit",
-        action="store_true",
-        default=False,
-        help="Enable nanosplit",
-    )
+    arg_parser.add_argument("--tensor_parallel_size",
+                            type=int, default=1, help="Tensor parallel size")
+    arg_parser.add_argument("--expert_parallel_size",
+                            type=int, default=1, help="Expert parallel size")
+    arg_parser.add_argument("--test",
+                            type=str, default="correctness", help="Which test to run")
+    arg_parser.add_argument("--model",
+                            type=str, default="8B", help="Pick which Pipeline to instantiate")
+    arg_parser.add_argument("--kvcache_type",
+                            choices=["none", "torch", "flashinfer"],
+                            type=str, default="flashinfer", help="Pick which KVCache to use")
+    arg_parser.add_argument("--network_type",
+                            choices=["allreduce", "allgather"], type=str, default="allreduce", help="Pick which network type to use")
+    arg_parser.add_argument("--use_cuda_graph", action="store_true",
+                            help="Enable CUDA graph")
+    arg_parser.add_argument("--use_auto_search", action="store_true",
+                            help="Enable auto search")  # ["none", "torch", "flashinfer"]
+    arg_parser.add_argument("--use_nanosplit", action="store_true",
+                            help="Enable nanosplit")
     args = arg_parser.parse_args()
 
     world_size = torch.cuda.device_count()
@@ -480,7 +570,6 @@ if __name__ == "__main__":
         else:
             raise NotImplementedError(
                 f"KVCache type {args.kvcache_type} not implemented yet.")
-
 
         cfgs = [Config(
             multi_gpu_mode=MULTI_GPU_MODE,
@@ -527,7 +616,7 @@ if __name__ == "__main__":
         ) for i in range(world_size)]
 
         auto_search_path = None
-    
+
     elif args.model == "Qwen2-57B-A14B-Instruct-EP":
         MODEL_ID = "Qwen/Qwen2-57B-A14B-Instruct"
         weight_map = "/code/hf/hub/models--Qwen--Qwen2-57B-A14B-Instruct/snapshots/50896d66b39f1425d63720541a66c7df13e053c0"
@@ -616,6 +705,8 @@ if __name__ == "__main__":
         test_performance()
     elif args.test == "prefill_only":
         test_prefill_only()
+    elif args.test == "decode_only":
+        test_decode_only()
     elif args.test == "profile":
         profile()
     else:

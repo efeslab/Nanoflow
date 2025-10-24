@@ -89,7 +89,7 @@ class Pipeline(BasePipeline):
         #     self.tp_size,
         #     self.device,
         # )
-        capacity = 2048 * 28
+        capacity = 2048 * 84
         self.kv_pool = DistKVPool(
             self.num_layers,
             self.num_kv_heads,
