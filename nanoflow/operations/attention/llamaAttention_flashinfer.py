@@ -67,8 +67,8 @@ if platform_config.PLATFORM_CUDA:
 
 
 class DecAttnFlashinfer(Operations):
-    def __init__(self, name, device):
-        super().__init__(name, device)
+    def __init__(self, name, device, nano_idx=None):
+        super().__init__(name, device, nano_idx=nano_idx)
         self.inputs = {
             "Q": IOWrapper(self, 'Q', device).is_input(),
         }
@@ -97,19 +97,32 @@ class DecAttnFlashinfer(Operations):
         return self
 
     def update(self, qo_indicies):
-        self.qo_indicies = qo_indicies
-        io = self.inputs["Q"]
-        start_req_idx = tensor_offset_to_req_idx(qo_indicies, io.tensor_offset)
-        end_req_idx = tensor_offset_to_req_idx(
-            qo_indicies, io.tensor_offset + io.batch_size)
-        self.kv_indptr = self.externals["KVCache"].kv_indptr[start_req_idx: end_req_idx + 1]
-        self.kv_indices = self.externals["KVCache"].kv_indices
-        self.kv_last_page_len = self.externals["KVCache"].kv_last_page_len[start_req_idx: end_req_idx]
+        if self.isNanoSplit:
+            for nano_op in self.nano_ops:
+                nano_op.update(qo_indicies)
+        else:
+            io = self.inputs["Q"]
+            start_req_idx = tensor_offset_to_req_idx(qo_indicies, io.tensor_offset)
+            end_req_idx = tensor_offset_to_req_idx(qo_indicies, io.tensor_offset + io.batch_size)
 
-        self.page_size = self.externals["KVCache"].page_size
-        if io.batch_size > 0:
-            self.impl.plan(self.kv_indptr, self.kv_indices,
-                           self.kv_last_page_len, self.page_size)
+            self.kv_indptr = self.externals["KVCache"].kv_indptr[start_req_idx: end_req_idx + 1]
+            self.kv_indices = self.externals["KVCache"].kv_indices
+            self.kv_last_page_len = self.externals["KVCache"].kv_last_page_len[start_req_idx: end_req_idx]
+
+            self.page_size = self.externals["KVCache"].page_size
+            if io.batch_size > 0:
+                self.impl.plan(self.kv_indptr, self.kv_indices,
+                            self.kv_last_page_len, self.page_size)
+        
+    def copy_nano(self, index):
+        new_op = DecAttnFlashinfer(self.name, self.device, nano_idx=index)
+        new_op.set_category(self.category)
+        new_op.externals = self.externals
+        new_op.expand_layer(self.layer_list)
+        new_op.setShape(self.num_kv_heads, self.num_qo_heads,
+                        self.head_dim, self.tp_size)
+        self.nano_ops.append(new_op)
+        return new_op
 
     def profile_update(self):
         self.impl.plan(self.kv_indptr, self.kv_indices,
@@ -284,8 +297,7 @@ class PFAttnFlashinfer(Operations):
         else:
             io = self.inputs["Q"]
             start_req_idx = tensor_offset_to_req_idx(qo_indicies, io.tensor_offset)
-            end_req_idx = tensor_offset_to_req_idx(
-                qo_indicies, io.tensor_offset + io.batch_size)
+            end_req_idx = tensor_offset_to_req_idx(qo_indicies, io.tensor_offset + io.batch_size)
 
             self.qo_indicies = torch.tensor(
                 qo_indicies[start_req_idx: end_req_idx + 1], dtype=torch.int32, device=self.device) - io.tensor_offset

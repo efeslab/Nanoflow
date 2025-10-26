@@ -1,5 +1,6 @@
 import argparse
 import time
+import torch
 import torch.multiprocessing as mp
 
 from nanoflow.entry.common import (
@@ -93,14 +94,14 @@ def main():
     command, shared_decode_bts, use_auto_search, use_nanosplit, use_cuda_graph, barrier = create_shared_variables(world_size)
 
     # Settings
-    # seq_len = 1024
-    seq_len = 2048
+    seq_len = 1024
+    # seq_len = 2048
     # global_batch_size = 1024
-    # global_batch_size = 2048
-    global_batch_size = 3072
+    global_batch_size = 2048
+    # global_batch_size = 3072
     # decode_batch_size = 128
-    # decode_batch_size = 640
-    decode_batch_size = 1280
+    decode_batch_size = 640
+    # decode_batch_size = 1280
     prefill_batch_size = global_batch_size - decode_batch_size
     
     prefill_context_ids = arts.tokenizer.encode(prefill_context)
@@ -174,6 +175,7 @@ def main():
     use_nanosplit.value = args.use_nanosplit
     use_cuda_graph.value = args.use_cuda_graph
 
+    torch.cuda.cudart().cudaProfilerStart()
     for i in range(decode_batch_size, decode_batch_size + 20):
         print("Cycle: ", i - decode_batch_size)
         next_prefill_idx = i + 1
@@ -198,6 +200,7 @@ def main():
         for queue in request_queues:
             queue.put_nowait(new_tokens)
 
+    torch.cuda.cudart().cudaProfilerStop()
     command.value = b"Terminate"
     step_barrier(barrier)
     

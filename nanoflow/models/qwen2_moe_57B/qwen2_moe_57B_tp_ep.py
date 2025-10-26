@@ -46,7 +46,7 @@ class Pipeline(BasePipeline):
             num_layers=cfg.num_layers,
             world_size=cfg.world_size,
             world_rank=cfg.world_rank,
-            categories=[CategoryType.COMP, CategoryType.MEM],
+            categories=[CategoryType.COMP, CategoryType.NET],
         )
 
         self.num_kv_heads = cfg.num_kv_heads

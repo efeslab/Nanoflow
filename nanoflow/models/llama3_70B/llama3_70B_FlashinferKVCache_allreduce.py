@@ -401,8 +401,10 @@ class Pipeline(BasePipeline):
 
                 op_nanobatch_info_map[op_basename] = tuple(split_info_list)
         else:
-            assert self.decode_batch_size == 0, "Decode batch size should be 0 for auto search"
+            assert self.global_batch_size == self.decode_batch_size, "Global batch size should be equal to decode batch size for auto search"
             micro_batch_size = self.global_batch_size // 2
+            # assert self.decode_batch_size == 0, "Decode batch size should be 0 for auto search"
+            # micro_batch_size = self.global_batch_size // 2
             info = (
                 NanoOpInfo(batch_idx=0, batch_size=micro_batch_size),
                 NanoOpInfo(batch_idx=1, batch_size=micro_batch_size),
@@ -411,7 +413,8 @@ class Pipeline(BasePipeline):
                 "LayerNormAttn": copy.deepcopy(info),
                 "KQV": copy.deepcopy(info),
                 "RopeAppend": copy.deepcopy(info),
-                "PFAttn": copy.deepcopy(info),
+                "DecAttn": copy.deepcopy(info),
+                # "PFAttn": copy.deepcopy(info),
                 "O": copy.deepcopy(info),
                 "AllReduceO": copy.deepcopy(info),
                 "LayerNormFFN": copy.deepcopy(info),
