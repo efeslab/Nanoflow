@@ -1,5 +1,4 @@
 import copy
-import json
 from typing import Any, Optional
 import torch
 
@@ -27,6 +26,8 @@ from nanoflow.core import CategoryType
 from nanoflow.core.nanobatchSplit import split_nanobatch
 
 from .config_llama3_70B import Llama3_70B_Config
+
+
 class Pipeline(BasePipeline):
     def __init__(self, cfg: Llama3_70B_Config) -> None:
         # Set parameters as instance variables.
@@ -52,7 +53,7 @@ class Pipeline(BasePipeline):
         self.page_size = cfg.page_size
 
         self.kqv_heads = self.num_qo_heads + 2 * self.num_kv_heads
-        
+
     def init_external_data(self) -> None:
         print("Initializing external data...")
         self.kv_pool = DistKVPool(
@@ -285,7 +286,6 @@ class Pipeline(BasePipeline):
         self.ug.set_category(CategoryType.COMP)
         self.activation.set_category(CategoryType.COMP)
         self.d.set_category(CategoryType.COMP)
-
 
     def apply_batch_size(self) -> None:
         print(

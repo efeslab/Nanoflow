@@ -20,6 +20,12 @@ def main():
     mp.set_start_method("spawn")
     arg_parser = argparse.ArgumentParser()
     arg_parser.add_argument(
+        "--data_parallel_size",
+        type=int,
+        default=1,
+        help="Data parallel size",
+    )
+    arg_parser.add_argument(
         "--tensor_parallel_size",
         type=int,
         default=1,
@@ -72,6 +78,7 @@ def main():
     args = arg_parser.parse_args()
 
     args = CliArgs(
+        data_parallel_size=args.data_parallel_size,
         tensor_parallel_size=args.tensor_parallel_size,
         expert_parallel_size=args.expert_parallel_size,
         test="correctness",

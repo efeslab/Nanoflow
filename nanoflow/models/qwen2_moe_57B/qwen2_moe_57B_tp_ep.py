@@ -467,6 +467,10 @@ class Pipeline(BasePipeline):
 
         self.sample.outputs["tokens"] >> self.global_output.inputs["tokens"]
 
+        # hints for better performance
+        self.shared_ug.append_dependency((self.fused_moe, 0))
+        self.shared_expert_gate.append_dependency((self.fused_moe, 0))
+
         for operation in self.all_operations:
             operation.checkConnection()
 
@@ -479,6 +483,11 @@ class Pipeline(BasePipeline):
         )
         self.global_input.setBatchSize(self.global_batch_size)
         self.decAttn.setBatchSize(self.decode_batch_size)
+
+    # def config_streams(self) -> None:
+    #     super().config_streams()
+    #     self.allReduce_o.set_stream((self.streams[CategoryType.NET][self.total_sm][0], self.total_sm))
+    #     self.allReduce_fused_moe.set_stream((self.streams[CategoryType.NET][self.total_sm][0], self.total_sm))
 
     def config_algorithm(self) -> None:
         print("Configuring algorithms...")
@@ -525,6 +534,59 @@ class Pipeline(BasePipeline):
         self.allReduce_fused_moe.update(
             None, rank=self.ep_rank, world_size=self.ep_size, unique_nccl_ids=self.unique_nccl_ids[5:10]
         )
+
+    # def nanobatch_split(self) -> None:
+    #     """Split the model operations into nano operations."""
+    #     op_nanobatch_info_map: dict[str, tuple[NanoOpInfo, ...]] = {}
+    #     extra_links: dict[str, list[tuple[str, bool]]] = {}
+    #     if self.is_auto_search_enabled:
+    #         for op_basename, op_info in self.profile_result.items():
+    #             split_info_list = []
+    #             for nano_op_name, nano_op_info in op_info.items():
+    #                 split_info_list.append(
+    #                     NanoOpInfo(
+    #                         batch_idx=nano_op_info["batch_idx"],
+    #                         batch_size=nano_op_info["batch_size"],
+    #                     )
+    #                 )
+    #                 extra_links[nano_op_name] = nano_op_info["extra_dep"]
+
+    #             op_nanobatch_info_map[op_basename] = tuple(split_info_list)
+    #     else:
+    #         info = (
+    #             NanoOpInfo(batch_idx=0, batch_size=self.decode_batch_size),
+    #             NanoOpInfo(batch_idx=1, batch_size=self.global_batch_size - self.decode_batch_size),
+    #         )
+    #         op_nanobatch_info_map = {
+    #             "LayerNormAttn": copy.deepcopy(info),
+    #             "KQV": copy.deepcopy(info),
+    #             "KQVBias": copy.deepcopy(info),
+    #             "RopeAppend": copy.deepcopy(info),
+    #             "O": copy.deepcopy(info),
+    #             "AllReduceO": copy.deepcopy(info),
+    #             "LayerNormFFN": copy.deepcopy(info),
+    #             "Gate": copy.deepcopy(info),
+    #             "FusedMoE": copy.deepcopy(info),
+    #             "AllReduceFusedMoE": copy.deepcopy(info),
+    #             "SharedExpertGate": copy.deepcopy(info),
+                
+    #             "UG": copy.deepcopy(info),
+    #             "Activation": copy.deepcopy(info),
+    #             "D": copy.deepcopy(info),
+    #             "AllReduceD": copy.deepcopy(info),
+    #         }
+    #         extra_links = {}
+    #     model_ops, addtional_virtual_ops = split_nanobatch(
+    #         self.original_model_operations, op_nanobatch_info_map, extra_links
+    #     )
+    #     self.model_operations = model_ops
+    #     self.all_operations = []
+    #     self.all_layer_operations = []
+    #     for op in model_ops + self.virtual_operations + addtional_virtual_ops:
+    #         print("op.name", op.name, op.batch_size)
+    #         self.all_operations.append(op)
+    #     for operation in model_ops:
+    #         self.all_layer_operations.extend(operation.children)
 
     def post_update_ops(self, input_req_idx: list[int], input_tensor: torch.Tensor, cumsum_input: list[int], decode_batch_size: int) -> None:
         assert self.kv_cache is not None, "KV cache not initialized"

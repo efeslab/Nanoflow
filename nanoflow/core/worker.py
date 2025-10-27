@@ -47,7 +47,7 @@ def worker(start_time, rank, request_queue: mp.Queue, shared_decode_bts, result_
                     # total_batch_sizes = [640, 1408, 2048]
                     total_batch_sizes = [1280, 1792, 3072]
                     for idx, total_batch_size in enumerate(total_batch_sizes):
-                        input = [(idx, input_ids[:total_batch_size].copy())]
+                        input = [(idx, input_ids[:total_batch_size])]
 
                         pipeline.update(input, is_profile=True, stream_name=stream_name)
                         pipeline.profile_run()

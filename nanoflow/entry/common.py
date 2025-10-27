@@ -13,6 +13,7 @@ from nanoflow.pybind.build.bind_all_reduce import NCCLWrapper
 
 @dataclass
 class CliArgs:
+    data_parallel_size: int = 1
     tensor_parallel_size: int = 1
     expert_parallel_size: int = 1
     test: str = "correctness"
@@ -37,6 +38,7 @@ def setup_model_and_configs(args: CliArgs) -> ModelArtifacts:
     world_size = torch.cuda.device_count()
     print("world size: ", world_size)
     MULTI_GPU_MODE = True
+    FULL_DATA_PARALLEL_MODE = args.data_parallel_size == world_size
 
     unique_nccl_ids = [NCCLWrapper.get_nccl_unique_id() for _ in range(10)]
 
@@ -44,23 +46,29 @@ def setup_model_and_configs(args: CliArgs) -> ModelArtifacts:
         MODEL_ID = "meta-llama/Meta-Llama-3-70B-Instruct"
         weight_map = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
         from nanoflow.models.llama3_70B.config_llama3_70B import Llama3_70B_Config as Config
-
+        assert world_size == args.data_parallel_size * args.tensor_parallel_size, "world_size should be equal to data_parallel_size * tensor_parallel_size"
         if args.kvcache_type == "flashinfer":
-            if args.network_type == "allreduce":
-                from nanoflow.models.llama3_70B.llama3_70B_FlashinferKVCache_allreduce import Pipeline
-            elif args.network_type == "allgather":
-                from nanoflow.models.llama3_70B.llama3_70B_FlashinferKVCache_allgather import Pipeline
+            if FULL_DATA_PARALLEL_MODE:
+                from nanoflow.models.llama3_70B.llama3_70B_FlashinferKVCache import Pipeline
             else:
-                raise NotImplementedError(
-                    f"Network type {args.network_type} not implemented yet.")
+                if args.network_type == "allreduce":
+                    from nanoflow.models.llama3_70B.llama3_70B_FlashinferKVCache_allreduce import Pipeline
+                elif args.network_type == "allgather":
+                    from nanoflow.models.llama3_70B.llama3_70B_FlashinferKVCache_allgather import Pipeline
+                else:
+                    raise NotImplementedError(
+                        f"Network type {args.network_type} not implemented yet.")
         elif args.kvcache_type == "torch":
-            if args.network_type == "allreduce":
-                from nanoflow.models.llama3_70B.llama3_70B_KVCacheTorch_allreduce import Pipeline
-            elif args.network_type == "allgather":
-                from nanoflow.models.llama3_70B.llama3_70B_KVCacheTorch_allgather import Pipeline
+            if FULL_DATA_PARALLEL_MODE:
+                raise NotImplementedError("Data parallel mode is not supported for torch kvcache type")
             else:
-                raise NotImplementedError(
-                    f"Network type {args.network_type} not implemented yet.")
+                if args.network_type == "allreduce":
+                    from nanoflow.models.llama3_70B.llama3_70B_KVCacheTorch_allreduce import Pipeline
+                elif args.network_type == "allgather":
+                    from nanoflow.models.llama3_70B.llama3_70B_KVCacheTorch_allgather import Pipeline
+                else:
+                    raise NotImplementedError(
+                        f"Network type {args.network_type} not implemented yet.")
         else:
             raise NotImplementedError(
                 f"KVCache type {args.kvcache_type} not implemented yet.")
@@ -71,7 +79,9 @@ def setup_model_and_configs(args: CliArgs) -> ModelArtifacts:
             world_size=world_size,
             world_rank=i,
             tp_size=args.tensor_parallel_size,
-            tp_rank=i,
+            tp_rank=i % args.tensor_parallel_size,
+            dp_size=args.data_parallel_size,
+            dp_rank=i // args.tensor_parallel_size,
             kv_cache_type=args.kvcache_type,
             network_type=args.network_type,
             unique_nccl_ids=unique_nccl_ids,
