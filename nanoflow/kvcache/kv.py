@@ -688,11 +688,11 @@ class BatchedDistKVCache():
         self.per_token_offset = torch.tensor([], dtype=torch.int32, device=self.device)
 
         self.double_buffer_enabled = False
-        self.kv_indptr_tmp = torch.tensor([0], dtype=torch.int32, device=self.device)
-        self.kv_indices_tmp = torch.empty(self._pool._max_num_pages, dtype=torch.int32, device=self.device)
-        self.kv_last_page_len_tmp = torch.tensor([], dtype=torch.int32, device=self.device)
-        self.rev_input_indptr_tmp = torch.tensor([], dtype=torch.int32, device=self.device)
-        self.per_token_offset_tmp = torch.tensor([], dtype=torch.int32, device=self.device)
+        self.kv_indptr_tmp = torch.tensor([0], dtype=torch.int32, device="cpu")
+        self.kv_indices_tmp = torch.empty(self._pool._max_num_pages, dtype=torch.int32, device="cpu")
+        self.kv_last_page_len_tmp = torch.tensor([], dtype=torch.int32, device="cpu")
+        self.rev_input_indptr_tmp = torch.tensor([], dtype=torch.int32, device="cpu")
+        self.per_token_offset_tmp = torch.tensor([], dtype=torch.int32, device="cpu")
 
     def get_pool(self):
         return self._pool
@@ -830,10 +830,10 @@ class BatchedDistKVCache():
             kv_last_page_len_ref.resize_(kv_last_page_len_tensor.numel())
             kv_last_page_len_ref.copy_(kv_last_page_len_tensor)
 
-    def update_for_next_cycle(self, cumsum_input, input_req_idx, decode_batchsize, use_cuda_graph=False):
-        self.update_template(cumsum_input, input_req_idx, decode_batchsize, self.rev_input_indptr_tmp, self.per_token_offset_tmp, self.kv_indptr_tmp, self.kv_indices_tmp, self.kv_last_page_len_tmp, use_cuda_graph)
+    def update_for_next_cycle(self, cumsum_input, input_req_idx, decode_batchsize, cuda_graph_enabled=False):
+        self.update_template(cumsum_input, input_req_idx, decode_batchsize, self.rev_input_indptr_tmp, self.per_token_offset_tmp, self.kv_indptr_tmp, self.kv_indices_tmp, self.kv_last_page_len_tmp, cuda_graph_enabled)
 
-    def update(self, cumsum_input, input_req_idx, decode_batchsize, double_buffer_enabled=False, use_cuda_graph=False):
+    def update(self, cumsum_input, input_req_idx, decode_batchsize, double_buffer_enabled=False, cuda_graph_enabled=False):
         if double_buffer_enabled:
             self.rev_input_indptr.copy_(self.rev_input_indptr_tmp)
             self.per_token_offset.copy_(self.per_token_offset_tmp)
@@ -841,7 +841,7 @@ class BatchedDistKVCache():
             self.kv_indices[:self.num_indices].copy_(self.kv_indices_tmp[:self.num_indices])
             self.kv_last_page_len.copy_(self.kv_last_page_len_tmp)
         else:
-            self.update_template(cumsum_input, input_req_idx, decode_batchsize, self.rev_input_indptr, self.per_token_offset, self.kv_indptr, self.kv_indices, self.kv_last_page_len, use_cuda_graph)
+            self.update_template(cumsum_input, input_req_idx, decode_batchsize, self.rev_input_indptr, self.per_token_offset, self.kv_indptr, self.kv_indices, self.kv_last_page_len, cuda_graph_enabled)
 
 
     @property

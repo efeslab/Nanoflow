@@ -29,8 +29,9 @@ from nanoflow.kvcache.kv import DistKVPool, BatchedDistKVCache
 
 from nanoflow.core.basePipeline import BasePipeline
 from nanoflow.core import CategoryType
-
 from nanoflow.core.nanobatchSplit import split_nanobatch
+
+from nanoflow.utils.prof_marker import prof_marker
 
 from .config_qwen2_moe_57B import Qwen2MoEConfig
 
@@ -80,15 +81,6 @@ class Pipeline(BasePipeline):
 
     def init_external_data(self) -> None:
         print("Initializing external data...")
-        # self.kv_pool = DistKVPool(
-        #     self.num_layers,
-        #     self.num_kv_heads,
-        #     self.head_dim,
-        #     2048,
-        #     self.page_size,
-        #     self.tp_size,
-        #     self.device,
-        # )
         capacity = 2048 * 84
         self.kv_pool = DistKVPool(
             self.start_layer_idx,
@@ -493,12 +485,12 @@ class Pipeline(BasePipeline):
     def config_algorithm(self) -> None:
         print("Configuring algorithms...")
         params = {
-            "use_cuda_graph": self.is_cuda_graph_enabled,
+            "use_cuda_graph": self.cuda_graph_enabled,
         }
 
         self.gen_embedding.config_tag("cuda", params)
 
-        if self.is_auto_search_enabled:
+        if self.auto_search_enabled:
             super().config_algorithm_auto_search(params)
         else:
             self.layerNormAttn.config_tag("cuda", params)
@@ -595,10 +587,20 @@ class Pipeline(BasePipeline):
             cumsum_input,
             input_req_idx,
             decode_batch_size,
-            use_cuda_graph=(not self.plan_cuda_graph)
-            and self.is_cuda_graph_enabled,
+            double_buffer_enabled=self.double_buffer_enabled,
+            cuda_graph_enabled=self.cuda_graph_enabled,
         )
         self.global_input.outputs["tokens"].tensor.copy_(input_tensor)
         self.ropeAppend.update(cumsum_input, decode_batch_size)
         self.decAttn.update(cumsum_input)
         self.pfAttn.update(cumsum_input)
+
+    def post_update_for_next_cycle_ops(self, next_input_req_idx: list[int], next_cumsum_input: list[int], next_decode_batch_size: int) -> None:
+        assert self.kv_cache is not None, "KV cache not initialized"
+        with prof_marker("post_update_for_next_cycle_ops_step_0: update_kv_cache"):
+            self.kv_cache.update_for_next_cycle(
+                next_cumsum_input,
+                next_input_req_idx,
+                next_decode_batch_size,
+                cuda_graph_enabled=self.cuda_graph_enabled,
+            )

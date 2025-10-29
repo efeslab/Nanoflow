@@ -79,7 +79,7 @@ class Executor:
         plot_graph_topological(self.ordered_graph)
 
     def execute(
-        self, output, main_stream, plan_cuda_graph=False, is_cuda_graph_enabled=False
+        self, output, main_stream, plan_cuda_graph=False, cuda_graph_enabled=False
     ):
         if plan_cuda_graph:
             assert (
@@ -95,11 +95,11 @@ class Executor:
                     op.run()
                     op.record_cuda_event()
             self.cuda_graph.replay()
-        if not plan_cuda_graph and is_cuda_graph_enabled:
+        if cuda_graph_enabled:
             # replay CUDA graph
             print("replay CUDA graph")
             self.cuda_graph.replay()
-        elif not plan_cuda_graph and not is_cuda_graph_enabled:
+        elif not (plan_cuda_graph or cuda_graph_enabled):
             # just run
             print("Normal execution")
             for op_name in self.ordered_operations:

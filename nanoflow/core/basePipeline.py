@@ -145,11 +145,11 @@ class BasePipeline(ABC):
 
         # execution / profiling flags
         self.buffer_fixed: bool = False
-        self.is_auto_search_enabled: bool = False
-        self.is_cuda_graph_enabled: bool = False
+        self.auto_search_enabled: bool = False
         self.plan_cuda_graph: bool = False
-        self.double_buffer_enabled: bool = False
+        self.cuda_graph_enabled: bool = False
         self.plan_double_buffer: bool = False
+        self.double_buffer_enabled: bool = False
         self.profile_result: dict[str, Any] | None = None
 
         # batch & shape
@@ -253,7 +253,7 @@ class BasePipeline(ABC):
         for op in self.original_model_operations:
             op.set_stream((self.main_stream, self.total_sm))
 
-        if self.is_auto_search_enabled:
+        if self.auto_search_enabled:
             assert self.profile_result is not None, "Profile result not initialized"
             for op in self.model_operations:
                 if op.original_name in self.profile_result:
@@ -297,23 +297,25 @@ class BasePipeline(ABC):
 
     # --------- Base: update lifecycle ---------
     def _prepare_inputs(self, input_infos: list[tuple[int, list[int]]]) -> tuple[
-        int, torch.Tensor,
+        int, torch.Tensor, list[int], list[list[int]]
     ]:
-        self.input_req_idx = []
-        self.input_ids = []
-        for req_idx, ids in input_infos:
-            self.input_req_idx.append(req_idx)
-            self.input_ids.append(ids)
+        with prof_marker("prepare_inputs"):
+            input_req_idx = []
+            input_ids = []
+            for req_idx, ids in input_infos:
+                input_req_idx.append(req_idx)
+                input_ids.append(ids)
 
-        flattened = [tok for seq in self.input_ids for tok in seq]
-        global_batch_size = len(flattened)
-        input_tensor = torch.tensor(
-            flattened, dtype=torch.int32, device=self.device)
-        return global_batch_size, input_tensor
+            flattened = [tok for seq in input_ids for tok in seq]
+            global_batch_size = len(flattened)
+        with prof_marker("prepare_inputs_create_input_tensor"):
+            input_tensor = torch.tensor(
+                flattened, dtype=torch.int32, device="cpu")
+        return global_batch_size, input_tensor, input_req_idx, input_ids
 
-    def _compute_cumsums(self) -> list[int]:
+    def _compute_cumsums(self, input_ids: list[list[int]]) -> list[int]:
         request_length = torch.tensor(
-            [len(x) for x in self.input_ids], dtype=torch.int32, device="cpu"
+            [len(x) for x in input_ids], dtype=torch.int32, device="cpu"
         )
         cumsum_input = torch.cat(
             [
@@ -329,16 +331,16 @@ class BasePipeline(ABC):
         if self.next_input_infos is None:
             return
         # -------- inputs --------
-        with prof_marker("update_prepare_inputs"):
-            _, _ = self._prepare_inputs(
+        with prof_marker("update_for_next_cycle_prepare_inputs"):
+            _, _, next_input_req_idx, next_input_ids = self._prepare_inputs(
                 self.next_input_infos)
 
-        with prof_marker("update_compute_cumsum"):
-            self.cumsum_input = self._compute_cumsums()
+        with prof_marker("update_for_next_cycle_compute_cumsum"):
+            next_cumsum_input = self._compute_cumsums(next_input_ids)
         # -------- always update per-op state --------
-        with prof_marker("update_post_ops"):
+        with prof_marker("update_for_next_cycle_post_ops"):
             self.post_update_for_next_cycle_ops(
-                self.input_req_idx, self.cumsum_input, self.next_decode_batch_size)
+                next_input_req_idx, next_cumsum_input, self.next_decode_batch_size)
 
     def update(
         self,
@@ -349,43 +351,40 @@ class BasePipeline(ABC):
         is_profile: bool = False,
         stream_name: str = "TEST_TOTAL",
         profile_result_path: Optional[str] = None,
-        use_auto_search: bool = False,
-        use_nano_split: bool = False,  # subclasses can ignore/override
-        use_cuda_graph: bool = False,
+        auto_search_enabled: bool = False,
+        nano_split_enabled: bool = False,  # subclasses can ignore/override
+        plan_cuda_graph: bool = False,
+        cuda_graph_enabled: bool = False,
         plan_double_buffer: bool = False,
         double_buffer_enabled: bool = False,
     ) -> None:
         # -------- inputs --------
         with prof_marker("update_prepare_inputs"):
-            global_batch_size, input_tensor = self._prepare_inputs(
+            global_batch_size, input_tensor, input_req_idx, input_ids = self._prepare_inputs(
                 input_infos)
+            self.input_req_idx = input_req_idx
             self.next_input_infos = next_input_infos
             self.next_decode_batch_size = next_decode_batch_size
             if self.next_input_infos is None:
-                assert double_buffer_enabled is False, "Double buffer is not enabled when next_input_infos is None"
+                assert not (double_buffer_enabled or plan_double_buffer), "Double buffer related flags are not allowed when next_input_infos is None"
         # -------- flags --------
         self.buffer_fixed = (
             global_batch_size == self.global_batch_size
             and decode_batch_size == self.decode_batch_size
         )
 
-        self.plan_cuda_graph = False
-        if use_cuda_graph and self.is_cuda_graph_enabled:
-            assert (
-                decode_batch_size == self.decode_batch_size
-                and global_batch_size == self.global_batch_size
-            ), "When using CUDA graph, batch sizes must remain unchanged."
-        elif use_cuda_graph and not self.is_cuda_graph_enabled:
-            self.plan_cuda_graph = True
-        self.is_cuda_graph_enabled = use_cuda_graph
+        self.plan_cuda_graph = plan_cuda_graph
+        self.cuda_graph_enabled = cuda_graph_enabled
+        assert not (self.plan_cuda_graph and self.cuda_graph_enabled), "CUDA graph is not enabled when plan_cuda_graph is True"
 
-        self.is_auto_search_enabled = use_auto_search
-        if profile_result_path is not None and use_auto_search:
+        if self.cuda_graph_enabled:
+            assert self.buffer_fixed, "When using CUDA graph, batch sizes must remain unchanged."
+
+        self.auto_search_enabled = auto_search_enabled
+        if self.auto_search_enabled:
+            assert profile_result_path is not None, "profile_result_path must be provided when auto_search_enabled=True"
             with open(profile_result_path, "r") as f:
                 self.profile_result = json.load(f)
-        elif use_auto_search and profile_result_path is None:
-            raise ValueError(
-                "profile_result_path must be provided when use_auto_search=True")
 
         self.plan_double_buffer = plan_double_buffer
         self.double_buffer_enabled = double_buffer_enabled
@@ -401,7 +400,7 @@ class BasePipeline(ABC):
                 self.apply_batch_size()
 
                 # optional: subclasses may split/nanosplit here
-                if use_nano_split:
+                if nano_split_enabled:
                     self.nanobatch_split()
 
                 self.update_allocate_buffers()
@@ -417,12 +416,12 @@ class BasePipeline(ABC):
                 print("Executor initialized")
 
             with prof_marker("update_compute_cumsum"):
-                self.cumsum_input = self._compute_cumsums()
+                self.cumsum_input = self._compute_cumsums(input_ids)
 
         # -------- always update per-op state --------
         with prof_marker("update_post_ops"):
             self.post_update_ops(
-                self.input_req_idx, input_tensor, self.cumsum_input, decode_batch_size)
+                self.input_req_idx, input_tensor.to(self.device), self.cumsum_input, decode_batch_size)
 
     # --------- Base: run + simple profile helpers ---------
     def run(self) -> list[tuple[int, list[int]]]:
@@ -434,7 +433,7 @@ class BasePipeline(ABC):
             temp_out,
             self.main_stream,
             plan_cuda_graph=self.plan_cuda_graph,
-            is_cuda_graph_enabled=self.is_cuda_graph_enabled,
+            cuda_graph_enabled=self.cuda_graph_enabled,
         )
         if self.plan_double_buffer or self.double_buffer_enabled:
             self.update_for_next_cycle()

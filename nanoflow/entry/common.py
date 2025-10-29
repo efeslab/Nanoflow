@@ -1,5 +1,5 @@
-import os
-import time
+import argparse
+
 import torch
 import torch.multiprocessing as mp
 from transformers import AutoTokenizer
@@ -20,9 +20,12 @@ class CliArgs:
     model: str = "Llama3-8B"
     kvcache_type: str = "flashinfer" # ["none", "torch", "flashinfer"]
     network_type: str = "allreduce" # ["allreduce", "allgather"]
-    use_cuda_graph: bool = False
-    use_auto_search: bool = False
-    use_nanosplit: bool = False
+    auto_search_enabled: bool = False
+    nano_split_enabled: bool = False
+    plan_cuda_graph: bool = False
+    cuda_graph_enabled: bool = False
+    plan_double_buffer: bool = False
+    double_buffer_enabled: bool = False
     affinity_module_path: Optional[str] = None
 
 @dataclass
@@ -33,6 +36,55 @@ class ModelArtifacts:
     cfgs: list
     tokenizer: AutoTokenizer
     auto_search_path: Optional[str]
+
+def parse_args() -> CliArgs:
+    p = argparse.ArgumentParser()
+    p.add_argument("--data_parallel_size",
+                            type=int, default=1, help="Data parallel size")
+    p.add_argument("--tensor_parallel_size",
+                            type=int, default=1, help="Tensor parallel size")
+    p.add_argument("--expert_parallel_size",
+                            type=int, default=1, help="Expert parallel size")
+    p.add_argument("--test",
+                            type=str, default="correctness", help="Which test to run")
+    p.add_argument("--model",
+                            type=str, default="8B", help="Pick which Pipeline to instantiate")
+    p.add_argument("--kvcache_type",
+                            type=str, default="flashinfer", help="Pick which KVCache to use")
+    p.add_argument("--network_type",
+                            type=str, default="allreduce", help="Pick which network type to use")
+    p.add_argument("--auto_search_enabled", action="store_true",
+                            help="Auto search enabled")
+    p.add_argument("--nano_split_enabled", action="store_true",
+                            help="Nanosplit enabled")
+    p.add_argument("--plan_cuda_graph", action="store_true",
+                            help="Plan CUDA graph")
+    p.add_argument("--cuda_graph_enabled", action="store_true",
+                            help="CUDA graph enabled")
+    p.add_argument("--plan_double_buffer", action="store_true",
+                            help="Plan double buffer")
+    p.add_argument("--double_buffer_enabled", action="store_true",
+                            help="Double buffer enabled")
+    p.add_argument("--affinity_module_path",
+                            type=str, default=None, help="Affinity module path")
+    args = p.parse_args()
+
+    return CliArgs(
+        data_parallel_size=args.data_parallel_size,
+        tensor_parallel_size=args.tensor_parallel_size,
+        expert_parallel_size=args.expert_parallel_size,
+        test=args.test,
+        model=args.model,
+        kvcache_type=args.kvcache_type,
+        network_type=args.network_type,
+        auto_search_enabled=args.auto_search_enabled,
+        nano_split_enabled=args.nano_split_enabled,
+        plan_cuda_graph=args.plan_cuda_graph,
+        cuda_graph_enabled=args.cuda_graph_enabled,
+        plan_double_buffer=args.plan_double_buffer,
+        double_buffer_enabled=args.double_buffer_enabled,
+        affinity_module_path=args.affinity_module_path,
+    )
 
 def setup_model_and_configs(args: CliArgs) -> ModelArtifacts:
     world_size = torch.cuda.device_count()
@@ -168,6 +220,13 @@ def setup_model_and_configs(args: CliArgs) -> ModelArtifacts:
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 
+    # mkdir for profiler
+    if args.test == "profile":
+        print("Do Profile")
+        profile_data_path = cfgs[0].profile_data_path()
+        import os
+        os.makedirs(profile_data_path, exist_ok=True)
+
     print("--------------------------------")
     print("MODEL_ID: ", MODEL_ID)
     print("args: ", args.__dict__)
@@ -195,14 +254,18 @@ def create_pipelines(cfgs: list, Pipeline: type):
 
 def create_shared_variables(world_size: int):
     command = mp.Array("c", 32)
-    shared_decode_bts = mp.Value("i", 0)
-    use_auto_search = mp.Value("i", 0)
-    use_nanosplit = mp.Value("i", 0)
-    use_cuda_graph = mp.Value("i", 0)
+    decode_bts = mp.Value("i", 0)
+    next_decode_bts = mp.Value("i", 0)
+    auto_search_enabled = mp.Value("i", 0)
+    nano_split_enabled = mp.Value("i", 0)
+    plan_cuda_graph = mp.Value("i", 0)
+    cuda_graph_enabled = mp.Value("i", 0)
+    plan_double_buffer = mp.Value("i", 0)
+    double_buffer_enabled = mp.Value("i", 0)
 
     # Create a Barrier for world_size workers plus the main process.
     barrier = mp.Barrier(world_size + 1)
-    return command, shared_decode_bts, use_auto_search, use_nanosplit, use_cuda_graph, barrier
+    return command, decode_bts, next_decode_bts, auto_search_enabled, nano_split_enabled, plan_cuda_graph, cuda_graph_enabled, plan_double_buffer, double_buffer_enabled, barrier
 
 def world_info():
     return torch.cuda.device_count()
@@ -212,14 +275,18 @@ def start_workers(
     world_size: int,
     affinity_module_path: Optional[str],
     request_queues,
-    shared_decode_bts,
+    decode_bts,
+    next_decode_bts,
     result_queue,
     barrier,
     pipeline_list,
-    use_auto_search,
+    auto_search_enabled,
     auto_search_path: Optional[str],
-    use_nanosplit,
-    use_cuda_graph,
+    nano_split_enabled,
+    plan_cuda_graph,
+    cuda_graph_enabled,
+    plan_double_buffer,
+    double_buffer_enabled,
     command,
     worker_fn: Callable,
     ):
@@ -231,14 +298,18 @@ def start_workers(
         rank,
         affinity_module_path,
         None if request_queues is None else request_queues[rank],
-        shared_decode_bts,
+        decode_bts,
+        next_decode_bts,
         result_queue,
         barrier,
         pipeline_list[rank],
-        use_auto_search,
+        auto_search_enabled,
         auto_search_path,
-        use_nanosplit,
-        use_cuda_graph,
+        nano_split_enabled,
+        plan_cuda_graph,
+        cuda_graph_enabled,
+        plan_double_buffer,
+        double_buffer_enabled,
         command,
         )
         p = mp.Process(target=worker_fn, args=args_tuple)

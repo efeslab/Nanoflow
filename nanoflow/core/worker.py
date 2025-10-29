@@ -3,7 +3,7 @@ import torch
 import torch.multiprocessing as mp
 from nanoflow.utils.prof_marker import prof_marker
 
-def worker(start_time, rank, request_queue: mp.Queue, shared_decode_bts, result_queue: mp.Queue, barrier, work_pipeline, use_auto_search, profile_result_path, use_nanosplit, use_cuda_graph, command):
+def worker(start_time, rank, request_queue: mp.Queue, decode_bts, next_decode_bts, result_queue: mp.Queue, barrier, work_pipeline, auto_search_enabled, profile_result_path, nano_split_enabled, plan_cuda_graph, cuda_graph_enabled, plan_double_buffer, double_buffer_enabled, command):
     torch.cuda.set_device(rank)
     pipeline = work_pipeline
     pipeline.init(None, cached=True)
@@ -19,10 +19,9 @@ def worker(start_time, rank, request_queue: mp.Queue, shared_decode_bts, result_
         match cmd:
             case "Execute":
                 with prof_marker(f"Worker {rank} Execute S1", color="blue"):
-                    input = request_queue.get(timeout=1)
-                    decode_bts = shared_decode_bts.value
+                    input, next_input = request_queue.get(timeout=1)
                 with prof_marker(f"Worker {rank} Execute S2", color="blue"):
-                    pipeline.update(input, decode_batch_size=decode_bts, profile_result_path=profile_result_path, use_auto_search=use_auto_search.value, use_nano_split=use_nanosplit.value, use_cuda_graph=use_cuda_graph.value)
+                    pipeline.update(input_infos=input, decode_batch_size=decode_bts.value, next_input_infos=next_input, next_decode_batch_size=next_decode_bts.value, profile_result_path=profile_result_path, auto_search_enabled=auto_search_enabled.value, nano_split_enabled=nano_split_enabled.value, plan_cuda_graph=plan_cuda_graph.value, cuda_graph_enabled=cuda_graph_enabled.value, plan_double_buffer=plan_double_buffer.value, double_buffer_enabled=double_buffer_enabled.value)
                 with prof_marker(f"Worker {rank} Execute S3", color="blue"):
                     new_tokens = pipeline.run()
                 # print("new_tokens: ", new_tokens, "ttft: ", time.perf_counter() - start_time)
