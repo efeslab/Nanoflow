@@ -1,5 +1,6 @@
 import argparse
 import time
+import torch
 import torch.multiprocessing as mp
 
 from nanoflow.entry.common import (
@@ -20,6 +21,12 @@ from nanoflow.entry.worker_entry import worker_entry
 def main():
     mp.set_start_method("spawn")
     arg_parser = argparse.ArgumentParser()
+    arg_parser.add_argument(
+        "--data_parallel_size",
+        type=int,
+        default=1,
+        help="Data parallel size",
+    )
     arg_parser.add_argument(
         "--tensor_parallel_size",
         type=int,
@@ -73,6 +80,7 @@ def main():
     args = arg_parser.parse_args()
 
     args = CliArgs(
+        data_parallel_size=args.data_parallel_size,
         tensor_parallel_size=args.tensor_parallel_size,
         expert_parallel_size=args.expert_parallel_size,
         test="prefill_only",
@@ -136,6 +144,8 @@ def main():
     cycles = (num_prefill_reqs + group_prefill_size - 1) // group_prefill_size
 
     for i in range(cycles):
+        if i == 1:
+            torch.cuda.cudart().cudaProfilerStart()
         print(f"Cycle {i + 1}/{cycles}")
         prefill_inputs = []
         if i == cycles - 1:
@@ -156,6 +166,7 @@ def main():
             output_strings[req_idx].extend(new_token)
         # print("new_tokens: ", new_tokens)
 
+    torch.cuda.cudart().cudaProfilerStop()
     command.value = b"Terminate"
     step_barrier(barrier)
     

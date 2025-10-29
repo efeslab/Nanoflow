@@ -164,7 +164,7 @@ def main():
     print("All processes have finished.")
 
     output_text = arts.tokenizer.batch_decode(
-        list(output_strings.values())[:2], skip_special_tokens=True
+        list(output_strings.values()), skip_special_tokens=True
     )
     print(output_text)
 

@@ -1,6 +1,6 @@
 import torch
 import networkx as nx
-from typing import Optional
+from typing import NamedTuple
 
 from nanoflow.operations.operation_base import Operations, Operation_Layer
 
@@ -11,6 +11,9 @@ from nanoflow.utils.graph_plot import plot_graph_topological, draw_graphs_subplo
 tensor_pool = dict()
 tensor_list = []
 
+class ExecHandle(NamedTuple):
+    src: "torch.Tensor"
+    stream: "torch.cuda.Stream"  # the stream that produced `src`
 
 class Executor:
     def __init__(
@@ -107,8 +110,8 @@ class Executor:
                     op.record_cuda_event()
 
         last_op = self.ordered_graph.nodes[self.ordered_operations[-1]]["op"]
-        torch.cuda.current_stream().wait_stream(main_stream)
-        output.copy_(last_op.inputs["tokens"].tensor)
+        exec_handle = ExecHandle(src=last_op.inputs["tokens"].tensor, stream=main_stream)
+        return exec_handle
 
     def print_debug(
         self, output: torch.Tensor, filename="out.txt", filefolder_name=None

@@ -54,7 +54,7 @@ class WeightManager():
         print(f"Loaded {mb_s:,.1f} MB/s with {ten.numel():,} elements")
         
         start_load_to_device_time = time.time()
-        ten = ten.to(device, non_blocking=True)
+        ten = ten.to(device)
         print(f"load tensor to device time: {time.time() - start_load_to_device_time:.2f}s")
 
         for name, metadata in meta_data.items():

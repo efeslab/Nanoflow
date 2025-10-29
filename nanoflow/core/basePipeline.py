@@ -55,6 +55,7 @@ class BasePipeline(ABC):
         input_tensor: torch.Tensor,
         cumsum_input: list[int],
         decode_batch_size: int,
+        double_buffer_enabled: bool,
     ) -> None:
         """
         Given finalized inputs and computed cumsums, copy tensors to device and
@@ -109,6 +110,9 @@ class BasePipeline(ABC):
         for operation in model_ops:
             self.all_layer_operations.extend(operation.children)
 
+    def post_update_for_next_cycle_ops(self, next_input_req_idx: list[int], next_cumsum_input: list[int], next_decode_batch_size: int) -> None:
+        pass
+
     # --------- Base: construction / config ---------
     def __init__(
         self,
@@ -119,6 +123,8 @@ class BasePipeline(ABC):
         num_layers: int,
         world_size: int = 1,
         world_rank: int = 0,
+        pp_size: int = 1,
+        pp_rank: int = 0,
         categories: list[CategoryType] = [CategoryType.COMP, CategoryType.MEM],
     ) -> None:
         self.pipeline_name = pipeline_name
@@ -126,9 +132,13 @@ class BasePipeline(ABC):
         self.cached_weight_dir = cached_weight_dir
         self.profile_dir = profile_dir
         self.num_layers = num_layers
-        self.layer_list = [i for i in range(num_layers)]
+        self.start_layer_idx = pp_rank * num_layers // pp_size
+        self.end_layer_idx = (pp_rank + 1) * num_layers // pp_size
+        self.layer_list = [i for i in range(self.start_layer_idx, self.end_layer_idx)]
         self.world_size = world_size
         self.world_rank = world_rank
+        self.pp_size = pp_size
+        self.pp_rank = pp_rank
         self.device = f"cuda:{world_rank}"
         self.categories = categories
         self.kv_cache: Optional[KVCacheNone | KVCacheTorch | BatchedDistKVCache] = None
@@ -138,6 +148,8 @@ class BasePipeline(ABC):
         self.is_auto_search_enabled: bool = False
         self.is_cuda_graph_enabled: bool = False
         self.plan_cuda_graph: bool = False
+        self.double_buffer_enabled: bool = False
+        self.plan_double_buffer: bool = False
         self.profile_result: dict[str, Any] | None = None
 
         # batch & shape
@@ -284,12 +296,12 @@ class BasePipeline(ABC):
             op.setBatchSize(None)
 
     # --------- Base: update lifecycle ---------
-    def _prepare_inputs(self, new_input_infos: list[tuple[int, list[int]]]) -> tuple[
+    def _prepare_inputs(self, input_infos: list[tuple[int, list[int]]]) -> tuple[
         int, torch.Tensor,
     ]:
         self.input_req_idx = []
         self.input_ids = []
-        for req_idx, ids in new_input_infos:
+        for req_idx, ids in input_infos:
             self.input_req_idx.append(req_idx)
             self.input_ids.append(ids)
 
@@ -311,22 +323,46 @@ class BasePipeline(ABC):
         ).tolist()
         return cumsum_input
 
+    def update_for_next_cycle(
+        self,
+    ) -> None:
+        if self.next_input_infos is None:
+            return
+        # -------- inputs --------
+        with prof_marker("update_prepare_inputs"):
+            _, _ = self._prepare_inputs(
+                self.next_input_infos)
+
+        with prof_marker("update_compute_cumsum"):
+            self.cumsum_input = self._compute_cumsums()
+        # -------- always update per-op state --------
+        with prof_marker("update_post_ops"):
+            self.post_update_for_next_cycle_ops(
+                self.input_req_idx, self.cumsum_input, self.next_decode_batch_size)
+
     def update(
         self,
-        new_input_infos: list[tuple[int, list[int]]],
+        input_infos: list[tuple[int, list[int]]],
         decode_batch_size: int = 0,
+        next_input_infos: list[tuple[int, list[int]]] = None,
+        next_decode_batch_size: int = 0,
         is_profile: bool = False,
         stream_name: str = "TEST_TOTAL",
         profile_result_path: Optional[str] = None,
         use_auto_search: bool = False,
         use_nano_split: bool = False,  # subclasses can ignore/override
         use_cuda_graph: bool = False,
+        plan_double_buffer: bool = False,
+        double_buffer_enabled: bool = False,
     ) -> None:
         # -------- inputs --------
         with prof_marker("update_prepare_inputs"):
             global_batch_size, input_tensor = self._prepare_inputs(
-                new_input_infos)
-
+                input_infos)
+            self.next_input_infos = next_input_infos
+            self.next_decode_batch_size = next_decode_batch_size
+            if self.next_input_infos is None:
+                assert double_buffer_enabled is False, "Double buffer is not enabled when next_input_infos is None"
         # -------- flags --------
         self.buffer_fixed = (
             global_batch_size == self.global_batch_size
@@ -350,6 +386,10 @@ class BasePipeline(ABC):
         elif use_auto_search and profile_result_path is None:
             raise ValueError(
                 "profile_result_path must be provided when use_auto_search=True")
+
+        self.plan_double_buffer = plan_double_buffer
+        self.double_buffer_enabled = double_buffer_enabled
+        assert not (self.plan_double_buffer and self.double_buffer_enabled), "Double buffer is not enabled when plan_double_buffer is True"
 
         # -------- (re)configure if batch sizes changed --------
         if not self.buffer_fixed:
@@ -390,22 +430,31 @@ class BasePipeline(ABC):
 
         temp_out = torch.zeros(self.global_batch_size,
                                dtype=torch.int32, device=self.device)
-        self.executor.execute(
+        exec_handle = self.executor.execute(
             temp_out,
             self.main_stream,
             plan_cuda_graph=self.plan_cuda_graph,
             is_cuda_graph_enabled=self.is_cuda_graph_enabled,
         )
-        with prof_marker("after_execute_move_cpu"):
-            temp_out = temp_out.cpu()
+        if self.plan_double_buffer or self.double_buffer_enabled:
+            self.update_for_next_cycle()
 
-        # unpack new tokens by original request indices
-        new_tokens = [[temp_out[idx - 1].item()]
-                      for idx in self.cumsum_input[1:]]
-        output: list[tuple[int, list[int]]] = []
-        for req_idx, token in zip(self.input_req_idx, new_tokens):
-            output.append((req_idx, token))
-        return output
+        torch.cuda.current_stream().wait_stream(exec_handle.stream)
+        temp_out.copy_(exec_handle.src)
+
+        if self.pp_rank == self.pp_size - 1:
+            with prof_marker("after_execute_move_cpu"):
+                temp_out = temp_out.cpu()
+
+            # unpack new tokens by original request indices
+            new_tokens = [[temp_out[idx - 1].item()]
+                        for idx in self.cumsum_input[1:]]
+            output: list[tuple[int, list[int]]] = []
+            for req_idx, token in zip(self.input_req_idx, new_tokens):
+                output.append((req_idx, token))
+            return output
+        else:
+            return []
 
     def init_profile_data(self, append_mode: bool = False) -> None:
         for operation in self.model_operations:

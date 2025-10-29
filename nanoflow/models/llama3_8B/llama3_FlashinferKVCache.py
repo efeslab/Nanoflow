@@ -25,6 +25,7 @@ from nanoflow.kvcache.kv import DistKVPool, BatchedDistKVCache
 from nanoflow.core.basePipeline import BasePipeline
 from nanoflow.core import CategoryType
 from nanoflow.core.nanobatchSplit import split_nanobatch
+from nanoflow.utils.prof_marker import prof_marker
 
 from .config_llama3_8B import Llama3_8B_Config
 
@@ -59,7 +60,8 @@ class Pipeline(BasePipeline):
         print("Initializing external data...")
         # self.kv_pool = DistKVPool(self.num_layers, self.num_kv_heads, self.head_dim, 2048, self.page_size, 1, self.device)
         self.kv_pool = DistKVPool(
-            self.num_layers,
+            self.start_layer_idx,
+            self.end_layer_idx,
             self.num_kv_heads,
             self.head_dim,
             2048 * 26,
@@ -380,14 +382,31 @@ class Pipeline(BasePipeline):
 
     def post_update_ops(self, input_req_idx: list[int], input_tensor: torch.Tensor, cumsum_input: list[int], decode_batch_size: int) -> None:
         assert self.kv_cache is not None, "KV cache not initialized"
-        self.kv_cache.update(
-            cumsum_input,
-            input_req_idx,
-            decode_batch_size,
-            use_cuda_graph=(not self.plan_cuda_graph)
-            and self.is_cuda_graph_enabled,
-        )
-        self.global_input.outputs["tokens"].tensor.copy_(input_tensor)
-        self.ropeAppend.update(cumsum_input, decode_batch_size)
-        self.decAttn.update(cumsum_input)
-        self.pfAttn.update(cumsum_input)
+        with prof_marker("post_update_ops_step_0: update_kv_cache"):
+            self.kv_cache.update(
+                cumsum_input,
+                input_req_idx,
+                decode_batch_size,
+                double_buffer_enabled=self.double_buffer_enabled,
+                use_cuda_graph=(not self.plan_cuda_graph)
+                and self.is_cuda_graph_enabled,
+            )
+        with prof_marker("post_update_ops_step_1: copy_input_tensor"):
+            self.global_input.outputs["tokens"].tensor.copy_(input_tensor)
+        with prof_marker("post_update_ops_step_2: update_rope_append"):
+            self.ropeAppend.update(cumsum_input, decode_batch_size)
+        with prof_marker("post_update_ops_step_3: update_dec_attn"):
+            self.decAttn.update(cumsum_input)
+        with prof_marker("post_update_ops_step_4: update_pf_attn"):
+            self.pfAttn.update(cumsum_input)
+
+    def post_update_for_next_cycle_ops(self, next_input_req_idx: list[int], next_cumsum_input: list[int], next_decode_batch_size: int) -> None:
+        assert self.kv_cache is not None, "KV cache not initialized"
+        with prof_marker("post_update_for_next_cycle_ops_step_0: update_kv_cache"):
+            self.kv_cache.update_for_next_cycle(
+                next_cumsum_input,
+                next_input_req_idx,
+                next_decode_batch_size,
+                use_cuda_graph=(not self.plan_cuda_graph)
+                and self.is_cuda_graph_enabled,
+            )

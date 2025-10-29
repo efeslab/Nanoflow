@@ -4,6 +4,7 @@ from nanoflow.utils.frontend import requestManager
 from nanoflow.utils.prof_marker import prof_marker
 from transformers import AutoTokenizer
 import argparse
+import torch
 
 
 def test_performance():
@@ -34,15 +35,18 @@ def test_performance():
         [(decode_batch_size, prefill_context_ids[:prefill_batch_size].copy())]
     )
     pipeline.update(
-        decode_inputs,
-        decode_batch_size,
+        input_infos=decode_inputs,
+        decode_batch_size=decode_batch_size,
+        next_input_infos=decode_inputs,
+        next_decode_batch_size=decode_batch_size,
         profile_result_path=auto_search_path,
         use_auto_search=False,
         use_cuda_graph=False,
         use_nano_split=False,
+        plan_double_buffer=True,
     )
-    # pipeline.update(decode_inputs, decode_batch_size)
 
+    torch.cuda.cudart().cudaProfilerStart()
     for i in range(decode_batch_size, decode_batch_size + 20):
         print("Cycle: ", i - decode_batch_size)
         next_prefill_idx = i + 1
@@ -65,14 +69,18 @@ def test_performance():
             )
         with prof_marker(f"after_execute_step_8"):
             pipeline.update(
-                new_tokens,
-                decode_batchsize,
+                input_infos=new_tokens,
+                decode_batch_size=decode_batchsize,
+                next_input_infos=new_tokens,
+                next_decode_batch_size=decode_batchsize,
                 profile_result_path=auto_search_path,
                 use_auto_search=False,
                 use_cuda_graph=False,
                 use_nano_split=False,
+                double_buffer_enabled=True,
             )
-            # pipeline.update(new_tokens, decode_batchsize)
+
+    torch.cuda.cudart().cudaProfilerStop()
 
     output_text = tokenizer.batch_decode(
         list(output_strings.values())[:1], skip_special_tokens=True
@@ -247,12 +255,11 @@ arg_parser.add_argument(
 )
 arg_parser.add_argument(
     "--model",
-    default="8B",
+    default="Llama3-8B",
     help="Pick which Pipeline to instantiate",
 )
 arg_parser.add_argument(
     "--kvcache_type",
-    choices=["none", "torch", "flashinfer"],
     default="flashinfer",
     help="Pick which KVCache to use",
 )

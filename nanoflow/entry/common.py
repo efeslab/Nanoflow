@@ -91,19 +91,25 @@ def setup_model_and_configs(args: CliArgs) -> ModelArtifacts:
         # auto_search_path = None
 
     elif args.model == "Llama3-8B":
+        MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"
         weight_map = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
-        from nanoflow.models.llama3_8B.llama3_8B_FlashinferKVCache_allreduce import Pipeline
+        assert world_size == args.data_parallel_size * args.tensor_parallel_size, "world_size should be equal to data_parallel_size * tensor_parallel_size"
         from nanoflow.models.llama3_8B.config_llama3_8B import Llama3_8B_Config as Config
+        if FULL_DATA_PARALLEL_MODE:
+            from nanoflow.models.llama3_8B.llama3_FlashinferKVCache import Pipeline
+        else:
+            from nanoflow.models.llama3_8B.llama3_8B_FlashinferKVCache_allreduce import Pipeline
         cfgs = [Config(
             multi_gpu_mode=MULTI_GPU_MODE,
             world_size=world_size,
             world_rank=i,
             tp_size=args.tensor_parallel_size,
-            tp_rank=i,
+            tp_rank=i % args.tensor_parallel_size,
+            dp_size=args.data_parallel_size,
+            dp_rank=i // args.tensor_parallel_size,
             unique_nccl_ids=unique_nccl_ids,
         ) for i in range(world_size)]
-        tokenizer = AutoTokenizer.from_pretrained(
-            "meta-llama/Meta-Llama-3-8B-Instruct")
+        
         auto_search_path = "../auto_search/search_result_json/8B_allreduce_search_result.json"
 
     elif args.model == "Qwen1.5-MoE-A2.7B-EP":

@@ -91,7 +91,8 @@ class Pipeline(BasePipeline):
         # )
         capacity = 2048 * 84
         self.kv_pool = DistKVPool(
-            self.num_layers,
+            self.start_layer_idx,
+            self.end_layer_idx,
             self.num_kv_heads,
             self.head_dim,
             capacity,

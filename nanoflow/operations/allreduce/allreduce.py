@@ -27,7 +27,7 @@ class AllReduceNCCLImpl(OperationImpl):
 
     def __init__(self, op_base, stream, device):
         super().__init__(op_base, stream, device)
-        self.nccl_wrapper = op_base.nccl_wrapper # for nccl allreduce
+        self.nccl_wrapper = op_base.nccl_wrapper  # for nccl allreduce
 
     def run(self, input, output):
         with torch.cuda.stream(self.stream):
