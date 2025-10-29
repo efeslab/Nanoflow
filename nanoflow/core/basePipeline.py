@@ -97,7 +97,8 @@ class BasePipeline(ABC):
 
                 op_nanobatch_info_map[op_basename] = tuple(split_info_list)
         else:
-            raise NotImplementedError("Nanobatch split is not implemented without auto search")
+            raise NotImplementedError(
+                "Nanobatch split is not implemented without auto search")
         model_ops, addtional_virtual_ops = split_nanobatch(
             self.original_model_operations, op_nanobatch_info_map, extra_links
         )
@@ -176,7 +177,7 @@ class BasePipeline(ABC):
         self.init_dependency()
         self.init_set_weight(weight_path, cached)
         self.config_network()
-    
+
     def init_wo_weight(self) -> None:
         self.init_streams()
         self.init_external_data()
@@ -208,9 +209,9 @@ class BasePipeline(ABC):
         # Assuming SM counts are in increments of 8 up to 120 (reserve 132 as total)
         sm_counts_for_greenctx = [i for i in range(8, 128, 8)]
         self.total_sm = 132  # default for H200; override in subclass if needed
-        
+
         self.sm_counts = sm_counts_for_greenctx + [self.total_sm]
-        
+
         # Category -> { sm_count : (stream, sm_count) }
         self.streams: dict[CategoryType,
                            dict[int, tuple[torch._C.Stream, int]]] = {}
@@ -313,6 +314,16 @@ class BasePipeline(ABC):
                 flattened, dtype=torch.int32, device="cpu")
         return global_batch_size, input_tensor, input_req_idx, input_ids
 
+    def _process_next_input_infos(self, next_input_infos: list[tuple[int, int]]):
+        next_input_req_idx = []
+        next_input_seq_len = []
+        for req_idx, seq_len in next_input_infos:
+            next_input_req_idx.append(req_idx)
+            next_input_seq_len.append(seq_len)
+        next_cumsum_input = torch.cat([torch.tensor([0], dtype=torch.int32, device="cpu"), torch.cumsum(
+            torch.tensor(next_input_seq_len, dtype=torch.int32, device="cpu"), dim=0)]).tolist()
+        return next_input_req_idx, next_cumsum_input
+
     def _compute_cumsums(self, input_ids: list[list[int]]) -> list[int]:
         request_length = torch.tensor(
             [len(x) for x in input_ids], dtype=torch.int32, device="cpu"
@@ -331,12 +342,12 @@ class BasePipeline(ABC):
         if self.next_input_infos is None:
             return
         # -------- inputs --------
-        with prof_marker("update_for_next_cycle_prepare_inputs"):
-            _, _, next_input_req_idx, next_input_ids = self._prepare_inputs(
+        with prof_marker("update_for_next_cycle_process_next_input_infos"):
+            next_input_req_idx, next_cumsum_input = self._process_next_input_infos(
                 self.next_input_infos)
+            self.next_input_req_idx = next_input_req_idx
+            self.next_cumsum_input = next_cumsum_input
 
-        with prof_marker("update_for_next_cycle_compute_cumsum"):
-            next_cumsum_input = self._compute_cumsums(next_input_ids)
         # -------- always update per-op state --------
         with prof_marker("update_for_next_cycle_post_ops"):
             self.post_update_for_next_cycle_ops(
@@ -346,7 +357,7 @@ class BasePipeline(ABC):
         self,
         input_infos: list[tuple[int, list[int]]],
         decode_batch_size: int = 0,
-        next_input_infos: list[tuple[int, list[int]]] = None,
+        next_input_infos: list[tuple[int, int]] = None,
         next_decode_batch_size: int = 0,
         is_profile: bool = False,
         stream_name: str = "TEST_TOTAL",
@@ -362,11 +373,15 @@ class BasePipeline(ABC):
         with prof_marker("update_prepare_inputs"):
             global_batch_size, input_tensor, input_req_idx, input_ids = self._prepare_inputs(
                 input_infos)
+            if self.double_buffer_enabled:
+                assert input_req_idx == self.next_input_req_idx, "Input request index and predicted input request index must be the same when double buffer is enabled"
+                assert decode_batch_size == self.next_decode_batch_size, "Decode batch size and predicted decode batch size must be the same when double buffer is enabled"
             self.input_req_idx = input_req_idx
             self.next_input_infos = next_input_infos
             self.next_decode_batch_size = next_decode_batch_size
             if self.next_input_infos is None:
-                assert not (double_buffer_enabled or plan_double_buffer), "Double buffer related flags are not allowed when next_input_infos is None"
+                assert not (
+                    double_buffer_enabled or plan_double_buffer), "Double buffer related flags are not allowed when next_input_infos is None"
         # -------- flags --------
         self.buffer_fixed = (
             global_batch_size == self.global_batch_size
@@ -375,7 +390,8 @@ class BasePipeline(ABC):
 
         self.plan_cuda_graph = plan_cuda_graph
         self.cuda_graph_enabled = cuda_graph_enabled
-        assert not (self.plan_cuda_graph and self.cuda_graph_enabled), "CUDA graph is not enabled when plan_cuda_graph is True"
+        assert not (
+            self.plan_cuda_graph and self.cuda_graph_enabled), "CUDA graph is not enabled when plan_cuda_graph is True"
 
         if self.cuda_graph_enabled:
             assert self.buffer_fixed, "When using CUDA graph, batch sizes must remain unchanged."
@@ -388,7 +404,8 @@ class BasePipeline(ABC):
 
         self.plan_double_buffer = plan_double_buffer
         self.double_buffer_enabled = double_buffer_enabled
-        assert not (self.plan_double_buffer and self.double_buffer_enabled), "Double buffer is not enabled when plan_double_buffer is True"
+        assert not (
+            self.plan_double_buffer and self.double_buffer_enabled), "Double buffer is not enabled when plan_double_buffer is True"
 
         # -------- (re)configure if batch sizes changed --------
         if not self.buffer_fixed:
@@ -417,6 +434,8 @@ class BasePipeline(ABC):
 
             with prof_marker("update_compute_cumsum"):
                 self.cumsum_input = self._compute_cumsums(input_ids)
+                if self.double_buffer_enabled:
+                    assert self.cumsum_input == self.next_cumsum_input, "Cumsum input and predicted cumsum input must be the same when double buffer is enabled"
 
         # -------- always update per-op state --------
         with prof_marker("update_post_ops"):
@@ -447,7 +466,7 @@ class BasePipeline(ABC):
 
             # unpack new tokens by original request indices
             new_tokens = [[temp_out[idx - 1].item()]
-                        for idx in self.cumsum_input[1:]]
+                          for idx in self.cumsum_input[1:]]
             output: list[tuple[int, list[int]]] = []
             for req_idx, token in zip(self.input_req_idx, new_tokens):
                 output.append((req_idx, token))

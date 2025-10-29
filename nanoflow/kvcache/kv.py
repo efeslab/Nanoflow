@@ -12,7 +12,6 @@ import torch
 # from pybindUtil import toGPU, toGPUTensor
 from torch.profiler import profile, record_function, ProfilerActivity
 from nanoflow.utils.prof_marker import prof_marker
-import time
 
 from .triton.kv_copy import copy_fa_nopage_kvcache, copy_torch_kvcache
 
@@ -766,69 +765,84 @@ class BatchedDistKVCache():
         return self.cache[idx].seqlen
 
     def update_template(self, cumsum_input, input_req_idx, decode_batchsize, rev_input_indptr_ref, per_token_offset_ref, kv_indptr_ref, kv_indices_ref, kv_last_page_len_ref, use_cuda_graph=False):
-        total_tokens = cumsum_input[-1]
-        rev_input_indptr_tensor = torch.empty(total_tokens, dtype=torch.int32)
-        per_token_offset_tensor = torch.empty(total_tokens, dtype=torch.int32)
+        # start_time = time.perf_counter()
+        with prof_marker("update_template_stage_0"):
+            total_tokens = cumsum_input[-1]
+            rev_input_indptr_tensor = torch.empty(total_tokens, dtype=torch.int32)
+            per_token_offset_tensor = torch.empty(total_tokens, dtype=torch.int32)
+        # print(f"time taken for update_template_stage_0: {time.perf_counter() - start_time}")
+        with prof_marker("update_template_stage_1"):
+            rev_input_indptr_tensor[0:decode_batchsize] = torch.arange(decode_batchsize, dtype=torch.int32)
+            for temp_idx in range(decode_batchsize):
+                global_req_idx = input_req_idx[temp_idx]
+                self.pre_allocate(global_req_idx, 1)
+                seq_len = self.get_seqlen(global_req_idx)
+                per_token_offset_tensor[temp_idx] = seq_len - 1
+                # print("decode batch, req_idx:", global_req_idx, "seq_len:", seq_len)
 
-        rev_input_indptr_tensor[0:decode_batchsize] = torch.arange(decode_batchsize, dtype=torch.int32)
-        for temp_idx in range(decode_batchsize):
-            global_req_idx = input_req_idx[temp_idx]
-            self.pre_allocate(global_req_idx, 1)
-            seq_len = self.get_seqlen(global_req_idx)
-            per_token_offset_tensor[temp_idx] = seq_len - 1
-            # print("decode batch, req_idx:", global_req_idx, "seq_len:", seq_len)
+        # print(f"time taken for update_template_stage_1: {time.perf_counter() - start_time}")
+        with prof_marker("update_template_stage_2"):
+            print
+            for temp_idx in range(decode_batchsize, len(cumsum_input) - 1):
+                global_req_idx = input_req_idx[temp_idx]
+                start = cumsum_input[temp_idx]
+                end = cumsum_input[temp_idx + 1]
+                count = end - start
+                self.pre_allocate(global_req_idx, count)
+                seq_len = self.get_seqlen(global_req_idx)
+                # append i to the rev_input_indptr for end-start times
+                rev_input_indptr_tensor[start:end] = temp_idx
+                # extend the per_token_offset with a list from last_offest to last_offest + (end - start)
+                per_token_offset_tensor[start:end] = torch.arange(seq_len - count, seq_len, dtype=torch.int32)
+        # print(f"time taken for update_template_stage_2: {time.perf_counter() - start_time}")
+        with prof_marker("update_template_stage_3"):
+            if use_cuda_graph:
+                rev_input_indptr_ref.copy_(rev_input_indptr_tensor)
+                per_token_offset_ref.copy_(per_token_offset_tensor)
+            else:
+                rev_input_indptr_ref.resize_(rev_input_indptr_tensor.numel())
+                rev_input_indptr_ref.copy_(rev_input_indptr_tensor)
+                per_token_offset_ref.resize_(per_token_offset_tensor.numel())
+                per_token_offset_ref.copy_(per_token_offset_tensor)
+        # print(f"time taken for update_template_stage_3: {time.perf_counter() - start_time}")
+        with prof_marker("update_template_stage_4"):
+            num_reqs = len(input_req_idx)
+            self.num_indices = sum([len(self.cache[req_idx].indices) for req_idx in input_req_idx])
+            kv_indptr_tensor = torch.empty(num_reqs + 1, dtype=torch.int32)
+            kv_indices_tensor = torch.empty(self.num_indices, dtype=torch.int32)
+            kv_last_page_len_tensor = torch.empty(num_reqs, dtype=torch.int32)
 
-        for temp_idx in range(decode_batchsize, len(cumsum_input) - 1):
-            global_req_idx = input_req_idx[temp_idx]
-            start = cumsum_input[temp_idx]
-            end = cumsum_input[temp_idx + 1]
-            count = end - start
-            self.pre_allocate(global_req_idx, count)
-            seq_len = self.get_seqlen(global_req_idx)
-            # append i to the rev_input_indptr for end-start times
-            rev_input_indptr_tensor[start:end] = temp_idx
-            # extend the per_token_offset with a list from last_offest to last_offest + (end - start)
-            per_token_offset_tensor[start:end] = torch.arange(seq_len - count, seq_len, dtype=torch.int32)
-        if use_cuda_graph:
-            rev_input_indptr_ref.copy_(rev_input_indptr_tensor)
-            per_token_offset_ref.copy_(per_token_offset_tensor)
-        else:
-            rev_input_indptr_ref.resize_(rev_input_indptr_tensor.numel())
-            rev_input_indptr_ref.copy_(rev_input_indptr_tensor)
-            per_token_offset_ref.resize_(per_token_offset_tensor.numel())
-            per_token_offset_ref.copy_(per_token_offset_tensor)
+        # print(f"time taken for update_template_stage_4: {time.perf_counter() - start_time}")
+        with prof_marker("update_template_stage_5"):
+            cur_offset = 0
+            kv_indptr_tensor[0] = 0
+            for i, global_req_idx in enumerate(input_req_idx):
+                if global_req_idx not in self.cache:
+                    raise ValueError(f"Request {global_req_idx} not found in cache")
+                kv = self.cache[global_req_idx]
+                count = len(kv.indices)
 
-        num_reqs = len(input_req_idx)
-        self.num_indices = sum([len(self.cache[req_idx].indices) for req_idx in input_req_idx])
-        kv_indptr_tensor = torch.empty(num_reqs + 1, dtype=torch.int32)
-        kv_indices_tensor = torch.empty(self.num_indices, dtype=torch.int32)
-        kv_last_page_len_tensor = torch.empty(num_reqs, dtype=torch.int32)
-
-        cur_offset = 0
-        kv_indptr_tensor[0] = 0
-        for i, global_req_idx in enumerate(input_req_idx):
-            if global_req_idx not in self.cache:
-                raise ValueError(f"Request {global_req_idx} not found in cache")
-            kv = self.cache[global_req_idx]
-            count = len(kv.indices)
-
-            kv_indices_tensor[cur_offset : cur_offset + count] = torch.tensor(kv.indices, dtype=torch.int32)
-            kv_indptr_tensor[i + 1] = cur_offset + count
-            kv_last_page_len_tensor[i] = kv.last_page_offset
-            cur_offset += count
-        if self.num_indices > self._pool._max_num_pages:
-            raise ValueError(f"Too many indices {self.num_indices} for the pool size {self._pool._max_num_pages}")
-        if use_cuda_graph:
-            kv_indptr_ref.copy_(kv_indptr_tensor)
-            print(f"shape of kv_indices: {kv_indices_ref[:self.num_indices].shape}, kv_indices_tensor: {kv_indices_tensor.shape}")
-            kv_indices_ref[:self.num_indices].copy_(kv_indices_tensor)
-            kv_last_page_len_ref.copy_(kv_last_page_len_tensor)
-        else:
-            kv_indptr_ref.resize_(kv_indptr_tensor.numel())
-            kv_indptr_ref.copy_(kv_indptr_tensor)
-            kv_indices_ref[:self.num_indices].copy_(kv_indices_tensor)
-            kv_last_page_len_ref.resize_(kv_last_page_len_tensor.numel())
-            kv_last_page_len_ref.copy_(kv_last_page_len_tensor)
+                kv_indices_tensor[cur_offset : cur_offset + count] = torch.tensor(kv.indices, dtype=torch.int32)
+                kv_indptr_tensor[i + 1] = cur_offset + count
+                kv_last_page_len_tensor[i] = kv.last_page_offset
+                cur_offset += count
+        
+        # print(f"time taken for update_template_stage_5: {time.perf_counter() - start_time}")
+        with prof_marker("update_template_stage_6"):
+            if self.num_indices > self._pool._max_num_pages:
+                raise ValueError(f"Too many indices {self.num_indices} for the pool size {self._pool._max_num_pages}")
+            if use_cuda_graph:
+                kv_indptr_ref.copy_(kv_indptr_tensor)
+                print(f"shape of kv_indices: {kv_indices_ref[:self.num_indices].shape}, kv_indices_tensor: {kv_indices_tensor.shape}")
+                kv_indices_ref[:self.num_indices].copy_(kv_indices_tensor)
+                kv_last_page_len_ref.copy_(kv_last_page_len_tensor)
+            else:
+                kv_indptr_ref.resize_(kv_indptr_tensor.numel())
+                kv_indptr_ref.copy_(kv_indptr_tensor)
+                kv_indices_ref[:self.num_indices].copy_(kv_indices_tensor)
+                kv_last_page_len_ref.resize_(kv_last_page_len_tensor.numel())
+                kv_last_page_len_ref.copy_(kv_last_page_len_tensor)
+        # print(f"time taken for update_template_stage_6: {time.perf_counter() - start_time}")
 
     def update_for_next_cycle(self, cumsum_input, input_req_idx, decode_batchsize, cuda_graph_enabled=False):
         self.update_template(cumsum_input, input_req_idx, decode_batchsize, self.rev_input_indptr_tmp, self.per_token_offset_tmp, self.kv_indptr_tmp, self.kv_indices_tmp, self.kv_last_page_len_tmp, cuda_graph_enabled)

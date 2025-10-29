@@ -23,7 +23,7 @@ def test_correctness():
     input_ids = arts.tokenizer.encode(input_string)
     input0 = [(i, input_ids.copy()) for i in range(2)]
     input1 = [(i, input_ids.copy()) for i in range(2, 4)]
-    
+
     output_strings = {}
     for idx in range(4):
         output_strings[idx] = input_ids.copy()
@@ -99,16 +99,21 @@ def test_prefill_only():
             torch.cuda.cudart().cudaProfilerStart()
         print(f"Cycle {i + 1}/{cycles}")
         prefill_inputs = []
+        next_prefill_inputs_infos = []
         if i == cycles - 1:
             for j in range(i * group_prefill_size, num_prefill_reqs):
                 prefill_inputs.append((j, prefill_input_ids.copy()))
+                next_prefill_inputs_infos.append(
+                    (j + group_prefill_size, seq_len))
                 output_strings[j] = prefill_input_ids.copy()
         else:
             for j in range(i * group_prefill_size, (i + 1) * group_prefill_size):
                 prefill_inputs.append((j, prefill_input_ids.copy()))
+                next_prefill_inputs_infos.append(
+                    (j + group_prefill_size, seq_len))
                 output_strings[j] = prefill_input_ids.copy()
         for queue in request_queues:
-            queue.put_nowait((prefill_inputs, prefill_inputs))
+            queue.put_nowait((prefill_inputs, next_prefill_inputs_infos))
 
         step_barrier(barrier)
 
@@ -141,6 +146,7 @@ def test_decode_only():
     prefill_input_ids = prefill_context_ids[:seq_len]
 
     decode_inputs = []
+    next_decode_inputs_infos = []
     output_strings = {}
 
     # Execute
@@ -155,10 +161,12 @@ def test_decode_only():
         if i == cycles - 1:
             for j in range(i * group_prefill_size, decode_batch_size):
                 prefill_inputs.append((j, prefill_input_ids.copy()))
+                next_decode_inputs_infos.append((j, 1))
                 output_strings[j] = prefill_input_ids.copy()
         else:
             for j in range(i * group_prefill_size, (i + 1) * group_prefill_size):
                 prefill_inputs.append((j, prefill_input_ids.copy()))
+                next_decode_inputs_infos.append((j, 1))
                 output_strings[j] = prefill_input_ids.copy()
         for queue in request_queues:
             queue.put_nowait((prefill_inputs, None))
@@ -174,8 +182,9 @@ def test_decode_only():
     # prepare for the testing configuration
 
     for queue in request_queues:
-        queue.put_nowait((decode_inputs, decode_inputs))
+        queue.put_nowait((decode_inputs, next_decode_inputs_infos))
     decode_bts.value = decode_batch_size
+    next_decode_bts.value = decode_batch_size
     auto_search_enabled.value = args.auto_search_enabled
     nano_split_enabled.value = args.nano_split_enabled
     plan_cuda_graph.value = True
@@ -201,7 +210,7 @@ def test_decode_only():
         assert len(new_tokens) == decode_batch_size
 
         for queue in request_queues:
-            queue.put_nowait((new_tokens, new_tokens))
+            queue.put_nowait((new_tokens, next_decode_inputs_infos))
 
     torch.cuda.cudart().cudaProfilerStop()
 
@@ -225,19 +234,21 @@ def test_performance():
     decode_batch_size = 640
     # decode_batch_size = 1280
     prefill_batch_size = global_batch_size - decode_batch_size
-    
+
     prefill_context_ids = arts.tokenizer.encode(prefill_context)
-    print("len(prefill_context_ids): ", len(prefill_context_ids), "seq_len: ", seq_len)
-    assert seq_len <= len(prefill_context_ids), f"seq_len {seq_len} should be less than {len(prefill_context_ids)}"
+    print("len(prefill_context_ids): ", len(
+        prefill_context_ids), "seq_len: ", seq_len)
+    assert seq_len <= len(
+        prefill_context_ids), f"seq_len {seq_len} should be less than {len(prefill_context_ids)}"
     prefill_input_ids = prefill_context_ids[:seq_len]
 
     decode_inputs = []
+    next_decode_inputs_infos = []
     output_strings = {}
-
 
     command.value = b"Execute"
 
-    group_prefill_size = 4 # might encounter the illegal memory access issue when group_prefill_size is too large, like group_prefill_size* seq_len == 16384
+    group_prefill_size = 4  # might encounter the illegal memory access issue when group_prefill_size is too large, like group_prefill_size* seq_len == 16384
     cycles = (decode_batch_size + group_prefill_size - 1) // group_prefill_size
 
     for i in range(cycles):
@@ -246,10 +257,12 @@ def test_performance():
         if i == cycles - 1:
             for j in range(i * group_prefill_size, decode_batch_size):
                 prefill_inputs.append((j, prefill_input_ids.copy()))
+                next_decode_inputs_infos.append((j, 1))
                 output_strings[j] = prefill_input_ids.copy()
         else:
             for j in range(i * group_prefill_size, (i + 1) * group_prefill_size):
                 prefill_inputs.append((j, prefill_input_ids.copy()))
+                next_decode_inputs_infos.append((j, 1))
                 output_strings[j] = prefill_input_ids.copy()
         for queue in request_queues:
             queue.put_nowait((prefill_inputs, None))
@@ -263,14 +276,19 @@ def test_performance():
         # print("new_tokens: ", new_tokens)
 
     # prepare for the testing configuration
-    assert prefill_batch_size <= len(prefill_context_ids), f"prefill_batch_size {prefill_batch_size} should be less than {len(prefill_context_ids)}"
+    assert prefill_batch_size <= len(
+        prefill_context_ids), f"prefill_batch_size {prefill_batch_size} should be less than {len(prefill_context_ids)}"
     output_strings[decode_batch_size] = prefill_context_ids[:prefill_batch_size].copy()
     decode_inputs.extend(
         [(decode_batch_size, prefill_context_ids[:prefill_batch_size].copy())]
     )
+    next_decode_inputs_infos.extend(
+        [(decode_batch_size+1, prefill_batch_size)]
+    )
     for queue in request_queues:
-        queue.put_nowait((decode_inputs, decode_inputs))
+        queue.put_nowait((decode_inputs, next_decode_inputs_infos))
     decode_bts.value = decode_batch_size
+    next_decode_bts.value = decode_batch_size
     auto_search_enabled.value = args.auto_search_enabled
     nano_split_enabled.value = args.nano_split_enabled
     plan_cuda_graph.value = args.plan_cuda_graph
@@ -292,19 +310,21 @@ def test_performance():
             output_strings[req_idx].extend(new_token)
 
         new_tokens = new_tokens[:-1]
+        next_decode_inputs_infos = next_decode_inputs_infos[:-1]
         # print("new_tokens: ", new_tokens)
         assert len(new_tokens) == decode_batch_size
 
-        output_strings[next_prefill_idx] = prefill_context_ids[
-            :prefill_batch_size
-        ].copy()
+        output_strings[next_prefill_idx] = prefill_context_ids[:prefill_batch_size].copy()
 
         new_tokens.extend(
             [(next_prefill_idx, prefill_context_ids[:prefill_batch_size].copy())]
         )
+        next_decode_inputs_infos.extend(
+            [(next_prefill_idx+1, prefill_batch_size)]
+        )
 
         for queue in request_queues:
-            queue.put_nowait((new_tokens, new_tokens))
+            queue.put_nowait((new_tokens, next_decode_inputs_infos))
 
     torch.cuda.cudart().cudaProfilerStop()
 
@@ -325,15 +345,17 @@ def profile():
     # Terminate
     terminate_workers(processes, barrier)
 
+
 def terminate_workers(processes, barrier):
     # Terminate
     command.value = b"Terminate"
     step_barrier(barrier)
-    
+
     for p in processes:
         p.join()
 
     print("All processes have finished.")
+
 
 if __name__ == "__main__":
     mp.set_start_method("spawn")
