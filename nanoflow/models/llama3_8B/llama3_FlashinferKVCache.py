@@ -305,12 +305,12 @@ class Pipeline(BasePipeline):
     def config_algorithm(self) -> None:
         print("Configuring algorithms...")
         params = {
-            "use_cuda_graph": self.is_cuda_graph_enabled,
+            "use_cuda_graph": self.cuda_graph_enabled,
         }
 
         self.gen_embedding.config_tag("cuda", params)
 
-        if self.is_auto_search_enabled:
+        if self.auto_search_enabled:
             super().config_algorithm_auto_search(params)
         else:
             self.layerNormAttn.config_tag("cuda", params)
@@ -332,7 +332,7 @@ class Pipeline(BasePipeline):
     def nanobatch_split(self) -> None:
         op_nanobatch_info_map: dict[str, tuple[NanoOpInfo, ...]] = {}
         extra_links: dict[str, list[tuple[str, bool]]] = {}
-        if self.is_auto_search_enabled:
+        if self.auto_search_enabled:
             for op_basename, op_info in self.profile_result.items():
                 split_info_list = []
                 for nano_op_name, nano_op_info in op_info.items():
@@ -388,8 +388,8 @@ class Pipeline(BasePipeline):
                 input_req_idx,
                 decode_batch_size,
                 double_buffer_enabled=self.double_buffer_enabled,
-                use_cuda_graph=(not self.plan_cuda_graph)
-                and self.is_cuda_graph_enabled,
+                cuda_graph_enabled=(not self.plan_cuda_graph)
+                and self.cuda_graph_enabled,
             )
         with prof_marker("post_update_ops_step_1: copy_input_tensor"):
             self.global_input.outputs["tokens"].tensor.copy_(input_tensor)
@@ -407,6 +407,6 @@ class Pipeline(BasePipeline):
                 next_cumsum_input,
                 next_input_req_idx,
                 next_decode_batch_size,
-                use_cuda_graph=(not self.plan_cuda_graph)
-                and self.is_cuda_graph_enabled,
+                cuda_graph_enabled=(not self.plan_cuda_graph)
+                and self.cuda_graph_enabled,
             )

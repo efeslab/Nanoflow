@@ -68,7 +68,8 @@ class Pipeline(BasePipeline):
         H200_TP4_num_pages = 2048 * 36
         H200_TP8_num_pages = 2048 * 84
         self.kv_pool = DistKVPool(
-            self.num_layers,
+            self.start_layer_idx,
+            self.end_layer_idx,
             self.num_kv_heads,
             self.head_dim,
             H200_TP4_num_pages,
@@ -201,16 +202,6 @@ class Pipeline(BasePipeline):
             self.layer_list)
         self.original_model_operations.append(self.allReduce_d)
 
-        self.getLogits = (
-            GEMM_N_Parallel("GetLogits", self.device)
-            .setWeightName("lm_head.weight")
-            .setShape(self.vocab_size, self.hidden_dim)
-            .setParameter(alpha=1.0, beta=0.0)
-            .last_only()
-        )
-        self.getLogits_layers = self.getLogits.expand_layer(self.layer_list)
-        self.original_model_operations.append(self.getLogits)
-
         self.modelLayerNorm = (
             LayerNorm("ModelLayerNorm", self.device, eps=self.rms_norm_eps)
             .setWeightName("model.norm.weight")
@@ -220,6 +211,16 @@ class Pipeline(BasePipeline):
         self.modelLayerNorm_layers = self.modelLayerNorm.expand_layer(
             self.layer_list)
         self.original_model_operations.append(self.modelLayerNorm)
+
+        self.getLogits = (
+            GEMM_N_Parallel("GetLogits", self.device)
+            .setWeightName("lm_head.weight")
+            .setShape(self.vocab_size, self.hidden_dim)
+            .setParameter(alpha=1.0, beta=0.0)
+            .last_only()
+        )
+        self.getLogits_layers = self.getLogits.expand_layer(self.layer_list)
+        self.original_model_operations.append(self.getLogits)
 
         self.sample = Sampling("Sampling", self.device).setShape(
             self.vocab_size).last_only()
@@ -341,12 +342,12 @@ class Pipeline(BasePipeline):
     def config_algorithm(self) -> None:
         print("Configuring algorithms...")
         params = {
-            "use_cuda_graph": self.is_cuda_graph_enabled,
+            "use_cuda_graph": self.cuda_graph_enabled,
         }
 
         self.gen_embedding.config_tag("cuda", params)
 
-        if self.is_auto_search_enabled:
+        if self.auto_search_enabled:
             super().config_algorithm_auto_search(params)
         else:
             self.layerNormAttn.config_tag("cuda", params)
@@ -387,7 +388,7 @@ class Pipeline(BasePipeline):
     def nanobatch_split(self) -> None:
         op_nanobatch_info_map: dict[str, tuple[NanoOpInfo, ...]] = {}
         extra_links: dict[str, list[tuple[str, bool]]] = {}
-        if self.is_auto_search_enabled:
+        if self.auto_search_enabled:
             for op_basename, op_info in self.profile_result.items():
                 split_info_list = []
                 for nano_op_name, nano_op_info in op_info.items():
@@ -442,8 +443,8 @@ class Pipeline(BasePipeline):
             cumsum_input,
             input_req_idx,
             decode_batch_size,
-            use_cuda_graph=(not self.plan_cuda_graph)
-            and self.is_cuda_graph_enabled,
+            cuda_graph_enabled=(not self.plan_cuda_graph)
+            and self.cuda_graph_enabled,
         )
         self.global_input.outputs["tokens"].tensor.copy_(input_tensor)
         self.ropeAppend.update(cumsum_input, decode_batch_size)

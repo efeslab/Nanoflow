@@ -268,7 +268,7 @@ class BasePipeline(ABC):
     # --------- Base: executor / buffers ---------
     def init_executor(self) -> None:
         print("Initializing executor...")
-        self.executor = Executor(self.all_layer_operations, self.layer_list)
+        self.executor = Executor(self.all_layer_operations, self.layer_list, self.device)
         self.executor.plan_layer_ordering()
 
     def update_allocate_buffers(self) -> None:

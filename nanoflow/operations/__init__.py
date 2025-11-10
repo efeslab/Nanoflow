@@ -28,7 +28,5 @@ from .attention.llamaAttention_torch import (
 
 from .allgather.allgather import AllGather
 from .allreduce.allreduce import AllReduce
-from .send.send import Send
-from .recv.recv import Recv
 
 from .virtualOp.virtual_ops import Copy, Redist

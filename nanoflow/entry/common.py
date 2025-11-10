@@ -96,7 +96,7 @@ def setup_model_and_configs(args: CliArgs) -> ModelArtifacts:
 
     if args.model == "Llama3-70B":
         MODEL_ID = "meta-llama/Meta-Llama-3-70B-Instruct"
-        weight_map = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/28bd9fa9d94b23cb6ded08f92d5672b2aabe695f"
+        weight_map = "/code/hf/hub/models--meta-llama--Meta-Llama-3-70B-Instruct/snapshots/50fd307e57011801c7833c87efa1984ddf2db42f"
         from nanoflow.models.llama3_70B.config_llama3_70B import Llama3_70B_Config as Config
         assert world_size == args.data_parallel_size * args.tensor_parallel_size, "world_size should be equal to data_parallel_size * tensor_parallel_size"
         if args.kvcache_type == "flashinfer":

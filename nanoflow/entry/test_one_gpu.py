@@ -292,7 +292,7 @@ if args.model == "Llama3-8B":
             f"KVCache type {args.kvcache_type} not implemented yet.")
     
     cfg = Config(kv_cache_type=args.kvcache_type)
-    weight_map = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/5f0b02c75b57c5855da9ae460ce51323ea669d8a"
+    weight_map = "/code/hf/hub/models--meta-llama--Meta-Llama-3-8B-Instruct/snapshots/8afb486c1db24fe5011ec46dfbe5b5dccdb575c2"
     auto_search_path = "../auto_search/8B_search_result_large_btz.json"
 elif args.model == "Llama3-70B":
     MODEL_ID = "meta-llama/Meta-Llama-3-70B-Instruct"

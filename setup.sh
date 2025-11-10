@@ -2,7 +2,7 @@ git submodule update --init --recursive
 
 conda install -c gurobi gurobi
 
-pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cu128
+pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 pip install nvtx
 pip install loguru
 pip install transformers

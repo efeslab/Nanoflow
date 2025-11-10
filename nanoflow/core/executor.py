@@ -17,7 +17,7 @@ class ExecHandle(NamedTuple):
 
 class Executor:
     def __init__(
-        self, operations_layers_list: list[Operation_Layer], layer_list: list[int]
+        self, operations_layers_list: list[Operation_Layer], layer_list: list[int], device: str
     ):
         self.operations_layers_list = [
             op_layer for op_layer in operations_layers_list if op_layer.batch_size > 0
@@ -25,6 +25,7 @@ class Executor:
         # self.operations_layers_list = operations_layers_list
         self.layer_list = layer_list
         self.ordered_operations = []
+        self.device = device
 
     def not_this_layer(self, op: Operations, layer: int):
         return (op.first_layer_only and layer != 0) or (
@@ -108,6 +109,11 @@ class Executor:
                     op.wait_cuda_event()
                     op.run()
                     op.record_cuda_event()
+                # if "GetLogits" in op.name and self.device == "cuda:0":
+                #     torch.cuda.synchronize()
+                #     print("Execution finished, saving tensors...")
+                #     print("shape of output:", op.outputs["D"].tensor.shape)
+                #     torch.save(op.outputs["D"].tensor, f"get_logits_output_{self.device}_seq_idx_20.pt")
 
         last_op = self.ordered_graph.nodes[self.ordered_operations[-1]]["op"]
         exec_handle = ExecHandle(src=last_op.inputs["tokens"].tensor, stream=main_stream)
